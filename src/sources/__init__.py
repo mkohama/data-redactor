@@ -6,7 +6,7 @@
 - SAMPLE_TEXT : 動作確認用の組み込みサンプル文
 """
 
-from src.sources.files import load_text_from_file
+from src.sources.files import load_chunks_from_file, load_text_from_file
 
 # 動作確認用サンプル（livedoor ニュースコーパス由来）
 SAMPLE_TEXT = (
@@ -39,4 +39,4 @@ SAMPLE_TEXT = (
     "多いようだが、薫さん曰く「そんな何分前に言われても無理！」らしい。"
 )
 
-__all__ = ["SAMPLE_TEXT", "load_text_from_file"]
+__all__ = ["SAMPLE_TEXT", "load_chunks_from_file", "load_text_from_file"]

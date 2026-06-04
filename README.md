@@ -41,7 +41,8 @@ uv run kb-mcp-server --transport http --port 8000
 ```
 
 UI で URL（既定 `http://localhost:8000/mcp`）を指定し「文書リストを取得」→ 文書を選択すると、
-その全文を取得して解析します（[src/kb_mcp_client.py](src/kb_mcp_client.py) は term-variants から移植）。
+その本文を**チャンク単位で**取得して解析します（kb-mcp は格納時に既にチャンク分割済みなので、
+結合せずそのまま解析する。[src/sources/kb_mcp.py](src/sources/kb_mcp.py) は term-variants から移植）。
 
 ## CLI の使い方
 
@@ -85,11 +86,12 @@ src/
     engine.py            NerEngine / Entity / ExtractionResult（カテゴリ絞り込み込み）
     preprocess.py        テーブル平文化などの前処理
     rendering.py         displaCy 用の色マップ・HTML 生成（表示ヘルパ）
-  sources/             ← 入力アダプタ
-    files.py             ファイル → テキスト（DocumentLoader 経由）
-    kb_mcp.py            kb-mcp からの取得
+  sources/             ← 入力アダプタ（チャンクのリストを返す）
+    files.py             ファイル → チャンク（DocumentLoader + Splitter 経由）
+    kb_mcp.py            kb-mcp からの取得（分割済みチャンクをそのまま使う）
     __init__.py          SAMPLE_TEXT など
-  core/document/       ← テキスト変換ライブラリ（kb-mcp から移植）
+  core/document/       ← テキスト変換＋チャンク分割ライブラリ（kb-mcp から移植）
+  config.py            ← ChunkingConfig（チャンクサイズ設定）
 main.py                ← CLI（薄い表示層）
 app.py                 ← Streamlit UI（薄い表示層）
 ```
@@ -133,6 +135,17 @@ persons = result.filter(["Person"])
 ```powershell
 uv add unstructured
 ```
+
+## チャンク分割について（長文対策）
+
+GiNZA 内部の SudachiPy は **1 回の解析で 49,149 バイト（≒16,000 文字弱）まで**しか扱えず、
+仕様書のような長文（数十〜数百 KB）を丸ごと渡すと `SudachiError: Input is too long` で落ちます。
+
+そこで NER の前に、kb-mcp から移植した `SemanticRAGTextSplitter`
+([src/core/document/text_splitter.py](src/core/document/text_splitter.py)) で
+**ファイルタイプ別にチャンク分割**してから解析します（xlsx は行構造を保ったまま約1000トークン単位など、
+kb-mcp の RAG 格納時と同じ単位）。各チャンクを解析した結果は、文字位置を補正して 1 つにマージします
+（`NerEngine.extract_chunks`）。kb-mcp 経由の文書は格納時に分割済みなので、結合せずそのまま使います。
 
 ## 表（テーブル）の扱い
 

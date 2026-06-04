@@ -16,10 +16,10 @@ import streamlit as st
 
 from src.core.document.document_loader import DocumentLoader
 from src.ner import AVAILABLE_MODELS, NerEngine, build_color_map, render_html
-from src.sources import SAMPLE_TEXT, load_text_from_file
+from src.sources import SAMPLE_TEXT, load_chunks_from_file
 from src.sources.kb_mcp import (
     DEFAULT_KB_MCP_URL,
-    get_document_text_sync,
+    get_document_chunks_sync,
     list_documents_sync,
     suppress_async_generator_errors,
 )
@@ -46,19 +46,19 @@ def get_engine(model_name: str) -> NerEngine:
 
 
 @st.cache_data(show_spinner=False)
-def fetch_kb_document_text(url: str, doc_id: str) -> str:
-    """kb-mcp から指定文書の全文を取得する (url+doc_id でキャッシュ)。"""
-    return get_document_text_sync(doc_id, url)
+def fetch_kb_document_chunks(url: str, doc_id: str) -> list[str]:
+    """kb-mcp から指定文書のチャンク本文を取得する (url+doc_id でキャッシュ)。"""
+    return get_document_chunks_sync(doc_id, url)
 
 
-def extract_text_from_upload(uploaded_file) -> str:
-    """アップロードされたファイルを一時保存し、テキスト化する。"""
+def extract_chunks_from_upload(uploaded_file) -> list[str]:
+    """アップロードされたファイルを一時保存し、チャンク化したテキストを返す。"""
     suffix = Path(uploaded_file.name).suffix
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
         tmp_path = Path(tmp.name)
     try:
-        return load_text_from_file(tmp_path)
+        return load_chunks_from_file(tmp_path)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -70,17 +70,20 @@ def _kb_doc_label(meta: dict) -> str:
     return f"{name}　({path})" if path else str(name)
 
 
-def get_input_text(input_mode: str) -> tuple[str | None, str]:
-    """入力方法に応じてテキストとソース名を返す。"""
+def get_input_chunks(input_mode: str) -> tuple[list[str] | None, str]:
+    """入力方法に応じて解析対象チャンク（テキストのリスト）とソース名を返す。"""
     if input_mode.startswith("📄"):
         uploaded_file = st.file_uploader(
             f"対応形式: {', '.join(SUPPORTED_EXTENSIONS)}",
             type=SUPPORTED_EXTENSIONS,
         )
         if uploaded_file is not None:
-            with st.spinner("ファイルをテキスト化中 ..."):
+            with st.spinner("ファイルをテキスト化・チャンク化中 ..."):
                 try:
-                    return extract_text_from_upload(uploaded_file), uploaded_file.name
+                    return (
+                        extract_chunks_from_upload(uploaded_file),
+                        uploaded_file.name,
+                    )
                 except Exception as e:  # noqa: BLE001
                     st.error(f"ファイルの読み込みに失敗しました: {e}")
         return None, ""
@@ -126,22 +129,24 @@ def get_input_text(input_mode: str) -> tuple[str | None, str]:
         ):
             try:
                 with st.spinner("本文を取得中 ..."):
-                    st.session_state["kb_text"] = fetch_kb_document_text(url, doc_id)
+                    st.session_state["kb_chunks"] = fetch_kb_document_chunks(
+                        url, doc_id
+                    )
                     st.session_state["kb_source"] = _kb_doc_label(meta)
             except Exception as e:  # noqa: BLE001
-                st.session_state.pop("kb_text", None)
+                st.session_state.pop("kb_chunks", None)
                 st.error(f"本文の取得に失敗しました: {e}")
 
         # 取得済みの本文があれば返す (ラベル絞り込み等の再実行でも保持される)
-        if st.session_state.get("kb_text"):
-            return st.session_state["kb_text"], st.session_state.get("kb_source", "")
+        if st.session_state.get("kb_chunks"):
+            return st.session_state["kb_chunks"], st.session_state.get("kb_source", "")
         st.info("文書を選択して [ダウンロードして解析] を押してください。")
         return None, ""
 
-    # テキスト入力
+    # テキスト入力（単一チャンクとして扱う。長文でもエンジン側で安全分割される）
     input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
     if input_text.strip():
-        return input_text, "入力テキスト"
+        return [input_text], "入力テキスト"
     return None, ""
 
 
@@ -179,14 +184,14 @@ def main() -> None:
         horizontal=True,
     )
 
-    text, source_label = get_input_text(input_mode)
+    chunks, source_label = get_input_chunks(input_mode)
 
-    if not text or not text.strip():
+    if not chunks:
         return
 
     # --- 解析（エンジンに委譲。全カテゴリを抽出し、表示側で絞り込む） ---
-    with st.spinner("固有表現を抽出中 ..."):
-        result = engine.extract(text, flatten_tables=flatten_tables)
+    with st.spinner(f"固有表現を抽出中 ...（{len(chunks)} チャンク）"):
+        result = engine.extract_chunks(chunks, flatten_tables=flatten_tables)
 
     if source_label:
         st.subheader(f"解析結果: {source_label}")
@@ -211,6 +216,7 @@ def main() -> None:
             f"{len(shown.entities)} / {len(result.entities)} 件",
         )
         st.metric("解析文字数", f"{len(result.text)} 文字")
+        st.metric("チャンク数", f"{len(chunks)} 件")
 
         # ラベルごとの件数 (全件)
         if result.entities:

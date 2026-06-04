@@ -28,6 +28,16 @@ from src.ner.preprocess import prepare_for_ner
 AVAILABLE_MODELS: tuple[str, ...] = ("ja_ginza_electra", "ja_ginza")
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
 
+# GiNZA が内部で使う SudachiPy のトークナイズ上限（1 回の解析あたりのバイト数）。
+# これを超えると `SudachiError: Input is too long` で落ちる。
+SUDACHI_MAX_BYTES = 49149
+# 上限に対する安全マージン。通常はチャンク分割（src.core.document.text_splitter）で
+# 既に十分小さくなっているが、巨大な 1 チャンク/1 行が来ても確実に通すための保険。
+SAFE_CHUNK_BYTES = 40000
+
+# チャンク結合時の区切り（表示テキスト＝解析テキストの連結に使う）。
+CHUNK_SEPARATOR = "\n\n"
+
 
 @dataclass(frozen=True)
 class Entity:
@@ -90,7 +100,12 @@ class NerEngine:
         labels: Iterable[str] | None = None,
         flatten_tables: bool = False,
     ) -> ExtractionResult:
-        """テキストから固有表現を抽出する。
+        """1 つのテキストから固有表現を抽出する。
+
+        長文（SudachiPy のトークナイズ上限超）でも落ちないよう、内部で
+        バイト数安全なチャンクに分割してから解析する。ファイルや kb-mcp の
+        ように元から複数チャンクに分かれている場合は :meth:`extract_chunks`
+        を使う（kb-mcp と同じ分割単位で解析でき、結果も揃う）。
 
         Args:
             text: 解析対象のテキスト。
@@ -100,20 +115,105 @@ class NerEngine:
         Returns:
             ExtractionResult（解析対象テキストと抽出結果）。
         """
-        if flatten_tables:
-            text = prepare_for_ner(text)
+        return self.extract_chunks([text], labels=labels, flatten_tables=flatten_tables)
 
-        doc = self.nlp(text)
-        entities = tuple(
-            Entity(
-                text=ent.text,
-                label=ent.label_,
-                start=ent.start_char,
-                end=ent.end_char,
-            )
-            for ent in doc.ents
+    def extract_chunks(
+        self,
+        chunks: Iterable[str],
+        *,
+        labels: Iterable[str] | None = None,
+        flatten_tables: bool = False,
+    ) -> ExtractionResult:
+        """複数チャンクから固有表現を抽出し、1 つの結果にマージする。
+
+        各チャンクを個別に解析し、エンティティの文字位置を「全チャンクを
+        :data:`CHUNK_SEPARATOR` で連結したテキスト」基準に補正してまとめる。
+        これにより displaCy 表示（manual モード）がそのまま使える。
+
+        チャンクが SudachiPy の上限（:data:`SUDACHI_MAX_BYTES`）を超える場合は、
+        さらにバイト数安全な小片へ分割してから解析する（保険）。
+
+        Args:
+            chunks: 解析対象チャンクの列（kb-mcp / Splitter の出力など）。
+            labels: 残すカテゴリ（ラベル）。None なら全件。
+            flatten_tables: True なら各チャンクを平文化してから解析する。
+
+        Returns:
+            ExtractionResult（連結した解析テキストと、位置補正済みの抽出結果）。
+        """
+        # 解析する小片を確定（平文化 → バイト数安全分割 → 空片除去）
+        pieces: list[str] = []
+        for chunk in chunks:
+            prepared = prepare_for_ner(chunk) if flatten_tables else chunk
+            pieces.extend(_byte_safe_pieces(prepared))
+        pieces = [p for p in pieces if p.strip()]
+
+        # 小片ごとに NER（nlp.pipe でバッチ処理）し、全文基準にオフセット補正
+        entities: list[Entity] = []
+        offset = 0
+        sep_len = len(CHUNK_SEPARATOR)
+        for piece, doc in zip(pieces, self.nlp.pipe(pieces)):
+            for ent in doc.ents:
+                entities.append(
+                    Entity(
+                        text=ent.text,
+                        label=ent.label_,
+                        start=ent.start_char + offset,
+                        end=ent.end_char + offset,
+                    )
+                )
+            offset += len(piece) + sep_len
+
+        result = ExtractionResult(
+            text=CHUNK_SEPARATOR.join(pieces),
+            entities=tuple(entities),
         )
-        result = ExtractionResult(text=text, entities=entities)
         if labels is not None:
             result = result.filter(labels)
         return result
+
+
+def _byte_safe_pieces(text: str, max_bytes: int = SAFE_CHUNK_BYTES) -> list[str]:
+    """テキストを UTF-8 で ``max_bytes`` 以下の小片に分割する（保険的フォールバック）。
+
+    まず行（``\\n``）境界でまとめ、1 行で超える場合のみ文字単位で強制分割する。
+    通常はチャンク分割で十分小さいため、ここはほぼ素通りする。
+    """
+    if len(text.encode("utf-8")) <= max_bytes:
+        return [text]
+
+    pieces: list[str] = []
+    buf = ""
+    for line in text.split("\n"):
+        candidate = f"{buf}\n{line}" if buf else line
+        if len(candidate.encode("utf-8")) <= max_bytes:
+            buf = candidate
+            continue
+        if buf:
+            pieces.append(buf)
+            buf = ""
+        if len(line.encode("utf-8")) > max_bytes:
+            pieces.extend(_hard_split_by_bytes(line, max_bytes))
+        else:
+            buf = line
+    if buf:
+        pieces.append(buf)
+    return pieces
+
+
+def _hard_split_by_bytes(text: str, max_bytes: int) -> list[str]:
+    """1 行が上限を超える場合に、文字単位でバイト数上限まで詰めて分割する。"""
+    pieces: list[str] = []
+    buf = ""
+    buf_bytes = 0
+    for ch in text:
+        ch_bytes = len(ch.encode("utf-8"))
+        if buf and buf_bytes + ch_bytes > max_bytes:
+            pieces.append(buf)
+            buf = ""
+            buf_bytes = 0
+        buf += ch
+        buf_bytes += ch_bytes
+    if buf:
+        pieces.append(buf)
+    return pieces

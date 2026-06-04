@@ -12,6 +12,7 @@ dependencies = [
     "ja-ginza-electra>=5.2.0",
     "langchain>=0.1.0",
     "langchain-community>=0.1.0",
+    "langchain-text-splitters>=0.0.1",
     "mcp>=0.9.0",
     "numpy<2",
     "openpyxl>=3.1.5",
@@ -23,6 +24,7 @@ dependencies = [
     "spacy>=3.6,<3.8",
     "streamlit>=1.51.0",
     "tabulate>=0.9.0",
+    "tiktoken>=0.5.0",
     "xlrd>=2.0.2",
 ]
 
@@ -41,6 +43,10 @@ module = [
     "langchain_core.*",
     "langchain_community",
     "langchain_community.*",
+    "langchain_text_splitters",
+    "langchain_text_splitters.*",
+    "tiktoken",
+    "tiktoken.*",
     "mcp",
     "mcp.*",
     "pandas",

@@ -31,7 +31,7 @@ from src.ner import (
     render_html,
     to_displacy_data,
 )
-from src.sources import SAMPLE_TEXT, load_text_from_file
+from src.sources import SAMPLE_TEXT, load_chunks_from_file
 
 
 def main() -> None:
@@ -72,19 +72,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # --- 入力テキストの取得 ---
+    # --- 入力チャンクの取得 ---
+    # ファイルは kb-mcp と同じ単位でチャンク化する（長文でも SudachiPy 上限で
+    # 落ちず、検索ヒット単位と結果が揃う）。テキスト/サンプルは 1 チャンク扱い。
     if args.text:
-        text = args.text
+        chunks = [args.text]
     elif args.input:
-        print(f"ファイルをテキスト化中: {args.input}")
-        text = load_text_from_file(args.input)
+        print(f"ファイルをテキスト化・チャンク化中: {args.input}")
+        chunks = load_chunks_from_file(args.input)
+        print(f"チャンク数: {len(chunks)}")
     else:
-        text = SAMPLE_TEXT
+        chunks = [SAMPLE_TEXT]
 
     # --- エンジンで抽出 ---
     print(f"GiNZA モデル ({args.model}) を読み込み中 ...")
     engine = NerEngine(args.model)
-    result = engine.extract(text, labels=args.labels, flatten_tables=args.flatten)
+    result = engine.extract_chunks(
+        chunks, labels=args.labels, flatten_tables=args.flatten
+    )
 
     # --- コンソール出力 ---
     print(f"\n抽出された固有表現: {len(result.entities)} 件\n")
