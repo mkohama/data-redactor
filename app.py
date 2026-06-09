@@ -267,9 +267,9 @@ def _render_by_entity(engine, analysis):
                 "カテゴリ": g.category,
                 "表層": g.surface,
                 "出現": g.count,
-                "ja_ginza": g.vote_label("ja_ginza"),
-                "electra": g.vote_label("ja_ginza_electra"),
-                "Sudachi": g.vote_label("sudachi"),
+                "ja_ginza": g.vote_labels("ja_ginza"),
+                "electra": g.vote_labels("ja_ginza_electra"),
+                "Sudachi": g.vote_labels("sudachi"),
                 "辞書": "○" if g.vote_label("dict") else "",
             }
             for g in groups
@@ -305,9 +305,9 @@ def _render_by_occurrence(engine, analysis):
                 "カテゴリ": c.category,
                 "表層": c.surface,
                 "文脈": _context(analysis.text, c.start, c.end),
-                "ja_ginza": c.vote_label("ja_ginza"),
-                "electra": c.vote_label("ja_ginza_electra"),
-                "Sudachi": c.vote_label("sudachi"),
+                "ja_ginza": c.vote_labels("ja_ginza"),
+                "electra": c.vote_labels("ja_ginza_electra"),
+                "Sudachi": c.vote_labels("sudachi"),
                 "辞書": "○" if c.vote_label("dict") else "",
             }
             for c in cands

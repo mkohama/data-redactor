@@ -96,11 +96,20 @@ class Candidate:
     votes: tuple[tuple[str, str], ...]
 
     def vote_label(self, channel: str) -> str:
-        """指定チャネルの判定ラベルを返す（無ければ空文字）。"""
+        """指定チャネルの判定ラベルを返す（無ければ空文字。先頭1件のみ）。"""
         for ch, label in self.votes:
             if ch == channel:
                 return label
         return ""
+
+    def vote_labels(self, channel: str) -> str:
+        """指定チャネルの全ラベルを ` / ` 連結で返す（重複は畳む）。
+
+        Sudachi は形態素ごとに票が付くので、多トークンの実体（例 姓+名）では
+        ``vote_label`` の先頭1件では足りない。表示用にこちらを使う。
+        """
+        labels = [label for ch, label in self.votes if ch == channel]
+        return " / ".join(dict.fromkeys(labels))
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,11 @@ class CandidateGroup:
             if ch == channel:
                 return label
         return ""
+
+    def vote_labels(self, channel: str) -> str:
+        """指定チャネルの全ラベルを ` / ` 連結で返す（重複は畳む。多トークン Sudachi 用）。"""
+        labels = [label for ch, label in self.votes if ch == channel]
+        return " / ".join(dict.fromkeys(labels))
 
 
 @dataclass(frozen=True)
