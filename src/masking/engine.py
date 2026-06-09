@@ -225,9 +225,22 @@ class MaskingEngine:
         self.engines = [NerEngine(m) for m in (models or AVAILABLE_MODELS)]
 
     def analyze(
-        self, chunks: Iterable[str], *, flatten_tables: bool = False
+        self,
+        chunks: Iterable[str],
+        *,
+        flatten_tables: bool = False,
+        promote: bool = True,
+        extra_terms: Iterable[tuple[str, str]] = (),
     ) -> MaskAnalysis:
-        """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。"""
+        """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。
+
+        2 フェーズ：① 実辞書で確信度づけ → ② 確定/強の clean な実体（＋``extra_terms`` で
+        渡された選択語）を**辞書と同等の語**としてセッション辞書に昇格し、辞書マッチと
+        クラスタ分割を再実行する。これで「ある箇所で確定した語＝全出現で確定」「塊を確定語の
+        境界で分割」が辞書機構の自然な帰結になる（per_entity→per_occurrence の一本化）。
+        ``promote=False`` で昇格を切る（出現ごとモードの同形異義語制御用）。
+        ``extra_terms`` は ``(surface, category)`` の列（UI/CLI の選択語）。
+        """
         chunks = list(chunks)
         per_model = [
             (e.model_name, e.analyze_chunks(chunks, flatten_tables=flatten_tables))
@@ -236,37 +249,45 @@ class MaskingEngine:
         base = per_model[0][1]
         text = base.text
         tokens = base.tokens
-
-        raw: list[Candidate] = []
-
-        # ① マスク辞書（dict 票）
         surfaces = [t.surface for t in tokens]
-        for m in self.dictionary.match(surfaces):
-            start = tokens[m.start_token].start
-            end = tokens[m.end_token - 1].end
-            raw.append(
-                _raw(start, end, text, m.category, ("dict", f"{m.category}(辞書)"))
-            )
 
-        # ② Sudachi 品詞（sudachi 票）
+        # ②③ 辞書に依存しない票（Sudachi 品詞 ∪ NER）。両フェーズで共通なので一度だけ作る。
+        #     Product_Other 系（その他）はノイズ過多のため NER からは除外（埋没社名・商標は辞書で拾う）。
+        other_raw: list[Candidate] = []
         for t in tokens:
             category = _sudachi_category(t.tag)
             if category is not None:
-                raw.append(_raw(t.start, t.end, text, category, ("sudachi", t.tag)))
-
-        # ③ NER エンティティ（モデルごとに別票）。
-        #    Product_Other 系（その他）は変数名・コード・融合ジャーゴンが多くノイズ過多のため**除外**。
-        #    → NER は 人名/社名/地名/連絡先 のラベルのみ候補化。埋没社名・商標は辞書で拾う。
+                other_raw.append(
+                    _raw(t.start, t.end, text, category, ("sudachi", t.tag))
+                )
         for model_name, analysis in per_model:
             for ent in analysis.entities:
                 category = _NER_LABEL_CATEGORY.get(ent.label.upper())
                 if category is None:
                     continue
-                raw.append(
+                other_raw.append(
                     _raw(ent.start, ent.end, text, category, (model_name, ent.label))
                 )
 
-        clusters = _cluster(text, raw)
+        def dict_raw(dictionary: MaskDictionary) -> list[Candidate]:
+            out: list[Candidate] = []
+            for m in dictionary.match(surfaces):
+                start = tokens[m.start_token].start
+                end = tokens[m.end_token - 1].end
+                out.append(
+                    _raw(start, end, text, m.category, ("dict", f"{m.category}(辞書)"))
+                )
+            return out
+
+        # フェーズ① 実辞書で確信度づけ
+        clusters = _cluster(text, dict_raw(self.dictionary) + other_raw)
+
+        # フェーズ② 確定/強の clean な実体＋選択語を昇格し、辞書マッチ＋分割を再実行
+        if promote:
+            session = _augment_with_confirmed(self.dictionary, clusters, extra_terms)
+            if session is not self.dictionary:
+                clusters = _cluster(text, dict_raw(session) + other_raw)
+
         return MaskAnalysis(
             text=text,
             tokens=tokens,
@@ -410,21 +431,100 @@ def _has_dict_vote(c: Candidate) -> bool:
     return any(ch == "dict" for ch, _ in c.votes)
 
 
+# 昇格対象から外す「区切り」を含む表層（塊＝複数実体）。中黒/スラッシュ/カンマ/空白など。
+_SEPARATOR_CHARS = "・･/／,，、　 \t×"
+
+
+def _has_separator(surface: str) -> bool:
+    return any(ch in _SEPARATOR_CHARS for ch in surface)
+
+
+def _augment_with_confirmed(
+    dictionary: MaskDictionary,
+    clusters: list[Candidate],
+    extra_terms: Iterable[tuple[str, str]],
+) -> MaskDictionary:
+    """確定/強の clean な実体＋選択語を「辞書同等の語」に昇格した一時辞書を返す。
+
+    昇格しないもの：地名/その他（自動マスク対象外）、区切りを含む表層（塊＝再び 1 つに固まる）。
+    選択語（``extra_terms``）はユーザーの明示判断なのでカテゴリ条件は課さない（区切りのみ除外）。
+    昇格が無ければ元の辞書をそのまま返す。
+    """
+    additions: dict[str, tuple[str, str]] = {}
+    for c in clusters:
+        if c.confidence not in AUTO_MASK_CONFIDENCE:
+            continue
+        if c.category in ("地名", "その他") or _has_separator(c.surface):
+            continue
+        key = normalize(c.surface)
+        if key:
+            additions.setdefault(key, (c.surface, c.category))
+    for surface, category in extra_terms:
+        key = normalize(surface)
+        if key and not _has_separator(surface):
+            additions.setdefault(key, (surface, category))
+    if not additions:
+        return dictionary
+    return dictionary.augmented(additions)
+
+
+def _within_any(s: int, e: int, spans: list[tuple[int, int]]) -> bool:
+    return any(ds <= s and e <= de for ds, de in spans)
+
+
+def _spans_across(c: Candidate, dict_spans: list[tuple[int, int]]) -> bool:
+    """c が少なくとも 1 つの辞書スパンを「またぐ」（より広く覆う）＝橋渡し。"""
+    return any(
+        c.start <= ds and de <= c.end and (c.start, c.end) != (ds, de)
+        for ds, de in dict_spans
+    )
+
+
+def _segment_spans(members: list[Candidate]) -> list[tuple[int, int]]:
+    """メンバー群を重なりでまとめた区間（min start, max end）の列にする。"""
+    if not members:
+        return []
+    ordered = sorted(members, key=lambda m: (m.start, m.end))
+    out: list[tuple[int, int]] = []
+    s, e = ordered[0].start, ordered[0].end
+    for m in ordered[1:]:
+        if m.start < e:
+            e = max(e, m.end)
+        else:
+            out.append((s, e))
+            s, e = m.start, m.end
+    out.append((s, e))
+    return out
+
+
 def _resolve_cluster(
     text: str, start: int, end: int, members: list[Candidate]
 ) -> list[Candidate]:
-    """1 クラスタを確信度づけ。辞書一致があれば辞書スパンごとに分割して返す。
+    """1 クラスタを確信度づけ。辞書一致があれば辞書境界で分割して返す。
 
-    辞書スパンに**収まる票だけ**を各辞書候補へ集める＝橋渡ししている広い NER スパンは
-    捨てる（その実体を辞書境界で分けてマスクできる）。辞書一致が無ければ 1 件に統合。
+    辞書一致が無ければ 1 件に統合。辞書一致があれば：
+    - 各辞書スパンを独立候補に（粗い NER スパンに飲み込ませない。例 `SONY・Nikon・Canon`→3分割）。
+    - 辞書スパンを「またがず・埋もれてもいない」辞書外メンバー（＝列挙に取り残された実体。例
+      `SONY|Nikon|Canon` の昇格後の Nikon）も区間にまとめて出す。普通名詞のみの隙間（例 `小浜出身`
+      の `出身`＝Sudachi 候補が無い）は出さない。
+    - 各 emit スパンには**重なる全メンバーの票**を集める＝橋渡しの広い NER 票も確信度に効かせる。
     """
     dict_members = [m for m in members if _has_dict_vote(m)]
     if not dict_members:
         return [_merge(text, start, end, members)]
+    dict_spans = sorted({(m.start, m.end) for m in dict_members})
+    leftover = [
+        m
+        for m in members
+        if not _has_dict_vote(m)
+        and not _spans_across(m, dict_spans)
+        and not _within_any(m.start, m.end, dict_spans)
+    ]
+    emit = sorted(set(dict_spans) | set(_segment_spans(leftover)))
     out: list[Candidate] = []
-    for dm in dict_members:
-        covered = [m for m in members if dm.start <= m.start and m.end <= dm.end]
-        out.append(_merge(text, dm.start, dm.end, covered))
+    for s, e in emit:
+        overlap = [m for m in members if m.start < e and s < m.end]
+        out.append(_merge(text, s, e, overlap))
     return out
 
 
