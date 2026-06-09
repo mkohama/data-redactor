@@ -5,12 +5,14 @@
 
 確信度（カテゴリごとの「票数」で決める。票＝そのカテゴリへ投票した別チャネル数。
 チャネル＝辞書/Sudachi/NER(ja_ginza)/NER(electra)。同一チャネルの複数形態素は 1 票）：
-- カテゴリ … by-cat 最多票のカテゴリ（同票のみ _CAT_PRIORITY でタイブレーク）。辞書一致は無条件で確定。
-- 確定 … 辞書一致
-- 強  … 解決カテゴリへ 2 チャネル以上（人名/社名/商標/連絡先）
+- カテゴリ … by-cat 最多票のカテゴリ（同票のみ _CAT_PRIORITY でタイブレーク）。
+- 確定 … **実辞書（名簿）一致のみ**。昇格（session）は確定にしない＝確定の出所は常に実辞書。
+- 強  … 解決カテゴリへ 2 チャネル以上（人名/社名/商標/連絡先）、または**昇格（session）票**を持つ。
 - 中  … 解決カテゴリへ 1 チャネルのみ（同上）
 - 弱  … カテゴリが 地名/その他（票数問わず。誤分類で人物が紛れるので必ずレビュー）
 
+昇格（session）＝ phase1 で強になった語を「確認済み」として phase2 に再注入したもの（§ analyze）。
+実辞書（dict）とは別チャネルにし、**確定でなく強**に留める（確定＝名簿、強＝検出/確認済み、の区別を保つ）。
 各票は自分のカテゴリにそのまま入れる（特例なし）。Sudachi 固有名詞-一般 は「その他」のまま扱い、
 NER 社名票で社名へ昇格させたりしない（未知の英字トークン＝Reject 等の汎用語を強にしないため）。
 単独モデルしか拾わない社名は中→レビュー（曖昧は人手）。重要な社名・商標は辞書が主役。
@@ -191,9 +193,10 @@ def vote_category(channel: str, label: str) -> str | None:
     """監査用：1 票 (channel, label) がどのカテゴリに投票したかを引く。
 
     候補生成（analyze）でカテゴリを決めるのと同じ対応関係を使う（重複ロジックを作らない）。
-    辞書票のラベルは ``"社名(辞書)"`` 形式なので接頭のカテゴリを取り出す。
+    辞書票のラベルは ``"社名(辞書)"``、昇格票（session）は ``"社名(確認済)"`` 形式なので
+    接頭のカテゴリを取り出す。
     """
-    if channel == "dict":
+    if channel in ("dict", "session"):
         return label.split("(", 1)[0] or None
     if channel == "sudachi":
         return _sudachi_category(label)
@@ -278,24 +281,31 @@ class MaskingEngine:
                     _raw(ent.start, ent.end, text, category, (model_name, ent.label))
                 )
 
-        def dict_raw(dictionary: MaskDictionary) -> list[Candidate]:
+        def matches_raw(
+            dictionary: MaskDictionary, channel: str, suffix: str
+        ) -> list[Candidate]:
             out: list[Candidate] = []
             for m in dictionary.match(surfaces):
                 start = tokens[m.start_token].start
                 end = tokens[m.end_token - 1].end
                 out.append(
-                    _raw(start, end, text, m.category, ("dict", f"{m.category}(辞書)"))
+                    _raw(start, end, text, m.category, (channel, f"{m.category}{suffix}"))
                 )
             return out
 
-        # フェーズ① 実辞書で確信度づけ
-        clusters = _cluster(text, dict_raw(self.dictionary) + other_raw)
+        # 実辞書の票（確定の根拠）。両フェーズで共通。
+        dict_raw = matches_raw(self.dictionary, "dict", "(辞書)")
 
-        # フェーズ② 確定/強の clean な実体＋選択語を昇格し、辞書マッチ＋分割を再実行
+        # フェーズ① 実辞書で確信度づけ
+        clusters = _cluster(text, dict_raw + other_raw)
+
+        # フェーズ② 強の clean な語＋選択語を「確認済み」として昇格し、分割と確信度づけを再実行。
+        #   昇格票は実辞書とは**別チャネル `session`**（→ 確定ではなく強）。確定は実辞書のみ。
         if promote:
-            session = _augment_with_confirmed(self.dictionary, clusters, extra_terms)
-            if session is not self.dictionary:
-                clusters = _cluster(text, dict_raw(session) + other_raw)
+            promoted = _promoted_dictionary(self.dictionary, clusters, extra_terms)
+            if promoted is not None:
+                session_raw = matches_raw(promoted, "session", "(確認済)")
+                clusters = _cluster(text, dict_raw + session_raw + other_raw)
 
         return MaskAnalysis(
             text=text,
@@ -437,7 +447,13 @@ def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
 
 
 def _has_dict_vote(c: Candidate) -> bool:
+    """実辞書票を持つか（確定の判定用。session=昇格は含めない）。"""
     return any(ch == "dict" for ch, _ in c.votes)
+
+
+def _has_anchor_vote(c: Candidate) -> bool:
+    """分割の足場になる票を持つか＝実辞書 or 昇格（session）。確定済みの実体の境界で割る。"""
+    return any(ch in ("dict", "session") for ch, _ in c.votes)
 
 
 # 昇格対象から外す「区切り」を含む表層（塊＝複数実体）。中黒/スラッシュ/カンマ/空白など。
@@ -448,20 +464,22 @@ def _has_separator(surface: str) -> bool:
     return any(ch in _SEPARATOR_CHARS for ch in surface)
 
 
-def _augment_with_confirmed(
+def _promoted_dictionary(
     dictionary: MaskDictionary,
     clusters: list[Candidate],
     extra_terms: Iterable[tuple[str, str]],
-) -> MaskDictionary:
-    """確定/強の clean な実体＋選択語を「辞書同等の語」に昇格した一時辞書を返す。
+) -> MaskDictionary | None:
+    """強の clean な語＋選択語だけを集めた「確認済み」辞書を返す（実辞書とは別）。
 
-    昇格しないもの：地名/その他（自動マスク対象外）、区切りを含む表層（塊＝再び 1 つに固まる）。
-    選択語（``extra_terms``）はユーザーの明示判断なのでカテゴリ条件は課さない（区切りのみ除外）。
-    昇格が無ければ元の辞書をそのまま返す。
+    これは**確定ではなく強**として再注入するためのもの（実辞書 = 確定 と区別）。
+    対象は phase1 で **強**になった語（＝実辞書に無い・NER/Sudachi で確認できた語）と
+    選択語。確定（= 実辞書）は実辞書自身が全出現を拾うので昇格不要。
+    昇格しないもの：地名/その他、区切りを含む表層（塊＝再び 1 つに固まる）。
+    何も無ければ None。
     """
     additions: dict[str, tuple[str, str]] = {}
     for c in clusters:
-        if c.confidence not in AUTO_MASK_CONFIDENCE:
+        if c.confidence != "強":
             continue
         if c.category in ("地名", "その他") or _has_separator(c.surface):
             continue
@@ -472,9 +490,7 @@ def _augment_with_confirmed(
         key = normalize(surface)
         if key and not _has_separator(surface):
             additions.setdefault(key, (surface, category))
-    if not additions:
-        return dictionary
-    return dictionary.augmented(additions)
+    return MaskDictionary(additions) if additions else None
 
 
 def _within_any(s: int, e: int, spans: list[tuple[int, int]]) -> bool:
@@ -511,25 +527,25 @@ def _resolve_cluster(
 ) -> list[Candidate]:
     """1 クラスタを確信度づけ。辞書一致があれば辞書境界で分割して返す。
 
-    辞書一致が無ければ 1 件に統合。辞書一致があれば：
-    - 各辞書スパンを独立候補に（粗い NER スパンに飲み込ませない。例 `SONY・Nikon・Canon`→3分割）。
-    - 辞書スパンを「またがず・埋もれてもいない」辞書外メンバー（＝列挙に取り残された実体。例
+    足場（辞書 or 昇格＝session）が無ければ 1 件に統合。足場があれば：
+    - 各足場スパンを独立候補に（粗い NER スパンに飲み込ませない。例 `SONY・Nikon・Canon`→3分割）。
+    - 足場スパンを「またがず・埋もれてもいない」その他メンバー（＝列挙に取り残された実体。例
       `SONY|Nikon|Canon` の昇格後の Nikon）も区間にまとめて出す。普通名詞のみの隙間（例 `小浜出身`
       の `出身`＝Sudachi 候補が無い）は出さない。
     - 各 emit スパンには**重なる全メンバーの票**を集める＝橋渡しの広い NER 票も確信度に効かせる。
     """
-    dict_members = [m for m in members if _has_dict_vote(m)]
-    if not dict_members:
+    anchor_members = [m for m in members if _has_anchor_vote(m)]
+    if not anchor_members:
         return [_merge(text, start, end, members)]
-    dict_spans = sorted({(m.start, m.end) for m in dict_members})
+    anchor_spans = sorted({(m.start, m.end) for m in anchor_members})
     leftover = [
         m
         for m in members
-        if not _has_dict_vote(m)
-        and not _spans_across(m, dict_spans)
-        and not _within_any(m.start, m.end, dict_spans)
+        if not _has_anchor_vote(m)
+        and not _spans_across(m, anchor_spans)
+        and not _within_any(m.start, m.end, anchor_spans)
     ]
-    emit = sorted(set(dict_spans) | set(_segment_spans(leftover)))
+    emit = sorted(set(anchor_spans) | set(_segment_spans(leftover)))
     out: list[Candidate] = []
     for s, e in emit:
         overlap = [m for m in members if m.start < e and s < m.end]
@@ -553,6 +569,13 @@ def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candida
         return Candidate(start, end, text[start:end], members[0].category, "中", votes)
     category = _top_category(counts)
     confidence = _confidence(category, counts)
+    # 昇格（session＝他箇所で確認済み）票がそのカテゴリにあれば最低でも強（自動マスク）。
+    #   実辞書ではないので確定にはしない＝確定は実辞書だけ、という区別を保つ。
+    if category not in ("地名", "その他") and any(
+        ch == "session" and vote_category(ch, label) == category
+        for ch, label in votes
+    ):
+        confidence = "強"
     return Candidate(start, end, text[start:end], category, confidence, votes)
 
 

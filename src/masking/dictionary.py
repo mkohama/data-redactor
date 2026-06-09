@@ -91,15 +91,6 @@ class MaskDictionary:
     def __len__(self) -> int:
         return len(self._map)
 
-    def augmented(self, additions: dict[str, tuple[str, str]]) -> MaskDictionary:
-        """確定/強の語などを「辞書同等の語」として加えた一時辞書を返す。
-
-        キーは正規化表層、値は ``(canonical, category)``。**既存の実辞書エントリを優先**する
-        （別表記の canonical 統一を壊さない）。セッション中の昇格（per_entity→per_occurrence の
-        一本化）に使う。:meth:`MaskingEngine.analyze` の第 2 フェーズから呼ばれる。
-        """
-        return MaskDictionary({**additions, **self._map})
-
     def embedded(self, token_surfaces: list[str]) -> list[tuple[int, str, str]]:
         """辞書語を**部分文字列として内包するが、トークン単位では一致しない**トークンを返す。
 
