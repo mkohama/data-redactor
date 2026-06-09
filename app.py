@@ -436,7 +436,13 @@ def main() -> None:
                 format_func=lambda m: f"{m}（{MODEL_DESCRIPTIONS.get(m, '')}）",
             )
             dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
-            flatten_tables = st.toggle("テーブルを平文化する", value=False)
+            flatten_tables = st.toggle(
+                "テーブルを平文化して検出",
+                value=False,
+                help="表の `|` を句読点に直して**検出精度を上げる**処理（検出専用）。"
+                "マスク結果は `|` を含む原文のまま＝セル内の語だけが伏せ字になり、"
+                "`|` は区切りとして残ります（出力の体裁を保持）。",
+            )
         else:
             model_name = st.selectbox(
                 "モデル",
