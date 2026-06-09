@@ -91,6 +91,34 @@ class MaskDictionary:
     def __len__(self) -> int:
         return len(self._map)
 
+    def augmented(self, additions: dict[str, tuple[str, str]]) -> MaskDictionary:
+        """確定/強の語などを「辞書同等の語」として加えた一時辞書を返す。
+
+        キーは正規化表層、値は ``(canonical, category)``。**既存の実辞書エントリを優先**する
+        （別表記の canonical 統一を壊さない）。セッション中の昇格（per_entity→per_occurrence の
+        一本化）に使う。:meth:`MaskingEngine.analyze` の第 2 フェーズから呼ばれる。
+        """
+        return MaskDictionary({**additions, **self._map})
+
+    def embedded(self, token_surfaces: list[str]) -> list[tuple[int, str, str]]:
+        """辞書語を**部分文字列として内包するが、トークン単位では一致しない**トークンを返す。
+
+        返り値は ``(token_index, canonical, category)``。``SmashMark``（商標 Smash を内包）や
+        ``SonyXXX``（社名 Sony を内包）のように、トークン単位照合では取りこぼす語の**監査用**。
+        トークン全体一致（``match`` で拾える分）や、雑音になりやすい 1 文字辞書語は除く。
+        """
+        out: list[tuple[int, str, str]] = []
+        seen: set[tuple[int, str]] = set()
+        for i, surface in enumerate(token_surfaces):
+            ns = normalize(surface)
+            if ns in self._map:
+                continue  # トークン全体が辞書語＝match() で拾える（漏れではない）
+            for key, (canonical, category) in self._map.items():
+                if len(key) >= 2 and key in ns and (i, canonical) not in seen:
+                    seen.add((i, canonical))
+                    out.append((i, canonical, category))
+        return out
+
     def match(self, token_surfaces: list[str]) -> list[DictMatch]:
         """正規化トークン列に対し、各位置で最長一致の語を拾う（重なりなし）。"""
         norm = [normalize(s) for s in token_surfaces]

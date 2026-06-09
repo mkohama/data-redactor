@@ -25,6 +25,7 @@ from spacy import displacy
 
 from src.masking import (
     CandidateGroup,
+    MaskAnalysis,
     MaskDictionary,
     MaskingEngine,
     tally_votes,
@@ -342,6 +343,40 @@ def _audit_lines(groups: list[CandidateGroup], *, with_surface: bool) -> list[st
     return lines
 
 
+def _embedded_leak_lines(
+    dictionary: MaskDictionary, analysis: MaskAnalysis, *, with_surface: bool
+) -> list[str]:
+    """辞書語を部分文字列として内包する未一致トークン（SmashMark/SonyXXX 型）を列挙する。
+
+    トークン単位辞書では取りこぼす＝**真の漏れ候補**。Stage 3（部分一致）の要否を実データで
+    見極めるための監査。表層・canonical は機密なので、redacted ではカテゴリ別件数のみ出す。
+
+    対象は **商標・社名のみ**（部分一致したいのはこの distinctive 語）。人名・地名は意図的に
+    token 単位のままなので除外する（`小浜市⊃小浜` のような `〇〇市/〇〇区` ノイズを出さない）。
+    """
+    target = {"商標", "社名"}
+    hits = [
+        h
+        for h in dictionary.embedded([t.surface for t in analysis.tokens])
+        if h[2] in target
+    ]
+    if not hits:
+        return ["  （なし。対象=商標/社名。人名・地名は token 単位のため対象外）"]
+    if not with_surface:
+        by_cat = Counter(cat for _, _, cat in hits)
+        return [
+            "  ※表層・辞書語は伏せています（--audit-surface で表示）。カテゴリ別件数:",
+            *(f"    {cat}: {n} 箇所" for cat, n in by_cat.most_common()),
+        ]
+    agg = Counter(
+        (analysis.tokens[i].surface, canonical, cat) for i, canonical, cat in hits
+    )
+    return [
+        f"  {tok!r} ⊃ {canonical!r} [{cat}]  ×{n}"
+        for (tok, canonical, cat), n in agg.most_common()
+    ]
+
+
 @cli.command()
 @click.argument(
     "file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path)
@@ -435,13 +470,27 @@ def mask(
 
     if audit or audit_surface or audit_out is not None:
         lines = _audit_lines(groups, with_surface=audit_surface)
-        report = "監査（全候補・票の分布）\n" + "\n".join(lines)
+        leak_lines = _embedded_leak_lines(
+            dictionary, analysis, with_surface=audit_surface
+        )
+        report = (
+            "監査（全候補・票の分布）\n"
+            + "\n".join(lines)
+            + "\n\n部分文字列の取りこぼし候補（辞書語を内包する未一致トークン）\n"
+            + "\n".join(leak_lines)
+        )
         if audit_surface:
             click.echo(
                 "\n⚠ 表層を含む監査出力です（機密）。チャット等に貼らないでください。"
             )
         click.echo("\n===== 監査（全候補・票の分布） =====")
         for line in lines:
+            click.echo(line)
+        click.echo(
+            "\n===== 部分文字列の取りこぼし候補"
+            "（辞書語を内包する未一致トークン＝SmashMark/SonyXXX 型） ====="
+        )
+        for line in leak_lines:
             click.echo(line)
         if audit_out is not None:
             audit_out.write_text(report + "\n", encoding="utf-8")
