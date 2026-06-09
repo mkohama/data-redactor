@@ -3,11 +3,15 @@
 候補生成（NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書）→ 確信度づけ → 選択された候補で
 マスク適用（文書内収集で全出現に展開）。設計の背景は docs-dev/対策仮説.md を参照。
 
-確信度（一致した手がかりの「票数」で決める。票＝辞書/Sudachi/NER(ja_ginza)/NER(electra)）：
+確信度（カテゴリごとの「票数」で決める。票＝そのカテゴリへ投票した別チャネル数。
+チャネル＝辞書/Sudachi/NER(ja_ginza)/NER(electra)。同一チャネルの複数形態素は 1 票）：
+- カテゴリ … by-cat 最多票のカテゴリ（同票のみ _CAT_PRIORITY でタイブレーク）。辞書一致は無条件で確定。
 - 確定 … 辞書一致
-- 強  … 2票以上、かつカテゴリが 人名/社名/商標/連絡先
-- 中  … 1票のみ、かつカテゴリが 人名/社名/商標/連絡先
-- 弱  … カテゴリが 地名（誤分類で人物が紛れるので必ずレビュー）
+- 強  … 解決カテゴリへ 2 チャネル以上（人名/社名/商標/連絡先）
+- 中  … 解決カテゴリへ 1 チャネルのみ（同上）
+- 弱  … カテゴリが 地名/その他（票数問わず。誤分類で人物が紛れるので必ずレビュー）
+- 折衷 … Sudachi 固有名詞-一般(その他) は、同スパンに NER の社名票があるとき社名票として数える
+         （Sony 等の有名企業名を NER 単独でも強で拾う。長崎=地名は sudachi が地名なので無関係＝過信は起きない）。
 
 使い方：
     analysis = engine.analyze(chunks)          # 全候補（確信度・各票の判定つき）
@@ -17,6 +21,7 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -170,6 +175,37 @@ def vote_category(channel: str, label: str) -> str | None:
     return _NER_LABEL_CATEGORY.get(label.upper())
 
 
+def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
+    """票集合 → カテゴリ別の「チャネル数」。確信度・カテゴリ決定はこの集計で行う。
+
+    票＝チャネル（同一チャネルの複数形態素＝姓+名 等は 1 票に畳む）。
+    折衷ルール：Sudachi 固有名詞-一般(その他) は、同スパンに NER の社名票があるとき
+    社名票として数える（Sony 等の有名企業名を NER 単独でも拾う。長崎=地名は sudachi が
+    地名なので無関係＝過信にはならない）。
+    """
+    votes = list(votes)
+    has_ner_company = any(
+        ch not in ("dict", "sudachi") and vote_category(ch, label) == "社名"
+        for ch, label in votes
+    )
+    channels_by_cat: dict[str, set[str]] = defaultdict(set)
+    for ch, label in votes:
+        cat = vote_category(ch, label)
+        if cat is None:
+            continue
+        if cat == "その他" and ch == "sudachi" and has_ner_company:
+            cat = "社名"
+        channels_by_cat[cat].add(ch)
+    return Counter({cat: len(chs) for cat, chs in channels_by_cat.items()})
+
+
+def _top_category(counts: Counter[str]) -> str:
+    """カテゴリ別票数から代表カテゴリを選ぶ（最多票。同票のみ _CAT_PRIORITY でタイブレーク）。"""
+    best = max(counts.values())
+    tied = [c for c, n in counts.items() if n == best]
+    return next((c for c in _CAT_PRIORITY if c in tied), tied[0])
+
+
 class MaskingEngine:
     """マスキング検出エンジン。NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書で候補を作る。"""
 
@@ -313,14 +349,15 @@ def _raw(
     return Candidate(start, end, text[start:end], category, "", (vote,))
 
 
-def _confidence(category: str, channels: set[str]) -> str:
-    """票（チャネル）の集合とカテゴリから確信度を決める。"""
-    if "dict" in channels:
-        return "確定"
+def _confidence(category: str, counts: Counter[str]) -> str:
+    """解決カテゴリと「カテゴリ別票数」から確信度を決める（辞書一致は _merge 側で確定扱い）。
+
+    強/中は **解決カテゴリへ投票したチャネル数**で決める（他カテゴリの票では水増ししない）。
+    地名/その他は誤分類で人物が紛れるため票数によらず弱（必ずレビュー）。
+    """
     if category in ("地名", "その他"):
         return "弱"
-    non_dict = channels - {"dict"}
-    return "強" if len(non_dict) >= 2 else "中"
+    return "強" if counts.get(category, 0) >= 2 else "中"
 
 
 def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
@@ -344,14 +381,20 @@ def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
 
 def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candidate:
     votes = tuple(dict.fromkeys(v for m in members for v in m.votes))
-    channels = {ch for ch, _ in votes}
-    dict_cats = [m.category for m in members if any(c == "dict" for c, _ in m.votes)]
+    # 辞書票があれば辞書のカテゴリで確定（NER/Sudachi の票数によらず最優先）。
+    dict_cats = [
+        cat
+        for ch, label in votes
+        if ch == "dict" and (cat := vote_category(ch, label)) is not None
+    ]
     if dict_cats:
-        category = dict_cats[0]
-    else:
-        cats = {m.category for m in members}
-        category = next((c for c in _CAT_PRIORITY if c in cats), members[0].category)
-    confidence = _confidence(category, channels)
+        return Candidate(start, end, text[start:end], dict_cats[0], "確定", votes)
+    # 票が無ければ（理論上稀）カテゴリ未確定の中扱いで残す。
+    counts = tally_votes(votes)
+    if not counts:
+        return Candidate(start, end, text[start:end], members[0].category, "中", votes)
+    category = _top_category(counts)
+    confidence = _confidence(category, counts)
     return Candidate(start, end, text[start:end], category, confidence, votes)
 
 

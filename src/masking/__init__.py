@@ -15,6 +15,7 @@ from src.masking.engine import (
     MaskEntry,
     MaskingEngine,
     MaskResult,
+    tally_votes,
     vote_category,
 )
 
@@ -30,4 +31,5 @@ __all__ = [
     "DictMatch",
     "normalize",
     "vote_category",
+    "tally_votes",
 ]

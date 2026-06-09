@@ -23,7 +23,12 @@ from pathlib import Path
 import click
 from spacy import displacy
 
-from src.masking import CandidateGroup, MaskDictionary, MaskingEngine, vote_category
+from src.masking import (
+    CandidateGroup,
+    MaskDictionary,
+    MaskingEngine,
+    tally_votes,
+)
 from src.ner import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
@@ -314,17 +319,13 @@ def debug(
 def _audit_lines(groups: list[CandidateGroup], *, with_surface: bool) -> list[str]:
     """各実体について「解決結果・票の分布・全票」を 1 行にする（確信度づけの監査用）。
 
-    票の分布 (by-cat) は各票 (channel, label) を vote_category でカテゴリに引き直して数える。
-    解決カテゴリが最多票でない／票が複数カテゴリに割れている実体には ``split⚠`` を付ける。
-    with_surface=True のときだけ表層を末尾に付ける（機密。共有禁止）。
+    票の分布 (by-cat) は engine.tally_votes と同じ集計（カテゴリ別チャネル数・折衷ルール適用）を使う
+    ＝確信度づけの実ロジックを監査できる。解決カテゴリが最多票でない／票が複数カテゴリに割れている
+    実体には ``split⚠`` を付ける。with_surface=True のときだけ表層を末尾に付ける（機密。共有禁止）。
     """
     lines: list[str] = []
     for i, g in enumerate(groups, start=1):
-        by_cat: Counter[str] = Counter()
-        for ch, label in g.votes:
-            cat = vote_category(ch, label)
-            if cat is not None:
-                by_cat[cat] += 1
+        by_cat = tally_votes(g.votes)
         cat_str = "{" + ", ".join(f"{c}:{n}" for c, n in by_cat.most_common()) + "}"
         votes_str = " ".join(f"{ch}={label}" for ch, label in g.votes)
         split = len(by_cat) > 1 or (
