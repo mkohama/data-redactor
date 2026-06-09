@@ -396,7 +396,10 @@ def _embedded_leak_lines(
     help="使うモデル（複数指定可。既定は両モデル併用）。",
 )
 @click.option(
-    "--flatten", is_flag=True, help="Markdown テーブルを平文化してから解析する。"
+    "--flatten/--no-flatten",
+    default=True,
+    show_default=True,
+    help="テーブルを平文化して検出（検出専用。マスクは | 入り原文に当てる＝既定 ON・表が無ければ無影響）。",
 )
 @click.option(
     "--out",

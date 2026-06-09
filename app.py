@@ -438,10 +438,10 @@ def main() -> None:
             dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
             flatten_tables = st.toggle(
                 "テーブルを平文化して検出",
-                value=False,
+                value=True,
                 help="表の `|` を句読点に直して**検出精度を上げる**処理（検出専用）。"
                 "マスク結果は `|` を含む原文のまま＝セル内の語だけが伏せ字になり、"
-                "`|` は区切りとして残ります（出力の体裁を保持）。",
+                "`|` は区切りとして残ります（出力の体裁を保持）。既定 ON（表が無ければ無影響）。",
             )
         else:
             model_name = st.selectbox(
