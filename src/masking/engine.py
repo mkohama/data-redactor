@@ -289,7 +289,9 @@ class MaskingEngine:
                 start = tokens[m.start_token].start
                 end = tokens[m.end_token - 1].end
                 out.append(
-                    _raw(start, end, text, m.category, (channel, f"{m.category}{suffix}"))
+                    _raw(
+                        start, end, text, m.category, (channel, f"{m.category}{suffix}")
+                    )
                 )
             return out
 
@@ -572,8 +574,7 @@ def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candida
     # 昇格（session＝他箇所で確認済み）票がそのカテゴリにあれば最低でも強（自動マスク）。
     #   実辞書ではないので確定にはしない＝確定は実辞書だけ、という区別を保つ。
     if category not in ("地名", "その他") and any(
-        ch == "session" and vote_category(ch, label) == category
-        for ch, label in votes
+        ch == "session" and vote_category(ch, label) == category for ch, label in votes
     ):
         confidence = "強"
     return Candidate(start, end, text[start:end], category, confidence, votes)

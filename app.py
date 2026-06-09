@@ -257,12 +257,12 @@ _CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3}
 
 
 def _confidence_label(confidence: str) -> str:
-    """並び順の番号を前置した表示用ラベル（例 '1 確定'）。
+    """並び順の番号を前置した表示用ラベル（例 '1 : 確定'）。
 
     列ヘッダで文字列ソートしても 確定→強→中→弱 の順になるようにする
     （番号なしだと文字コード順で「中→確定」になってしまう）。1=確定 … 4=弱。
     """
-    return f"{_CONFIDENCE_ORDER.get(confidence, 9) + 1} {confidence}"
+    return f"{_CONFIDENCE_ORDER.get(confidence, 9) + 1} : {confidence}"
 
 
 def _sorted_by_confidence(items, *, key):
