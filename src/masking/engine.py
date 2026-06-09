@@ -10,8 +10,10 @@
 - 強  … 解決カテゴリへ 2 チャネル以上（人名/社名/商標/連絡先）
 - 中  … 解決カテゴリへ 1 チャネルのみ（同上）
 - 弱  … カテゴリが 地名/その他（票数問わず。誤分類で人物が紛れるので必ずレビュー）
-- 折衷 … Sudachi 固有名詞-一般(その他) は、同スパンに NER の社名票があるとき社名票として数える
-         （Sony 等の有名企業名を NER 単独でも強で拾う。長崎=地名は sudachi が地名なので無関係＝過信は起きない）。
+
+各票は自分のカテゴリにそのまま入れる（特例なし）。Sudachi 固有名詞-一般 は「その他」のまま扱い、
+NER 社名票で社名へ昇格させたりしない（未知の英字トークン＝Reject 等の汎用語を強にしないため）。
+単独モデルしか拾わない社名は中→レビュー（曖昧は人手）。重要な社名・商標は辞書が主役。
 
 使い方：
     analysis = engine.analyze(chunks)          # 全候補（確信度・各票の判定つき）
@@ -185,24 +187,15 @@ def vote_category(channel: str, label: str) -> str | None:
 def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
     """票集合 → カテゴリ別の「チャネル数」。確信度・カテゴリ決定はこの集計で行う。
 
-    票＝チャネル（同一チャネルの複数形態素＝姓+名 等は 1 票に畳む）。
-    折衷ルール：Sudachi 固有名詞-一般(その他) は、同スパンに NER の社名票があるとき
-    社名票として数える（Sony 等の有名企業名を NER 単独でも拾う。長崎=地名は sudachi が
-    地名なので無関係＝過信にはならない）。
+    票＝チャネル（同一チャネルの複数形態素＝姓+名 等は 1 票に畳む）。各票は自分のカテゴリに
+    そのまま入れる（特例なし）。Sudachi 固有名詞-一般 は「その他」のまま
+    （未知の英字トークンを社名に水増ししない＝Reject 等の汎用語を強にしない）。
     """
-    votes = list(votes)
-    has_ner_company = any(
-        ch not in ("dict", "sudachi") and vote_category(ch, label) == "社名"
-        for ch, label in votes
-    )
     channels_by_cat: dict[str, set[str]] = defaultdict(set)
     for ch, label in votes:
         cat = vote_category(ch, label)
-        if cat is None:
-            continue
-        if cat == "その他" and ch == "sudachi" and has_ner_company:
-            cat = "社名"
-        channels_by_cat[cat].add(ch)
+        if cat is not None:
+            channels_by_cat[cat].add(ch)
     return Counter({cat: len(chs) for cat, chs in channels_by_cat.items()})
 
 
