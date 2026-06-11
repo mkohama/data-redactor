@@ -397,56 +397,55 @@ def _render_by_occurrence(engine, analysis):
 
 
 def render_dict_editor(dict_path: str) -> None:
-    """マスク辞書の確認・追加・編集・保存 UI（マスキングモード内の expander）。
+    """マスク辞書の確認・追加・編集・保存 UI（独立タブ）。
 
     行を編集/追加/削除して保存すると `data/mask_dict.yaml`（dict_path）へ書き出す。
     「置換」列に値を入れると、その実体のマスク後の伏せ字を固定できる（空なら自動採番）。
     """
-    with st.expander("🗂 マスク辞書（確認・追加・編集・保存）", expanded=False):
-        st.caption(
-            "カテゴリ / 代表表記 / 別名（カンマ区切り）/ 置換（任意。空なら `[社1]` 等を自動採番）。"
-            "行の追加・削除も可。**保存先はローカルの辞書ファイル**（機密・git 管理外）。"
-        )
-        path = Path(dict_path)
-        entries = load_entries(path) if path.exists() else []
-        rows = [
+    st.caption(
+        "カテゴリ / 代表表記 / 別名（カンマ区切り）/ 置換（任意。空なら `[社1]` 等を自動採番）。"
+        "行の追加・削除も可。**保存先はローカルの辞書ファイル**（機密・git 管理外）。"
+    )
+    path = Path(dict_path)
+    entries = load_entries(path) if path.exists() else []
+    rows = [
+        {
+            "カテゴリ": e["category"],
+            "代表表記": e["canonical"],
+            "別名": ", ".join(e["aliases"]),
+            "置換": e["mask"],
+        }
+        for e in entries
+    ]
+    df = pd.DataFrame(rows, columns=["カテゴリ", "代表表記", "別名", "置換"])
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        width="stretch",
+        height=500,
+        key="dict_editor",
+        column_config={
+            "カテゴリ": st.column_config.SelectboxColumn(
+                "カテゴリ", options=["社名", "商標", "人名"], default="社名"
+            ),
+            "置換": st.column_config.TextColumn("置換", help="空なら自動採番"),
+        },
+    )
+    if st.button("💾 辞書を保存", type="primary", key="dict_save"):
+        new_entries = [
             {
-                "カテゴリ": e["category"],
-                "代表表記": e["canonical"],
-                "別名": ", ".join(e["aliases"]),
-                "置換": e["mask"],
+                "category": (r["カテゴリ"] or "社名"),
+                "canonical": str(r["代表表記"] or "").strip(),
+                "aliases": [
+                    a.strip() for a in str(r["別名"] or "").split(",") if a.strip()
+                ],
+                "mask": str(r["置換"] or "").strip(),
             }
-            for e in entries
+            for _, r in edited.iterrows()
         ]
-        df = pd.DataFrame(rows, columns=["カテゴリ", "代表表記", "別名", "置換"])
-        edited = st.data_editor(
-            df,
-            num_rows="dynamic",
-            width="stretch",
-            key="dict_editor",
-            column_config={
-                "カテゴリ": st.column_config.SelectboxColumn(
-                    "カテゴリ", options=["社名", "商標", "人名"], default="社名"
-                ),
-                "置換": st.column_config.TextColumn("置換", help="空なら自動採番"),
-            },
-        )
-        if st.button("💾 辞書を保存", type="primary", key="dict_save"):
-            new_entries = [
-                {
-                    "category": (r["カテゴリ"] or "社名"),
-                    "canonical": str(r["代表表記"] or "").strip(),
-                    "aliases": [
-                        a.strip() for a in str(r["別名"] or "").split(",") if a.strip()
-                    ],
-                    "mask": str(r["置換"] or "").strip(),
-                }
-                for _, r in edited.iterrows()
-            ]
-            kept = [e for e in new_entries if e["canonical"]]
-            save_entries(path, kept)
-            st.success(f"保存しました: {path}（{len(kept)} 件）")
-            st.rerun()
+        kept = [e for e in new_entries if e["canonical"]]
+        save_entries(path, kept)
+        st.success(f"保存しました: {path}（{len(kept)} 件）")
 
 
 def render_masking(
@@ -458,7 +457,6 @@ def render_masking(
     dict_path: str,
 ) -> None:
     """マスキングモードの表示。候補をチェックで選び（確定/強は初期 ON）、選んだ分をマスクする。"""
-    render_dict_editor(dict_path)
     engine = get_masking_engine(tuple(models), dict_path)
     with st.spinner(f"検出中 ...（{len(chunks)} チャンク）"):
         analysis = engine.analyze(chunks, flatten_tables=flatten_tables)
@@ -545,10 +543,23 @@ def main() -> None:
 
     mode = st.radio(
         "モード",
-        ["🔍 固有表現抽出 (NER)", "🔒 マスキング"],
+        ["🔍 固有表現抽出 (NER)", "🔒 マスキング", "🗂 マスク辞書"],
         horizontal=True,
     )
     masking_mode = mode.startswith("🔒")
+    dict_mode = mode.startswith("🗂")
+
+    # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
+    if dict_mode:
+        with st.sidebar:
+            st.header("⚙️ 設定")
+            dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
+        st.title("🗂 マスク辞書")
+        st.caption(
+            "マスキングで確定マスクする社名・商標・社員名の名簿。確認・追加・編集・保存ができます。"
+        )
+        render_dict_editor(dict_path)
+        return
 
     # --- サイドバー（モード別の設定） ---
     with st.sidebar:
