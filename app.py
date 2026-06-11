@@ -175,6 +175,34 @@ def get_input_chunks(input_mode: str) -> tuple[list[str] | None, str]:
     return None, ""
 
 
+def _render_extracted_text(chunks: list[str]) -> None:
+    """テキスト化された平文（チャンク連結）を確認用に表示する。
+
+    ファイルや kb-mcp は元がバイナリ/外部なので、何が抽出されたかを目視・ダウンロードできるようにする。
+    チャンク境界は ``--- チャンク境界 ---`` で示す（解析単位の確認用）。
+    """
+    text = "\n\n".join(chunks)
+    boundary = "\n\n----- チャンク境界 -----\n\n"
+    shown = boundary.join(chunks)
+    with st.expander(
+        f"📄 テキスト化結果（平文 / {len(chunks)} チャンク・{len(text)} 文字）を確認",
+        expanded=False,
+    ):
+        st.text_area(
+            "抽出テキスト",
+            value=shown,
+            height=300,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+        st.download_button(
+            "⬇ 平文をダウンロード",
+            text,
+            file_name="extracted.txt",
+            mime="text/plain",
+        )
+
+
 def render_ner(
     chunks: list[str],
     source_label: str,
@@ -507,6 +535,10 @@ def main() -> None:
     chunks, source_label = get_input_chunks(input_mode)
     if not chunks:
         return
+
+    # ファイル/kb-mcp はテキスト化を経るので、抽出された平文を確認できるようにする。
+    if not input_mode.startswith("✏️"):
+        _render_extracted_text(chunks)
 
     if masking_mode:
         if not models:
