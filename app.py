@@ -472,9 +472,7 @@ def render_dict_editor(dict_path: str) -> None:
             {
                 "category": cell(r["カテゴリ"]) or "社名",
                 "canonical": cell(r["代表表記"]),
-                "aliases": [
-                    a.strip() for a in cell(r["別名"]).split(",") if a.strip()
-                ],
+                "aliases": [a.strip() for a in cell(r["別名"]).split(",") if a.strip()],
                 "mask": cell(r["置換"]),
             }
             for _, r in edited.iterrows()
@@ -575,18 +573,18 @@ def main() -> None:
 
     mode = st.radio(
         "モード",
-        ["🔍 固有表現抽出 (NER)", "🔒 マスキング", "🗂 マスク辞書"],
+        ["🔍 固有表現抽出 (NER)", "🔒 マスキング", "📒 マスク辞書"],
         horizontal=True,
     )
     masking_mode = mode.startswith("🔒")
-    dict_mode = mode.startswith("🗂")
+    dict_mode = mode.startswith("📒")
 
     # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
     if dict_mode:
         with st.sidebar:
             st.header("⚙️ 設定")
             dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
-        st.title("🗂 マスク辞書")
+        st.title("📒 マスク辞書")
         st.caption(
             "マスキングで確定マスクする社名・商標・社員名の名簿。確認・追加・編集・保存ができます。"
         )
