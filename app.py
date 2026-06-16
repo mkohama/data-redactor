@@ -24,6 +24,7 @@ from src.masking import (
     MaskAllowlist,
     MaskDictionary,
     MaskingEngine,
+    apply_allowlist_to_analysis,
     load_allowlist_entries,
     load_entries,
     save_allowlist_entries,
@@ -215,6 +216,23 @@ def _dict_signature(dict_path: str) -> tuple[str, float | None]:
         return (str(p), p.stat().st_mtime) if p.exists() else (str(p), None)
     except OSError:
         return (str(p), None)
+
+
+def _masking_settings_sig(
+    models: list[str], flatten_tables: bool, dict_path: str, allowlist_path: str
+) -> tuple:
+    """マスキングの設定署名（モデル/平文化/辞書 mtime/除外リスト mtime）。
+
+    再解析バナーの判定に使う。除外を「再解析なし」で反映したときに、この署名で stored を
+    更新しておけばバナーが誤って出ない（main と同じ式を使うため共通化）。
+    """
+    return (
+        "masking",
+        tuple(models),
+        flatten_tables,
+        _dict_signature(dict_path),
+        _dict_signature(allowlist_path),
+    )
 
 
 def _readable_text_block(
@@ -437,20 +455,30 @@ def _render_by_entity(engine, analysis, confidences):
             for g in groups
         ]
     )
-    edited = st.data_editor(
-        table,
-        hide_index=True,
-        width="stretch",
-        disabled=[c for c in table.columns if c not in ("マスク", "除外")],
-        column_config={
-            "マスク": st.column_config.CheckboxColumn("マスク"),
-            "除外": st.column_config.CheckboxColumn(
-                "除外",
-                help="チェックして下のボタンで除外リストへ。以後どの文書でも候補外に。",
-            ),
-        },
-        key="mask_entity",
+    st.caption(
+        "チェックしてから **[✅ マスクを反映]** を押すと結果に反映されます"
+        "（チェック中は再描画しません＝画面が先頭に飛びません）。"
     )
+    # st.form で囲む：チェックのたびに再実行せず、ボタン押下時だけまとめて適用する
+    # （data_editor は編集ごとに rerun し画面が先頭へ飛ぶため。フォームで抑止）。
+    with st.form("mask_entity_form"):
+        edited = st.data_editor(
+            table,
+            hide_index=True,
+            width="stretch",
+            disabled=[c for c in table.columns if c not in ("マスク", "除外")],
+            column_config={
+                "マスク": st.column_config.CheckboxColumn("マスク"),
+                "除外": st.column_config.CheckboxColumn(
+                    "除外",
+                    help="チェックして [🚫 選択を除外リストへ] を押すと候補外に。",
+                ),
+            },
+            key="mask_entity",
+        )
+        col_a, col_b = st.columns([1, 1])
+        col_a.form_submit_button("✅ マスクを反映", type="primary")
+        excl = col_b.form_submit_button("🚫 選択を除外リストへ")
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
     # 除外チェックした行はマスクしない（除外が優先）。
@@ -461,7 +489,7 @@ def _render_by_entity(engine, analysis, confidences):
         for m in g.members
     ]
     to_exclude = [g.surface for g, ex in zip(groups, excludes) if ex]
-    return engine.apply(analysis, selected, expand=True), to_exclude
+    return engine.apply(analysis, selected, expand=True), to_exclude, excl
 
 
 def _render_by_occurrence(engine, analysis, confidences):
@@ -478,6 +506,10 @@ def _render_by_occurrence(engine, analysis, confidences):
     )
     if hidden:
         cap += f"（確信度フィルタで {hidden} 出現を非表示）"
+    cap += (
+        " チェックしてから **[✅ マスクを反映]** を押すと反映されます"
+        "（チェック中は再描画しません）。"
+    )
     st.caption(cap)
     table = pd.DataFrame(
         [
@@ -496,25 +528,29 @@ def _render_by_occurrence(engine, analysis, confidences):
             for c in cands
         ]
     )
-    edited = st.data_editor(
-        table,
-        hide_index=True,
-        width="stretch",
-        disabled=[c for c in table.columns if c not in ("マスク", "除外")],
-        column_config={
-            "マスク": st.column_config.CheckboxColumn("マスク"),
-            "除外": st.column_config.CheckboxColumn(
-                "除外",
-                help="チェックして下のボタンで除外リストへ。以後どの文書でも候補外に。",
-            ),
-        },
-        key="mask_occurrence",
-    )
+    with st.form("mask_occurrence_form"):
+        edited = st.data_editor(
+            table,
+            hide_index=True,
+            width="stretch",
+            disabled=[c for c in table.columns if c not in ("マスク", "除外")],
+            column_config={
+                "マスク": st.column_config.CheckboxColumn("マスク"),
+                "除外": st.column_config.CheckboxColumn(
+                    "除外",
+                    help="チェックして [🚫 選択を除外リストへ] を押すと候補外に。",
+                ),
+            },
+            key="mask_occurrence",
+        )
+        col_a, col_b = st.columns([1, 1])
+        col_a.form_submit_button("✅ マスクを反映", type="primary")
+        excl = col_b.form_submit_button("🚫 選択を除外リストへ")
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
     selected = [c for c, on, ex in zip(cands, masks, excludes) if on and not ex]
     to_exclude = [c.surface for c, ex in zip(cands, excludes) if ex]
-    return engine.apply(analysis, selected, expand=False), to_exclude
+    return engine.apply(analysis, selected, expand=False), to_exclude, excl
 
 
 def render_dict_editor(dict_path: str) -> None:
@@ -672,26 +708,33 @@ def render_masking_result(stored: dict) -> None:
     by_entity = unit.startswith("実体")
 
     if by_entity:
-        result, to_exclude = _render_by_entity(engine, analysis, confidences)
+        result, to_exclude, excl_clicked = _render_by_entity(
+            engine, analysis, confidences
+        )
     else:
-        result, to_exclude = _render_by_occurrence(engine, analysis, confidences)
+        result, to_exclude, excl_clicked = _render_by_occurrence(
+            engine, analysis, confidences
+        )
 
-    # 「除外」チェックした語を除外リストへ追記（1 文書で登録→他文書でも候補外に）。
-    if to_exclude:
-        if st.button(
-            f"🚫 選択した {len(to_exclude)} 件を除外リストへ追加",
-            key="add_to_allowlist",
-            help="チェックした語を除外リスト(YAML)に追記。再解析すると「除外」に落ちます。",
-        ):
-            path = Path(allowlist_path)
-            current = load_allowlist_entries(path) if path.exists() else []
-            merged = current + [s for s in to_exclude if s not in current]
-            save_allowlist_entries(path, merged)
-            added = len(merged) - len(current)
-            st.success(
-                f"除外リストに {added} 件追加しました（計 {len(merged)} 件）: {path}。"
-                "**[🔍 解析する]** で再解析すると反映されます。"
-            )
+    # 「除外」チェックを除外リストへ追記し、**再解析なしで**この文書にも即反映する
+    # （NER は再実行せず、保存済み解析の候補の confidence を書き換えるだけ）。
+    if excl_clicked and to_exclude:
+        path = Path(allowlist_path)
+        current = load_allowlist_entries(path) if path.exists() else []
+        merged = current + [s for s in to_exclude if s not in current]
+        save_allowlist_entries(path, merged)
+        added = len(merged) - len(current)
+        # 現在の解析結果にその場で適用（再解析不要）。署名も更新してバナーを出さない。
+        stored["analysis"] = apply_allowlist_to_analysis(
+            analysis, MaskAllowlist.load(path)
+        )
+        stored["settings_sig"] = _masking_settings_sig(
+            models, stored["flatten"], dict_path, allowlist_path
+        )
+        st.success(
+            f"除外リストに {added} 件追加し、再解析なしで反映しました（計 {len(merged)} 件）。"
+        )
+        st.rerun()
 
     # --- 結果（色付き表示 / マスク済み / 元テキスト） ---
     col_main, col_side = st.columns([3, 1])
@@ -748,44 +791,61 @@ def render_masking_result(stored: dict) -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="GiNZA NER / マスキング", page_icon="🔒", layout="wide"
+        page_title="data-redactor — マスキング", page_icon="🔒", layout="wide"
     )
 
-    mode = st.radio(
-        "モード",
-        ["🔍 固有表現抽出 (NER)", "🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト"],
-        horizontal=True,
-    )
-    masking_mode = mode.startswith("🔒")
-    dict_mode = mode.startswith("📒")
-    allowlist_mode = mode.startswith("🚫")
-
-    # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
-    if dict_mode:
-        with st.sidebar:
-            st.header("⚙️ 設定")
-            dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
-        st.title("📒 マスク辞書")
-        st.caption(
-            "マスキングで確定マスクする社名・商標・社員名の名簿。確認・追加・編集・保存ができます。"
+    # --- 参考ツール（サブ扱い）：NER ビューア ---
+    # 本ツールの主機能はマスキング。NER は GiNZA の固有表現を確認する参考ツールとして
+    # サイドバーのトグルで開く。トグルを**先に**読み、ON のときは上部の「モード」行を出さない
+    # （NER に専念＝無関係なモード選択を見せない）。
+    with st.sidebar:
+        ner_tool = st.toggle(
+            "🔍 NER ビューア（参考）",
+            value=False,
+            help="主機能はマスキング。これは GiNZA の固有表現を確認する参考ツール"
+            "（OFF でマスキングに戻る）。",
         )
-        render_dict_editor(dict_path)
-        return
 
-    # --- 除外リストモード（文書入力なし。除外語の確認・編集・保存だけ） ---
-    if allowlist_mode:
-        with st.sidebar:
-            st.header("⚙️ 設定")
-            allowlist_path = st.text_input(
-                "除外リスト (YAML)", value=str(_DEFAULT_ALLOWLIST)
+    dict_mode = allowlist_mode = False
+    if ner_tool:
+        masking_mode = False  # モード行は出さず、共通フローを NER 経路で通す
+    else:
+        mode = st.radio(
+            "モード",
+            ["🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト"],
+            horizontal=True,
+        )
+        masking_mode = mode.startswith("🔒")
+        dict_mode = mode.startswith("📒")
+        allowlist_mode = mode.startswith("🚫")
+        # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
+        if dict_mode:
+            with st.sidebar:
+                st.header("⚙️ 設定")
+                dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
+            st.title("📒 マスク辞書")
+            st.caption(
+                "マスキングで確定マスクする社名・商標・社員名の名簿。"
+                "確認・追加・編集・保存ができます。"
             )
-        st.title("🚫 除外リスト")
-        st.caption(
-            "マスク**しない**語の名簿。NER の誤検出（社内コード・変数名・汎用語など）をここに入れると、"
-            "以後どの文書でも候補が「除外」へ落ちます。**辞書・連絡先（確定）は上書きしません**（recall 安全）。"
-        )
-        render_allowlist_editor(allowlist_path)
-        return
+            render_dict_editor(dict_path)
+            return
+
+        # --- 除外リストモード（文書入力なし。除外語の確認・編集・保存だけ） ---
+        if allowlist_mode:
+            with st.sidebar:
+                st.header("⚙️ 設定")
+                allowlist_path = st.text_input(
+                    "除外リスト (YAML)", value=str(_DEFAULT_ALLOWLIST)
+                )
+            st.title("🚫 除外リスト")
+            st.caption(
+                "マスク**しない**語の名簿。NER の誤検出（社内コード・変数名・汎用語など）を"
+                "ここに入れると、以後どの文書でも候補が「除外」へ落ちます。"
+                "**辞書・連絡先（確定）は上書きしません**（recall 安全）。"
+            )
+            render_allowlist_editor(allowlist_path)
+            return
 
     # --- サイドバー（モード別の設定） ---
     with st.sidebar:
@@ -834,10 +894,11 @@ def main() -> None:
             "機密情報（人名・社名・商標など）を検出してマスクします。"
         )
     else:
-        st.title("🔍 GiNZA 固有表現抽出 (NER)")
+        st.title("🔍 NER ビューア（参考）")
         st.caption(
-            "テキスト入力 / ファイルアップロード / kb-mcp から選択すると、"
-            "GiNZA で固有表現を抽出して色付きで表示します。"
+            "**参考ツール**（本機能はマスキング）。テキスト入力 / ファイル / kb-mcp の文書を "
+            "GiNZA で固有表現抽出し色付き表示します。サイドバーの『NER ビューア』を OFF で"
+            "マスキングに戻ります。"
         )
 
     # --- 入力（両モード共通。ここでは描画だけ。解析はボタン押下時のみ） ---
@@ -860,12 +921,8 @@ def main() -> None:
     #    状態を捨てる）ので入力署名は不明になるが、設定署名は比較でき辞書変更を検知できる。
     #  - 入力署名（input_id）は入力が確定しているときだけ比較する。
     if masking_mode:
-        settings_sig: tuple = (
-            "masking",
-            tuple(models),
-            flatten_tables,
-            _dict_signature(dict_path),
-            _dict_signature(allowlist_path),
+        settings_sig: tuple = _masking_settings_sig(
+            models, flatten_tables, dict_path, allowlist_path
         )
     else:
         settings_sig = ("ner", model_name, flatten_tables)

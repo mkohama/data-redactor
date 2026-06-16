@@ -26,6 +26,8 @@ from src.masking.engine import (
     MaskEntry,
     MaskingEngine,
     MaskResult,
+    apply_allowlist,
+    apply_allowlist_to_analysis,
     tally_votes,
     vote_category,
 )
@@ -48,4 +50,6 @@ __all__ = [
     "MaskAllowlist",
     "load_allowlist_entries",
     "save_allowlist_entries",
+    "apply_allowlist",
+    "apply_allowlist_to_analysis",
 ]

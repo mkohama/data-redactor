@@ -413,18 +413,8 @@ class MaskingEngine:
         ]
 
         # 除外リスト(allowlist)：人が「機密でない」と登録した語を「除外」へ落とす。
-        #   recall 安全：**検出由来（確定でない）かつ辞書票なし**のみ対象＝辞書/連絡先(確定)は守る。
         if allowlist is not None:
-            clusters = [
-                (
-                    replace(c, confidence="除外")
-                    if c.confidence != "確定"
-                    and not _has_dict_vote(c)
-                    and c.surface in allowlist
-                    else c
-                )
-                for c in clusters
-            ]
+            clusters = apply_allowlist(clusters, allowlist)
 
         return MaskAnalysis(
             text=text,
@@ -637,6 +627,41 @@ def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
 def _has_dict_vote(c: Candidate) -> bool:
     """実辞書票を持つか（確定の判定用。session=昇格は含めない）。"""
     return any(ch == "dict" for ch, _ in c.votes)
+
+
+def apply_allowlist(
+    candidates: Iterable[Candidate], allowlist: MaskAllowlist
+) -> list[Candidate]:
+    """除外リスト一致の候補を「除外」へ落とす（**解析をやり直さず**候補だけ書き換える）。
+
+    recall 安全：**検出由来（確定でない）かつ辞書票なし**のみ対象＝辞書一致・連絡先 regex（確定）は
+    上書きしない。``analyze`` の内部でも、UI が確定済み解析へ後から除外を反映するときも、この同一
+    ロジックを使う（重複を作らない）。
+    """
+    if not allowlist:
+        return list(candidates)
+    return [
+        (
+            replace(c, confidence="除外")
+            if c.confidence != "確定"
+            and not _has_dict_vote(c)
+            and c.surface in allowlist
+            else c
+        )
+        for c in candidates
+    ]
+
+
+def apply_allowlist_to_analysis(
+    analysis: MaskAnalysis, allowlist: MaskAllowlist
+) -> MaskAnalysis:
+    """解析結果（候補）に除外リストを後から適用した新しい :class:`MaskAnalysis` を返す。
+
+    NER は再実行しない（候補の confidence を書き換えるだけ）＝除外の反映が即座で済む。
+    """
+    return replace(
+        analysis, candidates=tuple(apply_allowlist(analysis.candidates, allowlist))
+    )
 
 
 def _has_anchor_vote(c: Candidate) -> bool:
