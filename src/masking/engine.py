@@ -96,16 +96,20 @@ _NER_LABEL_CATEGORY: dict[str, str] = {
 # メールはドメインに辞書社名（exmotion 等）を内包するため、**1 件まるごと**を 1 候補にして
 # 辞書による部分マスク（`x@[社名].co.jp` の体裁崩れ）を防ぐ（_contact_candidates で他候補を退ける）。
 #
-# パターンは WHATWG / Ruby URI::MailTo::EMAIL_REGEXP に準拠（recall 重視で標準に寄せる）。
-# ただし 2 点だけ用途に合わせて調整：
+# パターンは WHATWG / Ruby URI::MailTo::EMAIL_REGEXP をベースに、用途に合わせて 3 点調整：
 #  ① アンカー（^…$ / \A…\z）は付けない＝文中に埋め込まれたメールを finditer で拾うため。
 #  ② ローカル部の許容文字から **`|` を除外**＝本ツールは `|` 区切りの表を扱い（flatten OFF 時は
 #     原文に `|` が残る）、`|x@…|` の先頭 `|` まで飲み込んで表が壊れるのを防ぐ。実在メールで
 #     `|` を含むものはほぼ無く recall 損失はない（WHATWG 原文は `{|}` を含む）。
+#  ③ ドメインは **ドット付き＋英字 TLD（2 文字以上）を必須**にする。WHATWG/RFC は `local@host`
+#     （`user@localhost` のような TLD 無しの社内ホスト）も許すが、業務文書の実在メールは必ず
+#     ドット付きドメイン（`xxx@会社.co.jp`）。TLD 無しを許すと社内ジャーゴン `SmashMark@TP` や
+#     `有効性@TP` 等を「メール」と誤検出する。TLD 無し/数字のみ TLD を捨てて誤検出を断つ
+#     （`user@localhost` 等は落ちるが業務文書ではほぼ無い）。
 _EMAIL_RE = re.compile(
     r"[a-zA-Z0-9.!#$%&'*+/=?^_`{}~-]+"
-    r"@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
-    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
+    r"@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
+    r"[a-zA-Z]{2,}"
 )
 _CONTACT_PATTERNS: tuple[re.Pattern[str], ...] = (_EMAIL_RE,)
 
