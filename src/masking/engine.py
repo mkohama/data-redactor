@@ -348,9 +348,12 @@ class MaskingEngine:
                 category = _NER_LABEL_CATEGORY.get(ent.label.upper())
                 if category is None:
                     continue
-                other_raw.append(
-                    _raw(ent.start, ent.end, text, category, (model_name, ent.label))
-                )
+                # NER スパンを `、`/`。`/改行で分割（実在名に出ない＝セル/文をまたいだ融合の人工物。
+                #   例 平文化セル境界の `N、D`）。各片に同じ NER 票を付ける。融合でも実体を取りこぼさない。
+                for sp_s, sp_e in _split_on_separators(text, ent.start, ent.end):
+                    other_raw.append(
+                        _raw(sp_s, sp_e, text, category, (model_name, ent.label))
+                    )
 
         def matches_raw(
             dictionary: MaskDictionary, channel: str, suffix: str
@@ -507,6 +510,30 @@ def _raw(
 ) -> Candidate:
     """確信度未確定の生候補（confidence はクラスタ時に決める）。"""
     return Candidate(start, end, text[start:end], category, "", (vote,))
+
+
+# NER スパンを割る文字＝実在の人名・社名に決して現れない区切り（平文化が注入する `、`/`。`、
+# 改行＝セル/文/チャンクの境界）。これらを含むスパンは「またいで融合した塊」なので片へ分ける。
+_SPAN_SPLIT_CHARS = frozenset("、。\n")
+
+
+def _split_on_separators(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    """スパン [start,end) を ``_SPAN_SPLIT_CHARS`` で分割し、非空な片の (start,end) を返す。
+
+    区切りを含まなければ元の 1 片をそのまま返す（無回帰）。区切り文字自身は片に含めない。
+    """
+    spans: list[tuple[int, int]] = []
+    seg_start: int | None = None
+    for i in range(start, end):
+        if text[i] in _SPAN_SPLIT_CHARS:
+            if seg_start is not None:
+                spans.append((seg_start, i))
+                seg_start = None
+        elif seg_start is None:
+            seg_start = i
+    if seg_start is not None:
+        spans.append((seg_start, end))
+    return spans
 
 
 def _looks_like_code(surface: str) -> bool:
