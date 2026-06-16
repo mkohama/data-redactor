@@ -1,7 +1,7 @@
 """チャンク分割の設定（kb-mcp から移植・チャンク設定のみ抜粋）。
 
 kb-mcp 本体の `src/config.py` は埋め込み・ストレージ等も含む大きな設定だが、
-extract-ner では NER 前のチャンク分割にしか使わないため、`SemanticRAGTextSplitter`
+data-redactor では NER 前のチャンク分割にしか使わないため、`SemanticRAGTextSplitter`
 が必要とする `ChunkingConfig` / `FileTypeChunkingSettings` だけを移植している。
 値（chunk_size / chunk_overlap）は kb-mcp と同一にして、RAG 格納時と同じ単位で
 チャンクされるようにしている（chunk_size はトークン数＝tiktoken cl100k_base）。

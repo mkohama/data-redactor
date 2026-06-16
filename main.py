@@ -1,6 +1,6 @@
 """後方互換のためのエントリ。実体は src.cli（統一サブコマンド CLI）。
 
-推奨は ``uv run extract-ner <サブコマンド>``。本ファイル経由でも同じことができる::
+推奨は ``uv run data-redactor <サブコマンド>``。本ファイル経由でも同じことができる::
 
     uv run main.py ui                 # Streamlit UI を起動
     uv run main.py ner <file> --open  # ファイル/テキストを NER → HTML 表示

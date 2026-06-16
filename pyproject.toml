@@ -1,7 +1,7 @@
 [project]
-name = "extract-ner"
+name = "data-redactor"
 version = "0.1.0"
-description = "Add your description here"
+description = "GiNZA (spaCy) ベースの日本語ドキュメント機密マスキング（NER＋辞書＋正規表現）"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.scripts]
-extract-ner = "src.cli:main"
+data-redactor = "src.cli:main"
 
 [build-system]
 requires = ["hatchling"]

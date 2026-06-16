@@ -1,4 +1,4 @@
-# extract-ner
+# data-redactor
 
 GiNZA (`ja_ginza`) で日本語の固有表現抽出 (NER) を実行し、spaCy の displaCy で
 色付きハイライト表示する HTML を生成するプログラムです。

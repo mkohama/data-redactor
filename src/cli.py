@@ -1,12 +1,12 @@
-"""extract-ner の統一コマンドラインインタフェース（薄い表示層）。
+"""data-redactor の統一コマンドラインインタフェース（薄い表示層）。
 
 低レベルな ``uv run main.py ...`` / ``uv run streamlit run app.py`` の代わりに、
-1 つのエントリポイント ``extract-ner`` にサブコマンドをぶら下げる。
+1 つのエントリポイント ``data-redactor`` にサブコマンドをぶら下げる。
 
-    uv run extract-ner ui                 # Streamlit UI を起動
-    uv run extract-ner ner <file>         # ファイル/テキストを NER → HTML 表示
-    uv run extract-ner debug <file>       # トークンの品詞 / NER ラベルを観察
-    uv run extract-ner check              # 品質ゲート（ruff + mypy）
+    uv run data-redactor ui                 # Streamlit UI を起動
+    uv run data-redactor ner <file>         # ファイル/テキストを NER → HTML 表示
+    uv run data-redactor debug <file>       # トークンの品詞 / NER ラベルを観察
+    uv run data-redactor check              # 品質ゲート（ruff + mypy）
 
 実際の抽出は src.ner.NerEngine が担当する。本ファイルは入力取得・引数処理・
 コンソール出力・displaCy / Streamlit への受け渡しだけを行う。
@@ -155,7 +155,7 @@ def cli() -> None:
 def ui(streamlit_args: tuple[str, ...]) -> None:
     """Streamlit UI を起動する（`streamlit run app.py` のラッパ）。
 
-    追加引数はそのまま streamlit に渡す。例: `extract-ner ui --server.port 8502`
+    追加引数はそのまま streamlit に渡す。例: `data-redactor ui --server.port 8502`
     """
     app = _ROOT / "app.py"
     cmd = [sys.executable, "-m", "streamlit", "run", str(app), *streamlit_args]
