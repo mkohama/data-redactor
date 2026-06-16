@@ -6,6 +6,11 @@
     MaskDictionary : マスク辞書（社名・商標・人名の登録リスト）
 """
 
+from src.masking.allowlist import (
+    MaskAllowlist,
+    load_allowlist_entries,
+    save_allowlist_entries,
+)
 from src.masking.dictionary import (
     DictMatch,
     MaskDictionary,
@@ -40,4 +45,7 @@ __all__ = [
     "tally_votes",
     "load_entries",
     "save_entries",
+    "MaskAllowlist",
+    "load_allowlist_entries",
+    "save_allowlist_entries",
 ]

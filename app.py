@@ -21,9 +21,12 @@ import streamlit as st
 from src.core.document.document_loader import DocumentLoader
 from src.masking import (
     AUTO_MASK_CONFIDENCE,
+    MaskAllowlist,
     MaskDictionary,
     MaskingEngine,
+    load_allowlist_entries,
     load_entries,
+    save_allowlist_entries,
     save_entries,
 )
 from src.ner import (
@@ -64,8 +67,15 @@ def get_engine(model_name: str) -> NerEngine:
     return engine
 
 
-# マスク辞書の既定パス（ルート直下 data/mask_dict.yaml）
+# マスク辞書・除外リストの既定パス（ルート直下 data/）
 _DEFAULT_DICT = Path(__file__).resolve().parent / "data" / "mask_dict.yaml"
+_DEFAULT_ALLOWLIST = Path(__file__).resolve().parent / "data" / "mask_allowlist.yaml"
+
+
+def _load_allowlist(allowlist_path: str) -> MaskAllowlist:
+    if allowlist_path and Path(allowlist_path).exists():
+        return MaskAllowlist.load(allowlist_path)
+    return MaskAllowlist.empty()
 
 
 @st.cache_resource(show_spinner="モデルを読み込み中 ...")
@@ -371,10 +381,10 @@ def _context(text: str, start: int, end: int, width: int = 20) -> str:
     return f"{head}{text[s:start]}《{text[start:end]}》{text[end:e]}{tail}"
 
 
-# 確信度の並び順（確定→強→中→弱→微弱）。文字列順だと崩れるので明示する。
-_CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3, "微弱": 4}
-# 確信度フィルタの選択肢と既定（微弱＝コードらしき誤検出は既定で非表示）。
-_CONFIDENCE_LEVELS = ["確定", "強", "中", "弱", "微弱"]
+# 確信度の並び順（確定→強→中→弱→微弱→除外）。文字列順だと崩れるので明示する。
+_CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3, "微弱": 4, "除外": 5}
+# 確信度フィルタの選択肢と既定（微弱＝コードらしき誤検出・除外＝allowlist は既定で非表示）。
+_CONFIDENCE_LEVELS = ["確定", "強", "中", "弱", "微弱", "除外"]
 _CONFIDENCE_DEFAULT = ["確定", "強", "中", "弱"]
 
 
@@ -544,15 +554,53 @@ def render_dict_editor(dict_path: str) -> None:
         st.success(f"保存しました: {path}（{len(kept)} 件）")
 
 
+def render_allowlist_editor(allowlist_path: str) -> None:
+    """除外リストの確認・追加・編集・保存 UI（独立タブ）。
+
+    マスク辞書と同様、行を編集/追加/削除して保存すると `data/mask_allowlist.yaml` へ書き出す。
+    1 列（除外語）だけのフラットなリスト。
+    """
+    st.caption(
+        "📝 **追加**＝一番下の空行に語を入力。"
+        "🗑 **削除**＝左端のチェックを ON → **Delete / Backspace**（または表右上のゴミ箱）。"
+        "いずれも **[💾 除外リストを保存] を押すまでファイルには反映されません**。"
+        "**保存先はローカルファイル**（機密・git 管理外）。"
+    )
+    path = Path(allowlist_path)
+    surfaces = load_allowlist_entries(path) if path.exists() else []
+    df = pd.DataFrame({"除外語": surfaces}, columns=["除外語"])
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        width="stretch",
+        height=500,
+        key="allowlist_editor",
+    )
+    if st.button("💾 除外リストを保存", type="primary", key="allowlist_save"):
+        kept = [
+            s.strip()
+            for s in edited["除外語"].tolist()
+            if not pd.isna(s) and str(s).strip()
+        ]
+        save_allowlist_entries(path, kept)
+        st.success(f"保存しました: {path}（{len(kept)} 件）")
+
+
 def analyze_masking(
-    chunks: list[str], models: list[str], flatten_tables: bool, dict_path: str
+    chunks: list[str],
+    models: list[str],
+    flatten_tables: bool,
+    dict_path: str,
+    allowlist_path: str,
 ):
     """マスキング検出（重い）。ボタン押下時のみ呼ぶ。"""
     engine = get_masking_engine(tuple(models), dict_path)
+    allowlist = _load_allowlist(allowlist_path)
     status = st.empty()
     analysis = engine.analyze(
         chunks,
         flatten_tables=flatten_tables,
+        allowlist=allowlist,
         progress=_stage_callback(status, len(chunks)),
     )
     status.empty()
@@ -663,11 +711,12 @@ def main() -> None:
 
     mode = st.radio(
         "モード",
-        ["🔍 固有表現抽出 (NER)", "🔒 マスキング", "📒 マスク辞書"],
+        ["🔍 固有表現抽出 (NER)", "🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト"],
         horizontal=True,
     )
     masking_mode = mode.startswith("🔒")
     dict_mode = mode.startswith("📒")
+    allowlist_mode = mode.startswith("🚫")
 
     # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
     if dict_mode:
@@ -681,6 +730,21 @@ def main() -> None:
         render_dict_editor(dict_path)
         return
 
+    # --- 除外リストモード（文書入力なし。除外語の確認・編集・保存だけ） ---
+    if allowlist_mode:
+        with st.sidebar:
+            st.header("⚙️ 設定")
+            allowlist_path = st.text_input(
+                "除外リスト (YAML)", value=str(_DEFAULT_ALLOWLIST)
+            )
+        st.title("🚫 除外リスト")
+        st.caption(
+            "マスク**しない**語の名簿。NER の誤検出（社内コード・変数名・汎用語など）をここに入れると、"
+            "以後どの文書でも候補が「除外」へ落ちます。**辞書・連絡先（確定）は上書きしません**（recall 安全）。"
+        )
+        render_allowlist_editor(allowlist_path)
+        return
+
     # --- サイドバー（モード別の設定） ---
     with st.sidebar:
         st.header("⚙️ 設定")
@@ -692,6 +756,12 @@ def main() -> None:
                 format_func=lambda m: f"{m}（{MODEL_DESCRIPTIONS.get(m, '')}）",
             )
             dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
+            allowlist_path = st.text_input(
+                "除外リスト (YAML)",
+                value=str(_DEFAULT_ALLOWLIST),
+                help="マスクしない語の名簿。一致した検出候補を「除外」へ落とす"
+                "（辞書・連絡先＝確定は守る）。📒 除外リスト タブで編集。",
+            )
             flatten_tables = st.toggle(
                 "テーブルを平文化して検出",
                 value=True,
@@ -753,6 +823,7 @@ def main() -> None:
             tuple(models),
             flatten_tables,
             _dict_signature(dict_path),
+            _dict_signature(allowlist_path),
         )
     else:
         settings_sig = ("ner", model_name, flatten_tables)
@@ -803,7 +874,7 @@ def main() -> None:
                 }
                 if masking_mode:
                     analysis = analyze_masking(
-                        chunks, models, flatten_tables, dict_path
+                        chunks, models, flatten_tables, dict_path, allowlist_path
                     )
                     st.session_state[slot] = {
                         **base,

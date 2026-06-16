@@ -36,6 +36,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from time import perf_counter
 
+from src.masking.allowlist import MaskAllowlist
 from src.masking.dictionary import MAX_MATCH_TOKENS, MaskDictionary, normalize
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
 from src.ner.engine import Analysis, ProgressCallback
@@ -45,7 +46,8 @@ _CAT_PRIORITY = ["人名", "社名", "商標", "連絡先", "地名", "その他
 # カテゴリ → 優先度ランク（小さいほど優先）。同点時の代表カテゴリ選択に使う。
 _CAT_RANK = {c: i for i, c in enumerate(_CAT_PRIORITY)}
 # 確信度の強さ順（集約時に最良を選ぶ）。微弱＝コードらしき誤検出（既定で非表示・自動マスク外）。
-_CONF_RANK = {"確定": 4, "強": 3, "中": 2, "弱": 1, "微弱": 0}
+# 除外＝allowlist で人が「機密でない」と判断した語（最弱・既定で非表示・自動マスク外）。
+_CONF_RANK = {"確定": 4, "強": 3, "中": 2, "弱": 1, "微弱": 0, "除外": -1}
 # 自動マスク（初期チェック ON）にする確信度
 AUTO_MASK_CONFIDENCE = ("確定", "強")
 # プレースホルダ接頭辞
@@ -303,6 +305,7 @@ class MaskingEngine:
         flatten_tables: bool = False,
         promote: bool = True,
         extra_terms: Iterable[tuple[str, str]] = (),
+        allowlist: MaskAllowlist | None = None,
         progress: ProgressCallback | None = None,
     ) -> MaskAnalysis:
         """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。
@@ -408,6 +411,20 @@ class MaskingEngine:
             )
             for c in clusters
         ]
+
+        # 除外リスト(allowlist)：人が「機密でない」と登録した語を「除外」へ落とす。
+        #   recall 安全：**検出由来（確定でない）かつ辞書票なし**のみ対象＝辞書/連絡先(確定)は守る。
+        if allowlist is not None:
+            clusters = [
+                (
+                    replace(c, confidence="除外")
+                    if c.confidence != "確定"
+                    and not _has_dict_vote(c)
+                    and c.surface in allowlist
+                    else c
+                )
+                for c in clusters
+            ]
 
         return MaskAnalysis(
             text=text,
