@@ -11,6 +11,9 @@
 - 強  … 解決カテゴリへ 2 チャネル以上（人名/社名/商標/連絡先）、または**昇格（session）票**を持つ。
 - 中  … 解決カテゴリへ 1 チャネルのみ（同上）
 - 弱  … カテゴリが 地名/その他（票数問わず。誤分類で人物が紛れるので必ずレビュー）
+- 微弱 … 中/弱 のうち「コードらしき」表層（`_`/`::`/`@`/`~` を含む、または数字・記号のみ＝
+  社内コード/変数名を NER が誤ラベルしたもの。例 `Em_NoYes` / `~C02` / `7-410`）。既定で非表示・
+  自動マスク外（データには残す＝取りこぼさない）。確定/強（辞書・連絡先・2モデル一致・昇格）は対象外。
 
 昇格（session）＝ phase1 で強になった語を「確認済み」として phase2 に再注入したもの（§ analyze）。
 実辞書（dict）とは別チャネルにし、**確定でなく強**に留める（確定＝名簿、強＝検出/確認済み、の区別を保つ）。
@@ -29,7 +32,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 
 from src.masking.dictionary import MAX_MATCH_TOKENS, MaskDictionary, normalize
@@ -40,8 +43,8 @@ from src.ner.engine import Analysis, ProgressCallback
 _CAT_PRIORITY = ["人名", "社名", "商標", "連絡先", "地名", "その他"]
 # カテゴリ → 優先度ランク（小さいほど優先）。同点時の代表カテゴリ選択に使う。
 _CAT_RANK = {c: i for i, c in enumerate(_CAT_PRIORITY)}
-# 確信度の強さ順（集約時に最良を選ぶ）
-_CONF_RANK = {"確定": 3, "強": 2, "中": 1, "弱": 0}
+# 確信度の強さ順（集約時に最良を選ぶ）。微弱＝コードらしき誤検出（既定で非表示・自動マスク外）。
+_CONF_RANK = {"確定": 4, "強": 3, "中": 2, "弱": 1, "微弱": 0}
 # 自動マスク（初期チェック ON）にする確信度
 AUTO_MASK_CONFIDENCE = ("確定", "強")
 # プレースホルダ接頭辞
@@ -112,6 +115,16 @@ _EMAIL_RE = re.compile(
     r"[a-zA-Z]{2,}"
 )
 _CONTACT_PATTERNS: tuple[re.Pattern[str], ...] = (_EMAIL_RE,)
+
+# 「コードらしさ」判定用。実在の人名・社名には現れない特徴を持つ語＝NER の誤ラベル（社内コード/
+# 変数名/列挙子）とみなし、中/弱 の候補を **微弱**（既定で非表示・自動マスク外）へ落とす（§ analyze）。
+# 確定/強（辞書・連絡先・2モデル一致・昇格）は対象にしない＝確信度の根拠があるものは守る。
+_CODE_MARKER_RE = re.compile(
+    r"[_@~]|::"
+)  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 等
+# 「名前に使われる字」＝英字 or 日本語（かな U+3040-30FF・漢字 U+3400-9FFF）。これを 1 つも
+# 含まない＝数字/記号のみ（例 7-410）。
+_NAME_CHAR_RE = re.compile(r"[A-Za-z぀-ヿ㐀-鿿]")
 
 
 @dataclass(frozen=True)
@@ -379,6 +392,17 @@ class MaskingEngine:
             ]
             clusters = sorted(clusters + contacts, key=lambda c: (c.start, c.end))
 
+        # コードらしき誤検出（中/弱）を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
+        #   確定/強（辞書・連絡先・2モデル一致・昇格）は守る＝中/弱 のみ対象。
+        clusters = [
+            (
+                replace(c, confidence="微弱")
+                if c.confidence in ("中", "弱") and _looks_like_code(c.surface)
+                else c
+            )
+            for c in clusters
+        ]
+
         return MaskAnalysis(
             text=text,
             tokens=tokens,
@@ -483,6 +507,23 @@ def _raw(
 ) -> Candidate:
     """確信度未確定の生候補（confidence はクラスタ時に決める）。"""
     return Candidate(start, end, text[start:end], category, "", (vote,))
+
+
+def _looks_like_code(surface: str) -> bool:
+    """社内コード/変数名らしき表層か（実在の人名・社名には現れない特徴）。
+
+    どちらかに該当：
+    - 記号マーカー ``_`` / ``::`` / ``@`` / ``~`` を含む（例 ``Em_NoYes`` / ``Em_OffOn::idOff``
+      / ``ピッチ@`` / ``~C02``）。
+    - 英字も日本語（かな・漢字）も含まない＝数字・記号のみ（例 ``7-410``）。
+
+    NER（electra/ja_ginza）がこれらを社名/人名に誤ラベルし中で大量に湧くため、
+    :meth:`MaskingEngine.analyze` で **中/弱 のみ** を **微弱**（既定で非表示・自動マスク外）へ落とす。
+    確定/強（辞書・連絡先・2モデル一致・昇格）は対象にしない＝根拠があるものは守る。
+    """
+    if _CODE_MARKER_RE.search(surface):
+        return True
+    return not _NAME_CHAR_RE.search(surface)
 
 
 def _contact_candidates(text: str) -> list[Candidate]:

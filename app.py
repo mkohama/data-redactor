@@ -371,8 +371,11 @@ def _context(text: str, start: int, end: int, width: int = 20) -> str:
     return f"{head}{text[s:start]}《{text[start:end]}》{text[end:e]}{tail}"
 
 
-# 確信度の並び順（確定→強→中→弱）。文字列順だと「中→確定」になるので明示する。
-_CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3}
+# 確信度の並び順（確定→強→中→弱→微弱）。文字列順だと崩れるので明示する。
+_CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3, "微弱": 4}
+# 確信度フィルタの選択肢と既定（微弱＝コードらしき誤検出は既定で非表示）。
+_CONFIDENCE_LEVELS = ["確定", "強", "中", "弱", "微弱"]
+_CONFIDENCE_DEFAULT = ["確定", "強", "中", "弱"]
 
 
 def _confidence_label(confidence: str) -> str:
@@ -395,15 +398,18 @@ def _sorted_by_confidence(items, *, key):
     )
 
 
-def _render_by_entity(engine, analysis):
-    """実体ごと：同じ語は文書内の全出現を一括マスク。"""
-    groups = _sorted_by_confidence(
+def _render_by_entity(engine, analysis, confidences):
+    """実体ごと：同じ語は文書内の全出現を一括マスク。``confidences`` で表示する確信度を絞る。"""
+    all_groups = _sorted_by_confidence(
         engine.group_candidates(analysis.candidates), key=lambda g: g.surface
     )
+    groups = [g for g in all_groups if g.confidence in confidences]
+    hidden = len(all_groups) - len(groups)
     st.subheader(f"マスク候補（{len(groups)} 実体）— チェックで選択")
-    st.caption(
-        "確定/強は初期チェック ON。チェックした実体は**文書内の全出現**がマスクされます。"
-    )
+    cap = "確定/強は初期チェック ON。チェックした実体は**文書内の全出現**がマスクされます。"
+    if hidden:
+        cap += f"（確信度フィルタで {hidden} 実体を非表示）"
+    st.caption(cap)
     table = pd.DataFrame(
         [
             {
@@ -434,14 +440,21 @@ def _render_by_entity(engine, analysis):
     return engine.apply(analysis, selected, expand=True)
 
 
-def _render_by_occurrence(engine, analysis):
-    """出現ごと：各出現を個別にマスク（同形異義語の使い分け用）。展開せず選んだ箇所だけ。"""
-    cands = _sorted_by_confidence(list(analysis.candidates), key=lambda c: c.surface)
+def _render_by_occurrence(engine, analysis, confidences):
+    """出現ごと：各出現を個別にマスク。``confidences`` で表示する確信度を絞る。"""
+    all_cands = _sorted_by_confidence(
+        list(analysis.candidates), key=lambda c: c.surface
+    )
+    cands = [c for c in all_cands if c.confidence in confidences]
+    hidden = len(all_cands) - len(cands)
     st.subheader(f"マスク候補（{len(cands)} 出現）— 出現ごとに選択")
-    st.caption(
+    cap = (
         "各出現を個別にマスク（フランク=人名 vs フランクに=気軽に、等を文脈で使い分け）。"
         "**選んだ出現だけ**マスクし、他の出現には広げません。"
     )
+    if hidden:
+        cap += f"（確信度フィルタで {hidden} 出現を非表示）"
+    st.caption(cap)
     table = pd.DataFrame(
         [
             {
@@ -564,19 +577,31 @@ def render_masking_result(stored: dict) -> None:
         st.subheader(f"結果: {source_label}")
 
     # --- マスク単位の切替 ---
-    unit = st.radio(
-        "マスク単位",
-        ["実体ごと（推奨）", "出現ごと（個別に選ぶ）"],
-        horizontal=True,
-        help="実体ごと=同じ語は文書内の全出現を一括マスク。"
-        "出現ごと=各出現を個別に選ぶ（同形異義語＝フランク等の使い分け用）。",
-    )
+    col_unit, col_conf = st.columns([1, 1])
+    with col_unit:
+        unit = st.radio(
+            "マスク単位",
+            ["実体ごと（推奨）", "出現ごと（個別に選ぶ）"],
+            horizontal=True,
+            help="実体ごと=同じ語は文書内の全出現を一括マスク。"
+            "出現ごと=各出現を個別に選ぶ（同形異義語＝フランク等の使い分け用）。",
+        )
+    with col_conf:
+        confidences = set(
+            st.multiselect(
+                "表示する確信度",
+                options=_CONFIDENCE_LEVELS,
+                default=_CONFIDENCE_DEFAULT,
+                help="微弱＝コードらしき誤検出（`Em_NoYes`・`~C02`・`7-410` 等）。既定で非表示。"
+                "見たいときは『微弱』を選択（取りこぼし確認用。データは保持されています）。",
+            )
+        )
     by_entity = unit.startswith("実体")
 
     if by_entity:
-        result = _render_by_entity(engine, analysis)
+        result = _render_by_entity(engine, analysis, confidences)
     else:
-        result = _render_by_occurrence(engine, analysis)
+        result = _render_by_occurrence(engine, analysis, confidences)
 
     # --- 結果（色付き表示 / マスク済み / 元テキスト） ---
     col_main, col_side = st.columns([3, 1])
