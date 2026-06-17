@@ -291,22 +291,19 @@ def render_input(
             st.warning("kb-mcp に登録された文書がありません。")
             return None, "kb", "", None
 
-        # 同じソース名で解析済み（＝NER キャッシュ済み）の kb 文書 → 「✓」を頭に付ける目安に使う。
-        # 照合は表示ラベル（record_document に source_name として保存される値）で行う。
+        # 解析済み（＝NER キャッシュ済み）の kb 文書 → 「✓」を頭に付ける目安（名前一致）に使う。
         cached_kb = {
-            d.source_name
-            for d in _ner_cache().list_documents()
-            if d.source_kind == "kb"
+            d.source_name for d in _ner_cache().list_documents() if d.source_kind == "kb"
         }
 
-        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。📦＝キャッシュ済みの目安（名前一致）。
+        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。📦＝キャッシュ済みの目安。
+        # チャンク数は kb-mcp の一覧メタ（knowledge://documents の chunk_count）をそのまま表示。
         kb_df = pd.DataFrame(
             [
                 {
                     "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
-                    "名前": (
-                        m.get("title") or m.get("file_name") or m.get("id") or "?"
-                    ),
+                    "名前": (m.get("title") or m.get("file_name") or m.get("id") or "?"),
+                    "チャンク": m.get("chunk_count", ""),
                     "パス": m.get("file_path") or "",
                 }
                 for m in docs
@@ -317,7 +314,10 @@ def render_input(
             list(range(len(docs))),
             key="kb_pick",
             sel_key="kb_sel",
-            caption=f"kb-mcp 文書: {len(docs)} 件（行をクリックして選択。📦＝キャッシュ済みの目安）",
+            caption=(
+                f"kb-mcp 文書: {len(docs)} 件"
+                "（行をクリックして選択。📦＝キャッシュ済みの目安・チャンク数は kb-mcp の登録値）"
+            ),
             column_config={"📦": st.column_config.TextColumn("📦", width="small")},
         )
         sel = st.session_state.get("kb_sel")
