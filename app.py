@@ -176,6 +176,66 @@ def _select_table_fragment(
     st.session_state[sel_key] = ids[rows[0]] if rows else None
 
 
+@st.fragment
+def _cache_picker_fragment(docs: list) -> None:
+    """🗂 キャッシュ選択の UI 一式（テーブル＋選択依存の操作）を 1 つの fragment にまとめる。
+
+    行クリック・チェック操作は **この fragment だけ** 再実行され、画面全体は再描画しない。
+    **選択依存のウィジェット（強制再解析チェック・案内）も fragment の中に置く**：外に出すと
+    行クリックでは外側が再実行されず「消えた」ように見えるため（実際にそのバグを踏んだ）。
+    選択した content_hash を ``st.session_state["cache_sel"]`` に、強制再解析の値はチェックの
+    キー ``cache_force_reanalyze`` に入る（``render_input`` が両方を読んで get_chunks を作る）。
+    ``docs`` は呼び出し側がソース名で安定ソート済み（並び替えで取り違えない）。
+    """
+    df = pd.DataFrame(
+        [
+            {
+                "ソース": d.source_name,
+                "種別": d.source_kind,
+                "チャンク": d.chunk_count,
+                "文字数": d.char_count,
+                "モデル": _short_models(d.models),
+                "解析日時": d.created_at,
+            }
+            for d in docs
+        ]
+    )
+    st.caption(
+        f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択。列見出しで並べ替え可）"
+    )
+    event = st.dataframe(
+        df,
+        hide_index=True,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key="cache_pick",
+    )
+    rows = event.selection.rows
+    sel_hash = docs[rows[0]].content_hash if rows else None
+    st.session_state["cache_sel"] = sel_hash
+    if sel_hash is None:
+        st.caption("👆 行をクリックして文書を選択してください。")
+        return
+    if not _ner_cache().get_chunks(sel_hash):
+        st.warning(
+            "このキャッシュにはチャンク本文がありません（チャンク保存より前の古いエントリ）。"
+            "一度ふつうに解析し直すと、以降ここから選べます。"
+        )
+        return
+    force = st.checkbox(
+        "🔄 NER をやり直す（キャッシュを無視して再解析）",
+        key="cache_force_reanalyze",
+        help="前処理やモデルの改善を反映したいときに。保存済みの NER 結果だけを破棄して"
+        "解析し直します（チャンク本文は残るので文書の選択はそのまま）。",
+    )
+    st.caption(
+        "保存チャンクで再解析します。NER はキャッシュにヒットして高速"
+        "（辞書・除外リストの変更は反映されます）。"
+        + ("　⚠ チェック中：[🔍 解析する] で NER を再実行します。" if force else "")
+    )
+
+
 def render_input(
     input_mode: str,
 ) -> tuple[tuple | None, str, str, Callable[[], list[str]] | None]:
@@ -244,7 +304,9 @@ def render_input(
             [
                 {
                     "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
-                    "名前": (m.get("title") or m.get("file_name") or m.get("id") or "?"),
+                    "名前": (
+                        m.get("title") or m.get("file_name") or m.get("id") or "?"
+                    ),
                     "パス": m.get("file_path") or "",
                 }
                 for m in docs
@@ -282,54 +344,22 @@ def render_input(
                 "ここから入力元に選べるようになります。"
             )
             return None, "cache", "", None
-        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。**ソース名で安定ソート**して渡すので
-        # 解析（created_at 更新）で行が動かず選択がズレない。選択は content_hash で解決＝堅牢。
-        # 列見出しクリックで表示だけ自由に並べ替え可。
+        # 選択 UI 一式（テーブル＋強制再解析チェック＋案内）は 1 つの fragment 内で描く。
+        # **ソース名で安定ソート**して渡すので、解析（created_at 更新）で行が動かず選択がズレない。
         docs = sorted(docs, key=lambda doc: doc.source_name)
-        cache_df = pd.DataFrame(
-            [
-                {
-                    "ソース": d.source_name,
-                    "種別": d.source_kind,
-                    "チャンク": d.chunk_count,
-                    "文字数": d.char_count,
-                    "モデル": _short_models(d.models),
-                    "解析日時": d.created_at,
-                }
-                for d in docs
-            ]
-        )
-        _select_table_fragment(
-            cache_df,
-            [d.content_hash for d in docs],
-            key="cache_pick",
-            sel_key="cache_sel",
-            caption=f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択）",
-        )
+        _cache_picker_fragment(docs)
+
+        # fragment が session_state に書いた選択・強制再解析を読んで get_chunks を組む（ここでは
+        # 選択依存のウィジェットを描かない＝行クリックで再描画されない外側に widget を置かない）。
         sel_hash = st.session_state.get("cache_sel")
         matches = [x for x in docs if x.content_hash == sel_hash]
         if not matches:
             return None, "cache", "", None
         d = matches[0]
-        # チャンク本文を先読み（軽い）。無ければ古いエントリ＝選べないので明示する。
         cached_chunks = _ner_cache().get_chunks(d.content_hash)
-        if not cached_chunks:
-            st.warning(
-                "このキャッシュにはチャンク本文がありません（チャンク保存より前の古いエントリ）。"
-                "一度ふつうに解析し直すと、以降ここから選べます。"
-            )
+        if not cached_chunks:  # 警告は fragment 内で表示済み（古いエントリ）
             return None, "cache", d.source_name, None
-        force = st.checkbox(
-            "🔄 NER をやり直す（キャッシュを無視して再解析）",
-            key="cache_force_reanalyze",
-            help="前処理やモデルの改善を反映したいときに。保存済みの NER 結果だけを破棄して"
-            "解析し直します（チャンク本文は残るので文書の選択はそのまま）。",
-        )
-        st.caption(
-            "保存チャンクで再解析します。NER はキャッシュにヒットして高速"
-            "（辞書・除外リストの変更は反映されます）。"
-            + ("　⚠ チェック中：[🔍 解析する] で NER を再実行します。" if force else "")
-        )
+        force = bool(st.session_state.get("cache_force_reanalyze", False))
 
         def get_cache_chunks(c=cached_chunks, h=d.content_hash, f=force) -> list[str]:
             # 強制再解析時は古い NER 層だけ破棄し、解析時に作り直させる（前処理変更の反映等）。
