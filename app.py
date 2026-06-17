@@ -207,37 +207,39 @@ def render_input(
             if d.source_kind == "kb"
         }
 
-        def _kb_label(i: int) -> str:
-            badge = "✓ " if _kb_doc_label(docs[i]) in cached_kb else ""
-            return badge + _kb_doc_label(docs[i])
-
-        # 一覧（閲覧用・読み取り専用）。選択は下の selectbox で行う（位置ベース選択の取り違えを避ける）。
-        st.caption(f"kb-mcp 文書: {len(docs)} 件（📦＝キャッシュ済みの目安）")
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
-                        "名前": (
-                            m.get("title") or m.get("file_name") or m.get("id") or "?"
-                        ),
-                        "パス": m.get("file_path") or "",
-                    }
-                    for m in docs
-                ]
-            ),
+        # チェックボックス付きテーブルで 1 件選ぶ（チェックした行を読む。位置ベースの
+        # st.dataframe 行選択＝on_select は使わない＝取り違えバグの元）。kb 一覧は session 内で
+        # 並び替わらないので順序は安定。📦＝キャッシュ済みの目安（名前一致）。
+        st.caption(f"kb-mcp 文書: {len(docs)} 件（1 行を ☑ で選択。📦＝キャッシュ済みの目安）")
+        kb_table = pd.DataFrame(
+            [
+                {
+                    "選択": False,
+                    "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
+                    "名前": (m.get("title") or m.get("file_name") or m.get("id") or "?"),
+                    "パス": m.get("file_path") or "",
+                }
+                for m in docs
+            ]
+        )
+        kb_edited = st.data_editor(
+            kb_table,
             hide_index=True,
             width="stretch",
-            column_config={"📦": st.column_config.TextColumn("📦", width="small")},
-        )
-        # selectbox は型入力で絞り込み可。「✓」＝キャッシュ済み（名前一致の目安）。
-        idx = st.selectbox(
-            "上の一覧から文書を選択（頭の ✓ ＝キャッシュ済みの目安。入力して絞り込み可）",
-            options=range(len(docs)),
-            format_func=_kb_label,
+            disabled=[c for c in kb_table.columns if c != "選択"],
+            column_config={
+                "選択": st.column_config.CheckboxColumn("選択"),
+                "📦": st.column_config.TextColumn("📦", width="small"),
+            },
             key="kb_pick",
         )
-        meta = docs[idx]
+        checked = [m for m, on in zip(docs, kb_edited["選択"].tolist()) if on]
+        if not checked:
+            st.caption("文書を 1 行 ☑ してください。")
+            return None, "kb", "", None
+        meta = checked[0]
+        if len(checked) > 1:
+            st.caption(f"複数 ☑ のときは先頭を使います: {_kb_doc_label(meta)}")
         doc_id = meta.get("id") or meta.get("document_id")
         if not doc_id:
             return None, "kb", "", None
@@ -258,44 +260,41 @@ def render_input(
                 "ここから入力元に選べるようになります。"
             )
             return None, "cache", "", None
-        # 一覧（閲覧用・読み取り専用）。選択は下の selectbox で行う。
-        # 位置ベース選択（st.dataframe の行選択）は、解析→created_at 更新→先頭移動で並び替わると
-        # 別文書を選んでしまうため使わない（実際にそのバグを踏んだ）。一覧は見せ、選択は値で。
-        st.caption(f"キャッシュ済み: {len(docs)} 文書")
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "ソース": d.source_name,
-                        "種別": d.source_kind,
-                        "チャンク": d.chunk_count,
-                        "文字数": d.char_count,
-                        "モデル": _short_models(d.models),
-                        "解析日時": d.created_at,
-                    }
-                    for d in docs
-                ]
-            ),
+        # チェックボックス付きテーブルで 1 件選ぶ（チェックした行を読む）。位置ベースの
+        # st.dataframe 行選択（on_select）は、解析→created_at 更新→先頭移動で並び替わると
+        # 別文書を選んでしまうため使わない（実際にそのバグを踏んだ）。**ソース名で安定ソート**し、
+        # 解析しても行が動かない＝チェックが同じ文書に留まるようにする。
+        docs = sorted(docs, key=lambda d: d.source_name)
+        st.caption(f"キャッシュ済み: {len(docs)} 文書（1 行を ☑ で選択）")
+        cache_table = pd.DataFrame(
+            [
+                {
+                    "選択": False,
+                    "ソース": d.source_name,
+                    "種別": d.source_kind,
+                    "チャンク": d.chunk_count,
+                    "文字数": d.char_count,
+                    "モデル": _short_models(d.models),
+                    "解析日時": d.created_at,
+                }
+                for d in docs
+            ]
+        )
+        cache_edited = st.data_editor(
+            cache_table,
             hide_index=True,
             width="stretch",
-        )
-        # content_hash を値にする＝解析で並び替わっても選択が保たれる。selectbox は常に有効な
-        # 選択を返すので取り違えが起きない。型入力で絞り込み可。
-        by_hash = {d.content_hash: d for d in docs}
-
-        def _cache_label(h: str) -> str:
-            d = by_hash[h]
-            return (
-                f"{d.source_name}（{d.source_kind}・{d.chunk_count}チャンク・{d.created_at}）"
-            )
-
-        sel_hash = st.selectbox(
-            "上の一覧から文書を選択（入力して絞り込み可）",
-            options=list(by_hash.keys()),
-            format_func=_cache_label,
+            disabled=[c for c in cache_table.columns if c != "選択"],
+            column_config={"選択": st.column_config.CheckboxColumn("選択")},
             key="cache_pick",
         )
-        d = by_hash[sel_hash]
+        checked = [d for d, on in zip(docs, cache_edited["選択"].tolist()) if on]
+        if not checked:
+            st.caption("文書を 1 行 ☑ してください。")
+            return None, "cache", "", None
+        d = checked[0]
+        if len(checked) > 1:
+            st.caption(f"複数 ☑ のときは先頭を使います: {d.source_name}")
         # チャンク本文を先読み（軽い）。無ければ古いエントリ＝選べないので明示する。
         cached_chunks = _ner_cache().get_chunks(d.content_hash)
         if not cached_chunks:
