@@ -17,9 +17,10 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Any
 
 import spacy
 
@@ -57,6 +58,13 @@ SAFE_CHUNK_BYTES = 40000
 
 # チャンク結合時の区切り（表示テキスト＝解析テキストの連結に使う）。
 CHUNK_SEPARATOR = "\n\n"
+
+# nlp.pipe を流すときの「1 ミニバッチあたりの累積文字数」上限。
+# spaCy/thinc は 1 ミニバッチのトークンを 1 つの配列 (Σtokens, width) に載せるため、全チャンクを
+# 1 バッチで流すと巨大配列になり OOM する（実測：大きな文書で (218861, 256)=214MiB の確保に失敗）。
+# 累積文字数でバッチを区切り、配列を小さく保つ（速度よりメモリ安定を優先。Doc は独立処理なので
+# 分割しても結果は不変）。値を上げると速いがメモリを食う。
+NLP_PIPE_BATCH_CHARS = 20000
 
 
 @dataclass(frozen=True)
@@ -218,7 +226,9 @@ class NerEngine:
         entities: list[Entity] = []
         offset = 0
         sep_len = len(CHUNK_SEPARATOR)
-        for piece, doc in zip(pieces, self.nlp.pipe([p.flat for p in pieces])):
+        for piece, doc in zip(
+            pieces, _pipe_in_batches(self.nlp, [p.flat for p in pieces])
+        ):
             for ent in doc.ents:
                 entities.append(
                     Entity(
@@ -261,7 +271,7 @@ class NerEngine:
         """
         pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
         infos: list[TokenInfo] = []
-        for doc in self.nlp.pipe([p.flat for p in pieces]):
+        for doc in _pipe_in_batches(self.nlp, [p.flat for p in pieces]):
             for tok in doc:
                 if tok.is_space:
                     continue
@@ -298,7 +308,7 @@ class NerEngine:
         orig_offset = 0  # 原文基準のオフセット
         sep_len = len(CHUNK_SEPARATOR)
         for idx, (piece, doc) in enumerate(
-            zip(pieces, self.nlp.pipe([p.flat for p in pieces]))
+            zip(pieces, _pipe_in_batches(self.nlp, [p.flat for p in pieces]))
         ):
             if idx > 0:  # 小片の区切り（CHUNK_SEPARATOR）は flat/orig 双方に入る
                 omap.extend(orig_offset + k for k in range(sep_len))
@@ -347,6 +357,30 @@ class _Piece:
     flat: str  # NER へ渡す（平坦化後）テキスト
     orig: str  # 対応する原文（平坦化前。`|` 入り）
     cmap: tuple[int, ...]  # flat の各文字 → orig の文字位置（挿入文字は -1）
+
+
+def _pipe_in_batches(
+    nlp: spacy.language.Language,
+    texts: list[str],
+    char_budget: int = NLP_PIPE_BATCH_CHARS,
+) -> Iterator[Any]:
+    """``nlp.pipe`` を累積文字数で小バッチに区切り、Doc を順序どおり yield する。
+
+    全チャンクを 1 バッチで流すと thinc が巨大なトークン配列を確保して OOM する
+    （:data:`NLP_PIPE_BATCH_CHARS` 参照）。1 バッチの合計文字数を上限以下に抑えて配列を小さく保つ。
+    Doc は独立に解析されるためバッチ分割で結果は変わらない（順序も保つ）。
+    1 件で上限を超えるテキストはそれ単独で 1 バッチにする（さらに小さくはできない）。
+    """
+    batch: list[str] = []
+    size = 0
+    for t in texts:
+        if batch and size + len(t) > char_budget:
+            yield from nlp.pipe(batch)
+            batch, size = [], 0
+        batch.append(t)
+        size += len(t)
+    if batch:
+        yield from nlp.pipe(batch)
 
 
 def _prepare_pieces(
