@@ -1101,12 +1101,15 @@ def main() -> None:
         st.warning("モデルを 1 つ以上選択してください。")
     stored = st.session_state.get(slot)
 
-    # 再解析はテキスト化済みチャンク（stored["chunks"]）を使い回せる＝辞書だけ変えたとき等は
-    # ファイルを上げ直す必要がない。別タブ往復で file_uploader が中身を失っても、stored が
-    # あれば押せる（その設定で再解析）。新しい入力があればそちらを優先する。
+    # 新しい入力があればそれを解析する（can_fresh）。
+    # stored フォールバック（テキスト化済み stored["chunks"] で再解析）は **ファイル入力専用**：
+    #   file_uploader だけが別タブ往復で中身を失うため、辞書だけ変えた再解析等で上げ直さずに済む。
+    #   cache/kb/text は選択・入力が保持されるので許さない（チャンクを出せない選択のとき、直前に
+    #   解析した別文書を誤って解析してしまうのを防ぐ＝選べないなら解析ボタンを無効化する）。
     models_ok = not (masking_mode and not models)
     can_fresh = get_chunks is not None and models_ok
-    can_analyze = can_fresh or (stored is not None and models_ok)
+    can_reuse_stored = input_kind == "file" and stored is not None and models_ok
+    can_analyze = can_fresh or can_reuse_stored
     clicked = st.button("🔍 解析する", type="primary", disabled=not can_analyze)
 
     # ボタン下の出力（案内 / スピナー / 結果）は 1 つの placeholder に集約する。
@@ -1126,7 +1129,8 @@ def main() -> None:
                     st.error(f"入力の取得に失敗しました: {e}")
                     chunks = None
             else:
-                # 入力ウィジェットが空（往復でクリア等）。テキスト化済みチャンクを再解析する。
+                # ファイル入力で file_uploader が空（別タブ往復でクリア）。同じファイルの
+                # テキスト化済みチャンク（stored）を再解析する（can_reuse_stored=file 限定）。
                 src_label = stored["source_label"]  # type: ignore[index]
                 in_kind = stored["input_kind"]  # type: ignore[index]
                 in_sig = stored["input_sig"]  # type: ignore[index]
