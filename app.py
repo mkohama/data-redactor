@@ -144,6 +144,38 @@ def _kb_doc_label(meta: dict) -> str:
     return f"{name}　({path})" if path else str(name)
 
 
+@st.fragment
+def _select_table_fragment(
+    df: pd.DataFrame,
+    ids: list,
+    *,
+    key: str,
+    sel_key: str,
+    caption: str,
+    column_config: dict | None = None,
+) -> None:
+    """1 行クリックで単一選択するテーブル（``st.fragment`` で再描画を局所化）。
+
+    行をクリックすると **このテーブルだけ** 再実行され（画面全体は再描画しない＝チラつき/
+    スクロール飛びを抑える）。選んだ行の識別子 ``ids[row]`` を ``st.session_state[sel_key]`` に
+    書く（未選択は ``None``）。単一選択なので前の選択は自動で置き換わる（チェック残り無し）。
+    位置選択だが、呼び出し側が安定順で渡し ``ids`` で解決するので並び替えの取り違えは起きない。
+    列見出しクリックで表示の並べ替えも可能（選択には影響しない）。
+    """
+    st.caption(caption)
+    event = st.dataframe(
+        df,
+        hide_index=True,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config=column_config,
+        key=key,
+    )
+    rows = event.selection.rows
+    st.session_state[sel_key] = ids[rows[0]] if rows else None
+
+
 def render_input(
     input_mode: str,
 ) -> tuple[tuple | None, str, str, Callable[[], list[str]] | None]:
@@ -207,14 +239,10 @@ def render_input(
             if d.source_kind == "kb"
         }
 
-        # チェックボックス付きテーブルで 1 件選ぶ（チェックした行を読む。位置ベースの
-        # st.dataframe 行選択＝on_select は使わない＝取り違えバグの元）。kb 一覧は session 内で
-        # 並び替わらないので順序は安定。📦＝キャッシュ済みの目安（名前一致）。
-        st.caption(f"kb-mcp 文書: {len(docs)} 件（1 行を ☑ で選択。📦＝キャッシュ済みの目安）")
-        kb_table = pd.DataFrame(
+        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。📦＝キャッシュ済みの目安（名前一致）。
+        kb_df = pd.DataFrame(
             [
                 {
-                    "選択": False,
                     "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
                     "名前": (m.get("title") or m.get("file_name") or m.get("id") or "?"),
                     "パス": m.get("file_path") or "",
@@ -222,24 +250,18 @@ def render_input(
                 for m in docs
             ]
         )
-        kb_edited = st.data_editor(
-            kb_table,
-            hide_index=True,
-            width="stretch",
-            disabled=[c for c in kb_table.columns if c != "選択"],
-            column_config={
-                "選択": st.column_config.CheckboxColumn("選択"),
-                "📦": st.column_config.TextColumn("📦", width="small"),
-            },
+        _select_table_fragment(
+            kb_df,
+            list(range(len(docs))),
             key="kb_pick",
+            sel_key="kb_sel",
+            caption=f"kb-mcp 文書: {len(docs)} 件（行をクリックして選択。📦＝キャッシュ済みの目安）",
+            column_config={"📦": st.column_config.TextColumn("📦", width="small")},
         )
-        checked = [m for m, on in zip(docs, kb_edited["選択"].tolist()) if on]
-        if not checked:
-            st.caption("文書を 1 行 ☑ してください。")
+        sel = st.session_state.get("kb_sel")
+        if sel is None or sel >= len(docs):
             return None, "kb", "", None
-        meta = checked[0]
-        if len(checked) > 1:
-            st.caption(f"複数 ☑ のときは先頭を使います: {_kb_doc_label(meta)}")
+        meta = docs[sel]
         doc_id = meta.get("id") or meta.get("document_id")
         if not doc_id:
             return None, "kb", "", None
@@ -260,16 +282,13 @@ def render_input(
                 "ここから入力元に選べるようになります。"
             )
             return None, "cache", "", None
-        # チェックボックス付きテーブルで 1 件選ぶ（チェックした行を読む）。位置ベースの
-        # st.dataframe 行選択（on_select）は、解析→created_at 更新→先頭移動で並び替わると
-        # 別文書を選んでしまうため使わない（実際にそのバグを踏んだ）。**ソース名で安定ソート**し、
-        # 解析しても行が動かない＝チェックが同じ文書に留まるようにする。
-        docs = sorted(docs, key=lambda d: d.source_name)
-        st.caption(f"キャッシュ済み: {len(docs)} 文書（1 行を ☑ で選択）")
-        cache_table = pd.DataFrame(
+        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。**ソース名で安定ソート**して渡すので
+        # 解析（created_at 更新）で行が動かず選択がズレない。選択は content_hash で解決＝堅牢。
+        # 列見出しクリックで表示だけ自由に並べ替え可。
+        docs = sorted(docs, key=lambda doc: doc.source_name)
+        cache_df = pd.DataFrame(
             [
                 {
-                    "選択": False,
                     "ソース": d.source_name,
                     "種別": d.source_kind,
                     "チャンク": d.chunk_count,
@@ -280,21 +299,18 @@ def render_input(
                 for d in docs
             ]
         )
-        cache_edited = st.data_editor(
-            cache_table,
-            hide_index=True,
-            width="stretch",
-            disabled=[c for c in cache_table.columns if c != "選択"],
-            column_config={"選択": st.column_config.CheckboxColumn("選択")},
+        _select_table_fragment(
+            cache_df,
+            [d.content_hash for d in docs],
             key="cache_pick",
+            sel_key="cache_sel",
+            caption=f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択）",
         )
-        checked = [d for d, on in zip(docs, cache_edited["選択"].tolist()) if on]
-        if not checked:
-            st.caption("文書を 1 行 ☑ してください。")
+        sel_hash = st.session_state.get("cache_sel")
+        matches = [x for x in docs if x.content_hash == sel_hash]
+        if not matches:
             return None, "cache", "", None
-        d = checked[0]
-        if len(checked) > 1:
-            st.caption(f"複数 ☑ のときは先頭を使います: {d.source_name}")
+        d = matches[0]
         # チャンク本文を先読み（軽い）。無ければ古いエントリ＝選べないので明示する。
         cached_chunks = _ner_cache().get_chunks(d.content_hash)
         if not cached_chunks:
@@ -1144,12 +1160,14 @@ def main() -> None:
     # 新しい入力があればそれを解析する（can_fresh）。
     # stored フォールバック（テキスト化済み stored["chunks"] で再解析）は **ファイル入力専用**：
     #   file_uploader だけが別タブ往復で中身を失うため、辞書だけ変えた再解析等で上げ直さずに済む。
-    #   cache/kb/text は選択・入力が保持されるので許さない（チャンクを出せない選択のとき、直前に
-    #   解析した別文書を誤って解析してしまうのを防ぐ＝選べないなら解析ボタンを無効化する）。
+    # cache/kb は **選択を fragment 内で行う**ため、行クリックでは外側（このボタン）が再実行されず
+    #   選択が反映されない。そこでボタンを選択に依存させず、モデルさえあれば押せるようにし、
+    #   未選択のクリックは下のハンドラで案内する（stored への誤フォールバックはしない）。
     models_ok = not (masking_mode and not models)
     can_fresh = get_chunks is not None and models_ok
     can_reuse_stored = input_kind == "file" and stored is not None and models_ok
-    can_analyze = can_fresh or can_reuse_stored
+    can_select_list = input_kind in ("cache", "kb") and models_ok
+    can_analyze = can_fresh or can_reuse_stored or can_select_list
     clicked = st.button("🔍 解析する", type="primary", disabled=not can_analyze)
 
     # ボタン下の出力（案内 / スピナー / 結果）は 1 つの placeholder に集約する。
@@ -1161,20 +1179,24 @@ def main() -> None:
         with (
             output.container()
         ):  # 旧フレームの内容を即座に置換（スピナーをこの位置に出す）
+            src_label, in_kind, in_sig = source_label, input_kind, input_id
             if can_fresh:
-                src_label, in_kind, in_sig = source_label, input_kind, input_id
                 try:
                     chunks = get_chunks()  # type: ignore[misc]  # can_fresh で None 除外済み
                 except Exception as e:  # noqa: BLE001
                     st.error(f"入力の取得に失敗しました: {e}")
                     chunks = None
-            else:
+            elif can_reuse_stored:
                 # ファイル入力で file_uploader が空（別タブ往復でクリア）。同じファイルの
-                # テキスト化済みチャンク（stored）を再解析する（can_reuse_stored=file 限定）。
+                # テキスト化済みチャンク（stored）を再解析する（file 限定＝別文書の誤解析を防ぐ）。
                 src_label = stored["source_label"]  # type: ignore[index]
                 in_kind = stored["input_kind"]  # type: ignore[index]
                 in_sig = stored["input_sig"]  # type: ignore[index]
                 chunks = stored["chunks"]  # type: ignore[index]
+            else:
+                # cache/kb で未選択のままクリック（選択は一覧の行クリックで行う）。
+                st.warning("一覧から行をクリックして文書を選択してください。")
+                chunks = None
             if chunks:
                 base = {
                     "settings_sig": settings_sig,
