@@ -755,7 +755,12 @@ def render_cache_view() -> None:
         names = {"ja_ginza_electra": "electra", "ja_ginza": "ginza"}
         return ", ".join(names.get(m, m) for m in models)
 
-    st.caption(f"キャッシュ済み: {len(docs)} 文書")
+    st.caption(
+        f"キャッシュ済み: {len(docs)} 文書　"
+        "（**種別**はプルダウンで修正できます＝再解析で `cache` に潰れた行を元の出所へ。"
+        "編集後は [💾 種別の変更を保存] を押す）"
+    )
+    kind_options = ["text", "file", "kb", "cache"]
     df = pd.DataFrame(
         [
             {
@@ -775,14 +780,32 @@ def render_cache_view() -> None:
         df,
         hide_index=True,
         width="stretch",
-        disabled=[c for c in df.columns if c != "削除"],
-        column_config={"削除": st.column_config.CheckboxColumn("削除")},
+        disabled=[c for c in df.columns if c not in ("削除", "種別")],
+        column_config={
+            "削除": st.column_config.CheckboxColumn("削除"),
+            "種別": st.column_config.SelectboxColumn(
+                "種別", options=kind_options, required=True
+            ),
+        },
         key="cache_view",
     )
-    to_delete = [d for d, on in zip(docs, edited["削除"].tolist()) if on]
-    if to_delete and st.button(
-        f"🗑 選択した {len(to_delete)} 件のキャッシュを削除", type="primary"
+
+    # 種別の変更（出所の手動修正）を検出して保存する。
+    kind_changes = [
+        (d.content_hash, new_kind)
+        for d, new_kind in zip(docs, edited["種別"].tolist())
+        if new_kind != d.source_kind
+    ]
+    if kind_changes and st.button(
+        f"💾 種別の変更（{len(kind_changes)} 件）を保存", type="primary"
     ):
+        for content_hash_, new_kind in kind_changes:
+            cache.set_source_kind(content_hash_, new_kind)
+        st.success(f"種別を更新しました（{len(kind_changes)} 件）。")
+        st.rerun()
+
+    to_delete = [d for d, on in zip(docs, edited["削除"].tolist()) if on]
+    if to_delete and st.button(f"🗑 選択した {len(to_delete)} 件のキャッシュを削除"):
         for d in to_delete:
             cache.delete(d.content_hash)
         st.success(f"{len(to_delete)} 件のキャッシュを削除しました。")

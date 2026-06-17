@@ -141,6 +141,18 @@ class NerCache:
             ).fetchone()
         return (row[0], row[1]) if row else None
 
+    def set_source_kind(self, content_hash: str, source_kind: str) -> None:
+        """文書の種別（出所）を更新する（🗂 一覧での手動修正用）。
+
+        キャッシュ入力での再解析で "cache" に潰れてしまった行を、元の出所（file/kb/text）へ
+        人が直すために使う。
+        """
+        with self._conn() as c:
+            c.execute(
+                "UPDATE documents SET source_kind = ? WHERE content_hash = ?",
+                (source_kind, content_hash),
+            )
+
     def get_chunks(self, content_hash: str) -> list[str] | None:
         """記録済みのチャンク本文を返す（キャッシュを入力元に使う）。無ければ None。"""
         with self._conn() as c:
