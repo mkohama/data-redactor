@@ -293,7 +293,9 @@ def render_input(
 
         # 解析済み（＝NER キャッシュ済み）の kb 文書 → 「✓」を頭に付ける目安（名前一致）に使う。
         cached_kb = {
-            d.source_name for d in _ner_cache().list_documents() if d.source_kind == "kb"
+            d.source_name
+            for d in _ner_cache().list_documents()
+            if d.source_kind == "kb"
         }
 
         # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。📦＝キャッシュ済みの目安。
@@ -302,7 +304,9 @@ def render_input(
             [
                 {
                     "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
-                    "名前": (m.get("title") or m.get("file_name") or m.get("id") or "?"),
+                    "名前": (
+                        m.get("title") or m.get("file_name") or m.get("id") or "?"
+                    ),
                     "チャンク": m.get("chunk_count", ""),
                     "パス": m.get("file_path") or "",
                 }
@@ -594,7 +598,36 @@ def _sorted_by_confidence(items, *, key):
     )
 
 
-def _render_by_entity(engine, analysis, confidences):
+def _auto_mask_spans(analysis) -> set:
+    """既定でマスクする出現の span 集合（確定/強）。共有選択 ``mask_sel`` の初期値（現状と同一）。"""
+    return {
+        (c.start, c.end)
+        for c in analysis.candidates
+        if c.confidence in AUTO_MASK_CONFIDENCE
+    }
+
+
+def _apply_selection(engine, analysis, sel: set, by_entity: bool):
+    """共有選択 ``sel``（マスクする span 集合）から :class:`MaskResult` を作る。
+
+    実体ごと＝その語の出現が 1 つでも ``sel`` にあれば、その語を ``expand``（文書内の全出現）で
+    マスク。出現ごと＝``sel`` にある span だけを正確にマスク（展開しない）。どちらのモードでも
+    ``sel`` は同一なので、ビューを切り替えても選択は消えない（実体↔出現の双方向）。
+    """
+    if by_entity:
+        groups = engine.group_candidates(analysis.candidates)
+        selected = [
+            m
+            for g in groups
+            if any((mm.start, mm.end) in sel for mm in g.members)
+            for m in g.members
+        ]
+        return engine.apply(analysis, selected, expand=True)
+    selected = [c for c in analysis.candidates if (c.start, c.end) in sel]
+    return engine.apply(analysis, selected, expand=False)
+
+
+def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
     """実体ごと：同じ語は文書内の全出現を一括マスク。``confidences`` で表示する確信度を絞る。"""
     all_groups = _sorted_by_confidence(
         engine.group_candidates(analysis.candidates), key=lambda g: g.surface
@@ -605,11 +638,12 @@ def _render_by_entity(engine, analysis, confidences):
     cap = "確定/強は初期チェック ON。チェックした実体は**文書内の全出現**がマスクされます。"
     if hidden:
         cap += f"（確信度フィルタで {hidden} 実体を非表示）"
+    cap += "　※選択は出現ごとビューと共有（切替で消えません）。"
     st.caption(cap)
     table = pd.DataFrame(
         [
             {
-                "マスク": g.confidence in AUTO_MASK_CONFIDENCE,
+                "マスク": any((m.start, m.end) in sel for m in g.members),
                 "除外": g.confidence == "除外",
                 "確信度": _confidence_label(g.confidence),
                 "カテゴリ": g.category,
@@ -629,6 +663,7 @@ def _render_by_entity(engine, analysis, confidences):
     )
     # st.form で囲む：チェックのたびに再実行せず、ボタン押下時だけまとめて適用する
     # （data_editor は編集ごとに rerun し画面が先頭へ飛ぶため。フォームで抑止）。
+    # data_editor の鍵に ver を含める＝共有選択 sel が変わったら貼り直し、古い編集状態を残さない。
     with st.form("mask_entity_form"):
         edited = st.data_editor(
             table,
@@ -642,26 +677,30 @@ def _render_by_entity(engine, analysis, confidences):
                     help="チェックして [🚫 選択を除外リストへ] を押すと候補外に。",
                 ),
             },
-            key="mask_entity",
+            key=f"mask_entity_{ver}",
         )
         col_a, col_b = st.columns([1, 1])
-        col_a.form_submit_button("✅ マスクを反映", type="primary")
+        applied = col_a.form_submit_button("✅ マスクを反映", type="primary")
         excl = col_b.form_submit_button("🚫 選択を除外リストへ")
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
-    # 除外チェックした行はマスクしない（除外が優先）。
-    selected = [
-        m
-        for g, on, ex in zip(groups, masks, excludes)
-        if on and not ex
-        for m in g.members
-    ]
+    if applied:  # 表示中の実体について sel を更新（ON=全出現を追加／OFF=全出現を削除）
+        new_sel = set(sel)
+        for g, on, ex in zip(groups, masks, excludes):
+            spans = {(m.start, m.end) for m in g.members}
+            if on and not ex:
+                new_sel |= spans
+            else:
+                new_sel -= spans
+        stored["mask_sel"] = new_sel
+        stored["mask_ver"] = ver + 1
+        st.rerun()
     to_exclude = [g.surface for g, ex in zip(groups, excludes) if ex]
-    return engine.apply(analysis, selected, expand=True), to_exclude, excl
+    return to_exclude, excl
 
 
-def _render_by_occurrence(engine, analysis, confidences):
-    """出現ごと：各出現を個別にマスク。``confidences`` で表示する確信度を絞る。"""
+def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
+    """出現ごと：各出現を個別にマスク。チェックは共有選択 sel を読み書きする。"""
     all_cands = _sorted_by_confidence(
         list(analysis.candidates), key=lambda c: c.surface
     )
@@ -676,13 +715,13 @@ def _render_by_occurrence(engine, analysis, confidences):
         cap += f"（確信度フィルタで {hidden} 出現を非表示）"
     cap += (
         " チェックしてから **[✅ マスクを反映]** を押すと反映されます"
-        "（チェック中は再描画しません）。"
+        "（チェック中は再描画しません）。※選択は実体ごとビューと共有（切替で消えません）。"
     )
     st.caption(cap)
     table = pd.DataFrame(
         [
             {
-                "マスク": c.confidence in AUTO_MASK_CONFIDENCE,
+                "マスク": (c.start, c.end) in sel,
                 "除外": c.confidence == "除外",
                 "確信度": _confidence_label(c.confidence),
                 "カテゴリ": c.category,
@@ -709,16 +748,26 @@ def _render_by_occurrence(engine, analysis, confidences):
                     help="チェックして [🚫 選択を除外リストへ] を押すと候補外に。",
                 ),
             },
-            key="mask_occurrence",
+            key=f"mask_occurrence_{ver}",
         )
         col_a, col_b = st.columns([1, 1])
-        col_a.form_submit_button("✅ マスクを反映", type="primary")
+        applied = col_a.form_submit_button("✅ マスクを反映", type="primary")
         excl = col_b.form_submit_button("🚫 選択を除外リストへ")
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
-    selected = [c for c, on, ex in zip(cands, masks, excludes) if on and not ex]
+    if applied:  # 表示中の出現について sel を更新（ON=その span を追加／OFF=削除）
+        new_sel = set(sel)
+        for c, on, ex in zip(cands, masks, excludes):
+            span = (c.start, c.end)
+            if on and not ex:
+                new_sel.add(span)
+            else:
+                new_sel.discard(span)
+        stored["mask_sel"] = new_sel
+        stored["mask_ver"] = ver + 1
+        st.rerun()
     to_exclude = [c.surface for c, ex in zip(cands, excludes) if ex]
-    return engine.apply(analysis, selected, expand=False), to_exclude, excl
+    return to_exclude, excl
 
 
 def render_dict_editor(dict_path: str) -> None:
@@ -944,13 +993,21 @@ def render_masking_result(stored: dict) -> None:
         )
     by_entity = unit.startswith("実体")
 
+    # 共有選択（マスクする span 集合）。初期値＝自動マスク（確定/強）＝現状と同一。
+    # 実体ごと/出現ごとの両ビューがこの 1 つの集合を読み書きするので、切替で選択が消えない。
+    if "mask_sel" not in stored:
+        stored["mask_sel"] = _auto_mask_spans(analysis)
+        stored["mask_ver"] = 0
+    sel = stored["mask_sel"]
+    ver = stored["mask_ver"]
+
     if by_entity:
-        result, to_exclude, excl_clicked = _render_by_entity(
-            engine, analysis, confidences
+        to_exclude, excl_clicked = _render_by_entity(
+            engine, analysis, confidences, sel, ver, stored
         )
     else:
-        result, to_exclude, excl_clicked = _render_by_occurrence(
-            engine, analysis, confidences
+        to_exclude, excl_clicked = _render_by_occurrence(
+            engine, analysis, confidences, sel, ver, stored
         )
 
     # 「除外」チェックを除外リストへ追記し、**再解析なしで**この文書にも即反映する
@@ -965,6 +1022,14 @@ def render_masking_result(stored: dict) -> None:
         stored["analysis"] = apply_allowlist_to_analysis(
             analysis, MaskAllowlist.load(path)
         )
+        # 除外（confidence="除外"）になった span を共有選択から外す（他の手動選択は保持）。
+        excluded = {
+            (c.start, c.end)
+            for c in stored["analysis"].candidates
+            if c.confidence == "除外"
+        }
+        stored["mask_sel"] = {s for s in stored["mask_sel"] if s not in excluded}
+        stored["mask_ver"] = stored["mask_ver"] + 1
         stored["settings_sig"] = _masking_settings_sig(
             models, stored["flatten"], dict_path, allowlist_path
         )
@@ -972,6 +1037,9 @@ def render_masking_result(stored: dict) -> None:
             f"除外リストに {added} 件追加し、再解析なしで反映しました（計 {len(merged)} 件）。"
         )
         st.rerun()
+
+    # 共有選択から結果を作る（モードの意味＝実体は展開／出現は span 単位で適用）。
+    result = _apply_selection(engine, analysis, stored["mask_sel"], by_entity)
 
     # --- 結果（色付き表示 / マスク済み / 元テキスト） ---
     col_main, col_side = st.columns([3, 1])
