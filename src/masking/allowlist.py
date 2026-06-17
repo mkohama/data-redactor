@@ -19,6 +19,7 @@ YAML 形式（``data/mask_allowlist.yaml``。フラットなリスト）::
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -29,12 +30,25 @@ from src.masking.dictionary import normalize
 # YAML のセクション名（除外語のフラットリスト）
 _SECTION = "除外"
 
+# 連続する空白（半角/全角/タブ/改行）。照合前に 1 個へ畳む。
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _match_key(surface: str) -> str:
+    """除外照合のキー：前後 strip ＋連続空白を 1 個に畳んでから正規化（NFKC+casefold）。
+
+    複数トークンにまたがる実体の表層は ``text[start:end]``＝原文のトークン間スペースを含むため、
+    複数スペースや特殊スペースが混じることがある（HTML 表示では 1 個に潰れて見え、人が打つ
+    半角 1 スペースの除外語と完全一致しない）。空白を畳んで取りこぼしを防ぐ。
+    """
+    return normalize(_WHITESPACE.sub(" ", surface).strip())
+
 
 class MaskAllowlist:
     """除外語の集合（照合用に正規化済み）。``surface in allowlist`` で判定する。"""
 
     def __init__(self, surfaces: Iterable[str]) -> None:
-        self._norm = {normalize(s) for s in surfaces if s and s.strip()}
+        self._norm = {_match_key(s) for s in surfaces if s and s.strip()}
 
     @classmethod
     def empty(cls) -> MaskAllowlist:
@@ -49,7 +63,7 @@ class MaskAllowlist:
         return cls(load_allowlist_entries(p))
 
     def __contains__(self, surface: str) -> bool:
-        return normalize(surface) in self._norm
+        return _match_key(surface) in self._norm
 
     def __bool__(self) -> bool:
         return bool(self._norm)
