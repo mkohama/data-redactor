@@ -587,14 +587,19 @@ def _confidence_label(confidence: str) -> str:
     return f"{_CONFIDENCE_ORDER.get(confidence, 9) + 1} : {confidence}"
 
 
-def _sorted_by_confidence(items, *, key):
-    """確信度 降順（確定→強→中→弱）→ 第2キー（表層など）昇順で並べる＝表の既定順。
+def _sorted_by_confidence(items, *, key, mask_rank=None):
+    """（あれば）マスク状態 → 確信度 降順（確定→強→中→弱）→ 第2キー（表層）昇順で並べる。
 
-    items は ``.confidence`` を持つ候補 / 実体。第2キーで同じ表層が隣接する
-    （「出現ごと」では同形異義語の比較がしやすくなる）。
+    items は ``.confidence`` を持つ候補 / 実体。``mask_rank`` は ``it -> int``（小さいほど上。
+    例：マスク中=0 / 一部=1 / 未マスク=2）。指定すると**マスク中の行が先頭**に来る。
     """
     return sorted(
-        items, key=lambda it: (_CONFIDENCE_ORDER.get(it.confidence, 9), key(it))
+        items,
+        key=lambda it: (
+            mask_rank(it) if mask_rank is not None else 0,
+            _CONFIDENCE_ORDER.get(it.confidence, 9),
+            key(it),
+        ),
     )
 
 
@@ -621,8 +626,16 @@ def _apply_selection(engine, analysis, sel: set):
 
 def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
     """実体ごと：同じ語は文書内の全出現を一括マスク。``confidences`` で表示する確信度を絞る。"""
+    def _group_mask_rank(g) -> int:
+        spans = {(m.start, m.end) for m in g.members}
+        if spans <= sel:  # 全出現が選択＝マスク（チェック ON）
+            return 0
+        return 1 if spans & sel else 2  # 一部選択 / 未選択
+
     all_groups = _sorted_by_confidence(
-        engine.group_candidates(analysis.candidates), key=lambda g: g.surface
+        engine.group_candidates(analysis.candidates),
+        key=lambda g: g.surface,
+        mask_rank=_group_mask_rank,
     )
     groups = [g for g in all_groups if g.confidence in confidences]
     hidden = len(all_groups) - len(groups)
@@ -710,7 +723,9 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
 def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
     """出現ごと：各出現を個別にマスク。チェックは共有選択 sel を読み書きする。"""
     all_cands = _sorted_by_confidence(
-        list(analysis.candidates), key=lambda c: c.surface
+        list(analysis.candidates),
+        key=lambda c: c.surface,
+        mask_rank=lambda c: 0 if (c.start, c.end) in sel else 1,  # マスク中を先頭に
     )
     cands = [c for c in all_cands if c.confidence in confidences]
     hidden = len(all_cands) - len(cands)
