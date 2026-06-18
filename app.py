@@ -607,22 +607,14 @@ def _auto_mask_spans(analysis) -> set:
     }
 
 
-def _apply_selection(engine, analysis, sel: set, by_entity: bool):
+def _apply_selection(engine, analysis, sel: set):
     """共有選択 ``sel``（マスクする span 集合）から :class:`MaskResult` を作る。
 
-    実体ごと＝その語の出現が 1 つでも ``sel`` にあれば、その語を ``expand``（文書内の全出現）で
-    マスク。出現ごと＝``sel`` にある span だけを正確にマスク（展開しない）。どちらのモードでも
-    ``sel`` は同一なので、ビューを切り替えても選択は消えない（実体↔出現の双方向）。
+    **結果はビューに依存しない**：``sel`` にある span（＝選択した出現）だけを正確にマスクする
+    （展開しない）。実体ごと/出現ごとは「``sel`` をどう編集するか」の違いだけで、表示結果は常に
+    ``sel`` と一致する＝**ビュー切替で広がらない**。実体ごとで語をチェックして[反映]すると、その語の
+    全（検出）出現が ``sel`` に入る（＝実質その語を一括マスク）が、それは明示操作のときだけ。
     """
-    if by_entity:
-        groups = engine.group_candidates(analysis.candidates)
-        selected = [
-            m
-            for g in groups
-            if any((mm.start, mm.end) in sel for mm in g.members)
-            for m in g.members
-        ]
-        return engine.apply(analysis, selected, expand=True)
     selected = [c for c in analysis.candidates if (c.start, c.end) in sel]
     return engine.apply(analysis, selected, expand=False)
 
@@ -635,15 +627,28 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
     groups = [g for g in all_groups if g.confidence in confidences]
     hidden = len(all_groups) - len(groups)
     st.subheader(f"マスク候補（{len(groups)} 実体）— チェックで選択")
-    cap = "確定/強は初期チェック ON。チェックした実体は**文書内の全出現**がマスクされます。"
+    cap = "チェックは**全出現が選択されているときだけ ON**。チェックした実体は文書内の全出現がマスクされます。"
     if hidden:
         cap += f"（確信度フィルタで {hidden} 実体を非表示）"
-    cap += "　※選択は出現ごとビューと共有（切替で消えません）。"
+    cap += (
+        "　※`選択状況` が **⚠一部** の語は、出現ごとビューで一部だけマスクしています"
+        "（実体全体ではない）。選択は両ビュー共有（切替で消えません）。"
+    )
     st.caption(cap)
-    table = pd.DataFrame(
-        [
+    rows = []
+    for g in groups:
+        spans = [(m.start, m.end) for m in g.members]
+        n_sel = sum(1 for s in spans if s in sel)
+        if n_sel == 0:
+            status = ""
+        elif n_sel < g.count:
+            status = f"⚠ 一部 {n_sel}/{g.count}"
+        else:
+            status = f"全 {g.count}"
+        rows.append(
             {
-                "マスク": any((m.start, m.end) in sel for m in g.members),
+                "マスク": n_sel == g.count,  # 全出現が選択済みのときだけ ON
+                "選択状況": status,
                 "除外": g.confidence == "除外",
                 "確信度": _confidence_label(g.confidence),
                 "カテゴリ": g.category,
@@ -654,9 +659,8 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
                 "Sudachi": g.vote_labels("sudachi"),
                 "辞書": "○" if g.vote_label("dict") else "",
             }
-            for g in groups
-        ]
-    )
+        )
+    table = pd.DataFrame(rows)
     st.caption(
         "チェックしてから **[✅ マスクを反映]** を押すと結果に反映されます"
         "（チェック中は再描画しません＝画面が先頭に飛びません）。"
@@ -684,14 +688,16 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
         excl = col_b.form_submit_button("🚫 選択を除外リストへ")
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
-    if applied:  # 表示中の実体について sel を更新（ON=全出現を追加／OFF=全出現を削除）
+    if applied:  # **変化したチェックだけ**反映（出現ごとの部分選択を壊さない）
         new_sel = set(sel)
         for g, on, ex in zip(groups, masks, excludes):
             spans = {(m.start, m.end) for m in g.members}
-            if on and not ex:
-                new_sel |= spans
-            else:
+            was_on = spans <= sel  # 表示時のチェック状態（全出現が選択済み＝チェック ON）
+            if ex or (was_on and not on):  # 除外 or チェックを外した → 全出現を削除
                 new_sel -= spans
+            elif on and not was_on:  # 新たにチェック → 全出現を追加
+                new_sel |= spans
+            # 変化なし（was_on == on）→ そのまま（部分選択を保持）
         stored["mask_sel"] = new_sel
         stored["mask_ver"] = ver + 1
         st.rerun()
@@ -1038,8 +1044,8 @@ def render_masking_result(stored: dict) -> None:
         )
         st.rerun()
 
-    # 共有選択から結果を作る（モードの意味＝実体は展開／出現は span 単位で適用）。
-    result = _apply_selection(engine, analysis, stored["mask_sel"], by_entity)
+    # 共有選択から結果を作る（ビュー非依存＝sel の span だけをマスク。切替で広がらない）。
+    result = _apply_selection(engine, analysis, stored["mask_sel"])
 
     # --- 結果（色付き表示 / マスク済み / 元テキスト） ---
     col_main, col_side = st.columns([3, 1])
