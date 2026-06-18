@@ -1267,12 +1267,20 @@ def main() -> None:
     # cache/kb は **選択を fragment 内で行う**ため、行クリックでは外側（このボタン）が再実行されず
     #   選択が反映されない。そこでボタンを選択に依存させず、モデルさえあれば押せるようにし、
     #   未選択のクリックは下のハンドラで案内する（stored への誤フォールバックはしない）。
+    # 「解析する」は**実際に解析できるとき**だけ活性にする（文書未選択で押せて何も起きない、を防ぐ）。
+    # cache/kb は一覧から行を選ぶと get_chunks が非 None になる＝それで can_fresh が立つ。
     models_ok = not (masking_mode and not models)
     can_fresh = get_chunks is not None and models_ok
     can_reuse_stored = input_kind == "file" and stored is not None and models_ok
-    can_select_list = input_kind in ("cache", "kb") and models_ok
-    can_analyze = can_fresh or can_reuse_stored or can_select_list
+    can_analyze = can_fresh or can_reuse_stored
     clicked = st.button("🔍 解析する", type="primary", disabled=not can_analyze)
+    if not can_analyze:  # なぜ押せないかを明示（誤解防止）
+        if masking_mode and not models:
+            st.caption("⚠ サイドバーでモデルを 1 つ以上選択してください。")
+        elif input_kind in ("cache", "kb"):
+            st.caption("⚠ 一覧から文書を選択すると [🔍 解析する] が押せます。")
+        else:
+            st.caption("⚠ 入力（テキスト／ファイル／kb-mcp）を指定すると押せます。")
 
     # ボタン下の出力（案内 / スピナー / 結果）は 1 つの placeholder に集約する。
     # クリック時にここを描き替えてから解析に入るので、モデルロード等で処理が止まっても
