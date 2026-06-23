@@ -976,10 +976,12 @@ def analyze_masking(
     dict_path: str,
     allowlist_path: str,
     llm_detection: LlmDetection | None = None,
+    run_ner: bool = True,
 ):
-    """マスキング検出（重い）。ボタン押下時のみ呼ぶ。
+    """マスキング検出。ボタン押下時のみ呼ぶ。
 
     ``llm_detection`` を渡すと LLM 検出を ``llm`` チャネルとして票に合流する（出口2）。
+    ``run_ner=False`` で GiNZA を回さず、辞書＋regex（＋LLM）だけで集約する（§13・軽い）。
     """
     engine = get_masking_engine(tuple(models), dict_path)
     allowlist = _load_allowlist(allowlist_path)
@@ -991,6 +993,7 @@ def analyze_masking(
         ner_cache=_ner_cache(),
         progress=_stage_callback(status, len(chunks)),
         llm_detection=llm_detection,
+        run_ner=run_ner,
     )
     status.empty()
     return analysis
@@ -1263,6 +1266,10 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
                 stored["dict_path"],
                 stored["allowlist_path"],
             )
+            # マージは NER 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
+            stored.pop("analysis", None)
+            stored.pop("mask_sel", None)
+            stored.pop("_draft_saved", None)
             st.rerun()
         return
 
@@ -1338,12 +1345,32 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
-    """マージ&確信度タブ（出口2）：▶ で全チャネル（NER＋実行済みなら LLM）を集約し候補レビュー。"""
+    """マージ&確信度タブ（出口2）：**走ったチャネル**＋常時ルールベースを集約し候補レビュー（§13）。
+
+    常に：辞書＋正規表現（決定的・軽い。辞書のため Sudachi トークナイズが内部で走る）。
+    NER 検出タブを実行済みなら GiNZA NER 票を、LLM 検出タブを実行済みなら LLM 票を合流する。
+    **GiNZA は NER 検出を実行したときだけ回る**（未実行なら辞書＋regex＋LLM で完結＝軽い）。
+    """
+    run_ner = "ner" in stored
+    has_llm = "llm" in stored
     if "analysis" not in stored:
-        det = (stored.get("llm") or {}).get("detection")
-        note = "（NER＋LLM 票を合流）" if det else "（NER のみ。LLM 未実行）"
-        st.info("『▶ マージ&確信度を実行』で全チャネルの票を集約します。" + note)
+        chans = ["辞書", "正規表現"]
+        if run_ner:
+            chans.append("NER(GiNZA)")
+        if has_llm:
+            chans.append("LLM")
+        st.info(
+            f"『▶ マージ&確信度を実行』で **{' ＋ '.join(chans)}** の票を集約し確信度づけします。\n\n"
+            "・**走ったチャネルだけ**合流します（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで実行）。\n"
+            "・辞書＋正規表現は常時。確信度＝投票チャネル数（単独→中／2チャネル→強／辞書→確定／regex→強）。\n"
+            + (
+                "・**GiNZA は未実行＝軽い**（辞書のため Sudachi のみ内部で動作）。"
+                if not run_ner
+                else "・NER 実行済み＝GiNZA 票も合流（NER 層はキャッシュ）。"
+            )
+        )
         if st.button("▶ マージ&確信度を実行", type="primary", key="run_merge"):
+            det = (stored.get("llm") or {}).get("detection")
             stored["analysis"] = analyze_masking(
                 stored["chunks"],
                 stored["models"],
@@ -1351,12 +1378,19 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
                 stored["dict_path"],
                 stored["allowlist_path"],
                 llm_detection=det,
+                run_ner=run_ner,
             )
             stored.pop("mask_sel", None)
             stored.pop("_draft_saved", None)
             stored["mask_ver"] = 0
             st.rerun()
         return
+    st.caption(
+        "合流したチャネル: 辞書＋正規表現"
+        + ("＋NER" if run_ner else "")
+        + ("＋LLM" if has_llm else "")
+        + "　— 確信度＝チャネル投票数。LLM 単独は『🤖 LLM検出』タブ（出口1）。"
+    )
     render_masking_result(stored)
 
 
