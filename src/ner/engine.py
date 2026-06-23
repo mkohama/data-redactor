@@ -24,7 +24,11 @@ from typing import Any
 
 import spacy
 
-from src.ner.preprocess import prepare_for_ner_with_map
+from src.ner.preprocess import (
+    CHUNK_SEPARATOR,
+    _body_from_pieces,
+    _prepare_pieces,
+)
 
 # 進捗（ステージ）コールバック型：progress(stage_index, stage_total, label)。各ステージ開始時に
 # 1 回呼ぶ。UI 非依存（UI 側でステージ表示に使う）。
@@ -49,15 +53,8 @@ for _noisy in ("thinc", "torch", "huggingface_hub", "transformers"):
 AVAILABLE_MODELS: tuple[str, ...] = ("ja_ginza_electra", "ja_ginza")
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
 
-# GiNZA が内部で使う SudachiPy のトークナイズ上限（1 回の解析あたりのバイト数）。
-# これを超えると `SudachiError: Input is too long` で落ちる。
-SUDACHI_MAX_BYTES = 49149
-# 上限に対する安全マージン。通常はチャンク分割（src.core.document.text_splitter）で
-# 既に十分小さくなっているが、巨大な 1 チャンク/1 行が来ても確実に通すための保険。
-SAFE_CHUNK_BYTES = 40000
-
-# チャンク結合時の区切り（表示テキスト＝解析テキストの連結に使う）。
-CHUNK_SEPARATOR = "\n\n"
+# チャンク分割の前処理（小片化・本文/オフセット構築）は src.ner.preprocess に集約した
+# （CHUNK_SEPARATOR / _prepare_pieces / _body_from_pieces / build_body）。NER 非依存＝LLM 検出も共有する。
 
 # nlp.pipe を流すときの「1 ミニバッチあたりの累積文字数」上限。
 # spaCy/thinc は 1 ミニバッチのトークンを 1 つの配列 (Σtokens, width) に載せるため、全チャンクを
@@ -298,23 +295,25 @@ class NerEngine:
 
         :meth:`extract_chunks` と同じ小片分割・オフセット補正を使う。マスキングの
         パイプライン（src.masking）が、SudachiPy 品詞とスパンを使って候補を作るために用いる。
+
+        本文系（``text``/``original_text``/``offset_map``）は **spaCy 非依存**なので
+        :func:`~src.ner.preprocess.build_body` と同じ :func:`~src.ner.preprocess._body_from_pieces`
+        で組む（＝LLM 検出層と本文座標を共有する。接続点 (J1)）。本メソッドはそれに
+        ``tokens``/``entities`` を doc から足すだけ。
         """
         pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
+        body = _body_from_pieces(
+            pieces
+        )  # text/original_text/offset_map（spaCy 非依存）
         tokens: list[AnalyzedToken] = []
         entities: list[Entity] = []
-        omap: list[int] = []  # 平坦化テキストの各文字 → 原文の文字位置（挿入は -1）
-        orig_parts: list[str] = []
         offset = 0  # 平坦化テキスト基準のオフセット（トークン/エンティティ用）
-        orig_offset = 0  # 原文基準のオフセット
         sep_len = len(CHUNK_SEPARATOR)
         for idx, (piece, doc) in enumerate(
             zip(pieces, _pipe_in_batches(self.nlp, [p.flat for p in pieces]))
         ):
-            if idx > 0:  # 小片の区切り（CHUNK_SEPARATOR）は flat/orig 双方に入る
-                omap.extend(orig_offset + k for k in range(sep_len))
+            if idx > 0:  # 小片の区切り（CHUNK_SEPARATOR）の分だけ flat 座標を進める
                 offset += sep_len
-                orig_offset += sep_len
-                orig_parts.append(CHUNK_SEPARATOR)
             for tok in doc:
                 if tok.is_space:
                     continue
@@ -337,26 +336,14 @@ class NerEngine:
                         end=ent.end_char + offset,
                     )
                 )
-            omap.extend(orig_offset + c if c != -1 else -1 for c in piece.cmap)
             offset += len(piece.flat)
-            orig_offset += len(piece.orig)
-            orig_parts.append(piece.orig)
         return Analysis(
-            text=CHUNK_SEPARATOR.join(p.flat for p in pieces),
+            text=body.text,
             tokens=tuple(tokens),
             entities=tuple(entities),
-            original_text="".join(orig_parts),
-            offset_map=tuple(omap),
+            original_text=body.original_text,
+            offset_map=body.offset_map,
         )
-
-
-@dataclass(frozen=True)
-class _Piece:
-    """NER に渡す 1 小片。平坦化したときは原文との対応表も持つ。"""
-
-    flat: str  # NER へ渡す（平坦化後）テキスト
-    orig: str  # 対応する原文（平坦化前。`|` 入り）
-    cmap: tuple[int, ...]  # flat の各文字 → orig の文字位置（挿入文字は -1）
 
 
 def _pipe_in_batches(
@@ -381,69 +368,3 @@ def _pipe_in_batches(
         size += len(t)
     if batch:
         yield from nlp.pipe(batch)
-
-
-def _prepare_pieces(
-    chunks: Iterable[str], *, flatten_tables: bool = False
-) -> list[_Piece]:
-    """チャンク列を、実際に NER へ渡す小片（バイト数安全・空片除去済み）に整える。
-
-    :meth:`NerEngine.extract_chunks` と :meth:`NerEngine.debug_tokens` が同じ
-    入力で解析するよう、分割処理をここに集約する。平坦化はバイト数安全分割の**後**に
-    各小片へ適用し、原文（`|` 入り）と平坦化後の文字位置対応表（cmap）を保持する。
-    """
-    pieces: list[_Piece] = []
-    for chunk in chunks:
-        for orig in _byte_safe_pieces(chunk):
-            # 括弧グルー対策の空白挿入は flatten の有無によらず常に適用する
-            # （`姓A(社B)` の埋没＝辞書語の漏れを防ぐ）。flatten 時はテーブル平文化も。
-            flat, cmap = prepare_for_ner_with_map(orig, flatten_tables=flatten_tables)
-            if flat.strip():
-                pieces.append(_Piece(flat, orig, tuple(cmap)))
-    return pieces
-
-
-def _byte_safe_pieces(text: str, max_bytes: int = SAFE_CHUNK_BYTES) -> list[str]:
-    """テキストを UTF-8 で ``max_bytes`` 以下の小片に分割する（保険的フォールバック）。
-
-    まず行（``\\n``）境界でまとめ、1 行で超える場合のみ文字単位で強制分割する。
-    通常はチャンク分割で十分小さいため、ここはほぼ素通りする。
-    """
-    if len(text.encode("utf-8")) <= max_bytes:
-        return [text]
-
-    pieces: list[str] = []
-    buf = ""
-    for line in text.split("\n"):
-        candidate = f"{buf}\n{line}" if buf else line
-        if len(candidate.encode("utf-8")) <= max_bytes:
-            buf = candidate
-            continue
-        if buf:
-            pieces.append(buf)
-            buf = ""
-        if len(line.encode("utf-8")) > max_bytes:
-            pieces.extend(_hard_split_by_bytes(line, max_bytes))
-        else:
-            buf = line
-    if buf:
-        pieces.append(buf)
-    return pieces
-
-
-def _hard_split_by_bytes(text: str, max_bytes: int) -> list[str]:
-    """1 行が上限を超える場合に、文字単位でバイト数上限まで詰めて分割する。"""
-    pieces: list[str] = []
-    buf = ""
-    buf_bytes = 0
-    for ch in text:
-        ch_bytes = len(ch.encode("utf-8"))
-        if buf and buf_bytes + ch_bytes > max_bytes:
-            pieces.append(buf)
-            buf = ""
-            buf_bytes = 0
-        buf += ch
-        buf_bytes += ch_bytes
-    if buf:
-        pieces.append(buf)
-    return pieces
