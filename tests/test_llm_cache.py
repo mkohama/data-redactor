@@ -36,6 +36,36 @@ def test_json_roundtrip() -> None:
     assert detection_from_json(detection_to_json(d)) == d
 
 
+def test_has_llm_and_doc_info_flag(tmp_path) -> None:
+    """has_llm の存在チェックと、list_documents の DocInfo.has_llm 反映。"""
+    cache = NerCache(tmp_path / "cache.db")
+    h, model, ver = "hX", "gpt-4.1-mini", "v1"
+    assert not cache.has_llm(h, model, False, ver)
+    cache.put_llm(h, model, False, ver, detection_to_json(_sample()))
+    assert cache.has_llm(h, model, False, ver)
+    assert not cache.has_llm(h, model, True, ver)  # flatten 違いは別エントリ
+    assert not cache.has_llm(h, model, False, "v2")  # detector_version 違い
+
+    cache.record_document(h, "file", "x.txt", ["本文"])
+    docs = {d.content_hash: d for d in cache.list_documents()}
+    assert docs[h].has_llm is True
+
+
+def test_cached_ner_models(tmp_path) -> None:
+    """cached_ner_models が (content_hash, flatten) の NER 済みモデルを返す。"""
+    from src.ner.engine import Analysis
+
+    cache = NerCache(tmp_path / "cache.db")
+    h = "hY"
+    assert cache.cached_ner_models(h, False) == set()
+    empty = Analysis(
+        text="本文", tokens=(), entities=(), original_text="本文", offset_map=()
+    )
+    cache.put(h, "ja_ginza", False, empty)
+    assert cache.cached_ner_models(h, False) == {"ja_ginza"}
+    assert cache.cached_ner_models(h, True) == set()  # flatten 違い
+
+
 def test_cache_get_put_roundtrip(tmp_path) -> None:
     cache = NerCache(tmp_path / "cache.db")
     h, model, ver = "hash1", "gpt-4.1-mini", "v1"

@@ -33,6 +33,7 @@ from src.masking import (
     save_entries,
 )
 from src.llm import cached_detect
+from src.llm.detect_layer import DEFAULT_MODEL as LLM_MODEL
 from src.llm.schema import LlmDetection
 from src.masking.engine import vote_category
 from src.ner import (
@@ -196,14 +197,15 @@ def _cache_picker_fragment(docs: list) -> None:
                 "種別": d.source_kind,
                 "チャンク": d.chunk_count,
                 "文字数": d.char_count,
-                "モデル": _short_models(d.models),
+                "NER": _short_models(d.models) or "—",
+                "LLM": "✓" if d.has_llm else "—",
                 "解析日時": d.created_at,
             }
             for d in docs
         ]
     )
     st.caption(
-        f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択。列見出しで並べ替え可）"
+        f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択。NER/LLM 列で解析状態が分かります）"
     )
     event = st.dataframe(
         df,
@@ -882,7 +884,8 @@ def render_cache_view() -> None:
                 "種別": d.source_kind,
                 "チャンク": d.chunk_count,
                 "文字数": d.char_count,
-                "モデル": _short_models(d.models),
+                "NER": _short_models(d.models) or "—",
+                "LLM": "✓" if d.has_llm else "—",
                 "解析日時": d.created_at,
                 "hash": d.content_hash[:12],
             }
@@ -1233,37 +1236,46 @@ def render_masking_result(stored: dict) -> None:
 
 
 def _render_state_header(stored: dict) -> None:
-    """選択ソースのパイプライン状態（冒頭設計図のミニ版）。実行済みの保存物から導出して表示する。"""
-    has_ner = "ner" in stored
-    has_llm = "llm" in stored
-    has_merge = "analysis" in stored
-    draft = _ner_cache().get_draft(content_hash(stored["chunks"]))
-    merge = "✅" if has_merge else "⬜"
-    if has_merge and draft and (draft[0] or draft[1]):
-        merge += "（レビュー中・下書きあり）"
+    """選択ソースのパイプライン状態（冒頭設計図のミニ版）。
+
+    ✅=本セッションで実行済み / 📂=キャッシュ有（表示は一瞬） / ⬜=未。保存物（session＋cache.db）から導出。
+    """
+    chash = content_hash(stored["chunks"])
+    flatten = stored.get("flatten", False)
+    cache = _ner_cache()
+
+    def mark(in_session: bool, cached: bool) -> str:
+        return "✅" if in_session else ("📂" if cached else "⬜")
+
+    want = set(stored.get("models", []))
+    cached_models = cache.cached_ner_models(chash, flatten)
+    ner = mark("ner" in stored, bool(want) and want.issubset(cached_models))
+    llm = mark(
+        "llm" in stored, cache.has_llm(chash, LLM_MODEL, flatten, _DETECTOR_VERSION)
+    )
+    draft = cache.get_draft(chash)
+    merge = "✅" if "analysis" in stored else "⬜"
+    if "analysis" in stored and draft and (draft[0] or draft[1]):
+        merge += "（下書きあり）"
     st.caption(
-        "パイプライン状態:　平文 ✅　→　"
-        f"NER検出 {'✅' if has_ner else '⬜'}　＋　LLM検出 {'✅' if has_llm else '⬜'}　→　"
+        f"パイプライン状態:　平文 ✅　→　NER検出 {ner}　＋　LLM検出 {llm}　→　"
         f"マージ&確信度 {merge}　→　確定 ⬜"
+        "　（✅=本セッション実行 / 📂=キャッシュ有 / ⬜=未）"
     )
 
 
 def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
-    """NER検出タブ（独立経路）：▶ で GiNZA 解析を実行/再実行し、NER 由来候補のビューを出す。"""
-    has = "ner" in stored
-    force = st.checkbox(
-        "🔄 キャッシュを無視して再解析",
-        key="ner_force",
-        help="前処理やモデルの改善を反映したいとき。保存済み NER 結果を破棄して解析し直します。",
-    )
-    if st.button(
-        "▶ NER 解析を再実行" if has else "▶ NER 解析を実行",
-        type="primary",
-        key="run_ner",
-    ):
+    """NER検出タブ（独立経路）：キャッシュ状態に応じて 実行 / 表示＋再実行 を出し分ける。"""
+    chash = content_hash(stored["chunks"])
+    cached_models = _ner_cache().cached_ner_models(chash, flatten_tables)
+    want = set(stored["models"])
+    ner_cached = bool(want) and want.issubset(cached_models)
+    in_session = "ner" in stored
+
+    def _run(force: bool) -> None:
         if force:
-            _ner_cache().delete_ner(content_hash(stored["chunks"]))
-        with st.spinner("GiNZA で解析中 ..."):
+            _ner_cache().delete_ner(chash)
+        with st.spinner("GiNZA で解析中 ...（ステージ進捗が出ます）"):
             stored["ner"] = analyze_masking(
                 stored["chunks"],
                 stored["models"],
@@ -1276,10 +1288,35 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
 
-    if "ner" not in stored:
-        st.info(
-            "『▶ NER 解析を実行』で GiNZA（2モデル＋辞書）による解析を行います（LLM は含みません）。"
+    if in_session:
+        st.caption("NER 状態: ✅ 実行済み（このセッション）")
+        if st.button(
+            "🔄 再実行（キャッシュ無視・GiNZA で時間がかかります）", key="ner_rerun"
+        ):
+            _run(force=True)
+    elif ner_cached:
+        st.caption(
+            f"NER 状態: 📂 キャッシュ済み（{_short_models(tuple(sorted(cached_models)))}）"
+            "＝表示は一瞬（GiNZA 再実行なし）"
         )
+        c1, c2 = st.columns(2)
+        if c1.button("📂 キャッシュの結果を表示", type="primary", key="ner_show"):
+            _run(force=False)
+        if c2.button("🔄 再実行（キャッシュ無視・重い）", key="ner_rerun"):
+            _run(force=True)
+    else:
+        extra = (
+            f"（一部のみキャッシュ: {_short_models(tuple(sorted(cached_models)))}）"
+            if cached_models
+            else ""
+        )
+        st.caption(
+            f"NER 状態: ⬜ 未解析{extra}。実行は GiNZA（2モデル）で時間がかかります"
+        )
+        if st.button("▶ NER 解析を実行", type="primary", key="ner_run"):
+            _run(force=False)
+
+    if "ner" not in stored:
         return
 
     analysis = stored["ner"]
@@ -1325,25 +1362,20 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
-    """LLM検出タブ（独立経路・出口1）：pii-masker による検出を実行・表示する。"""
-    has = "llm" in stored
-    force = st.checkbox(
-        "🔄 LLM をやり直す（キャッシュを無視）",
-        key="llm_force",
-        help="同じ文書は既定でキャッシュを使い再呼び出ししません（Azure 節約）。"
-        "プロンプト改善などを反映したいときに ON で再検出します（NER キャッシュには触れません）。",
+    """LLM検出タブ（独立経路・出口1）：キャッシュ状態に応じて 実行 / 表示＋再実行 を出し分ける。"""
+    chash = content_hash(stored["chunks"])
+    llm_cached = _ner_cache().has_llm(
+        chash, LLM_MODEL, flatten_tables, _DETECTOR_VERSION
     )
-    if st.button(
-        "▶ LLM 検出を再実行" if has else "▶ LLM 検出を実行",
-        type="primary",
-        key="run_llm",
-    ):
+    in_session = "llm" in stored
+
+    def _run(force: bool) -> None:
         status = st.empty()
 
         def _cb(
             i: int, n: int
         ) -> None:  # 窓ごとの進捗（キャッシュヒット時は呼ばれない）
-            status.info(f"⏳ LLM 検出中 … 窓 {i + 1}/{n}（gpt-4.1-mini / pii-masker）")
+            status.info(f"⏳ LLM 検出中 … 窓 {i + 1}/{n}（{LLM_MODEL} / pii-masker）")
 
         try:
             t0 = time.perf_counter()
@@ -1357,24 +1389,40 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
                 f"LLM 検出に失敗しました: {e}\n"
                 "（実機で `az login` 済みか、.env の RESOURCE_NAME_GPT41_MINI を確認）"
             )
-        else:
-            status.empty()
-            stored["llm"] = {
-                "body_text": body_text,
-                "detection": detection,
-                "elapsed": elapsed,
-            }
-            # マージは LLM 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
-            stored.pop("analysis", None)
-            stored.pop("mask_sel", None)
-            stored.pop("_draft_saved", None)
+            return
+        status.empty()
+        stored["llm"] = {
+            "body_text": body_text,
+            "detection": detection,
+            "elapsed": elapsed,
+        }
+        # マージは LLM 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
+        stored.pop("analysis", None)
+        stored.pop("mask_sel", None)
+        stored.pop("_draft_saved", None)
+
+    if in_session:
+        st.caption("LLM 状態: ✅ 実行済み（このセッション）")
+        if st.button(
+            "🔄 LLM を再実行（キャッシュ無視・Azure 呼び出し）", key="llm_rerun"
+        ):
+            _run(force=True)
+    elif llm_cached:
+        st.caption("LLM 状態: 📂 キャッシュ済み＝表示は一瞬（Azure 呼び出しなし）")
+        c1, c2 = st.columns(2)
+        if c1.button("📂 キャッシュの結果を表示", type="primary", key="llm_show"):
+            _run(force=False)
+        if c2.button("🔄 再実行（キャッシュ無視・Azure 呼び出し）", key="llm_rerun"):
+            _run(force=True)
+    else:
+        st.caption(
+            f"LLM 状態: ⬜ 未実行。実行は {LLM_MODEL}（Azure）呼び出しで時間がかかります（要 `az login`）"
+        )
+        if st.button("▶ LLM 検出を実行", type="primary", key="llm_run"):
+            _run(force=False)
 
     llm = stored.get("llm")
     if not llm:
-        st.info(
-            "『▶ LLM 検出を実行』で gpt-4.1-mini（pii-masker 経由）による検出を行います"
-            "（NER とは独立。結果は本タブ＝出口1 に表示）。"
-        )
         return
     if llm.get("elapsed") is not None:
         n = len(llm["detection"].spans)

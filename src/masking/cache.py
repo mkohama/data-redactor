@@ -68,6 +68,7 @@ class DocInfo:
     chunk_count: int
     models: tuple[str, ...]  # NER キャッシュ済みのモデル
     created_at: str
+    has_llm: bool = False  # LLM 検出キャッシュ（llm_detection）が 1 件でもあるか
 
 
 class NerCache:
@@ -212,14 +213,37 @@ class NerCache:
             ).fetchone()
         return json.loads(row[0]) if row and row[0] else None
 
+    def cached_ner_models(self, content_hash: str, flatten: bool) -> set[str]:
+        """指定 (content_hash, flatten) で NER キャッシュ済みのモデル名集合。状態表示用。"""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT model FROM ner WHERE content_hash=? AND flatten=?",
+                (content_hash, int(flatten)),
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def has_llm(
+        self, content_hash: str, model: str, flatten: bool, detector_version: str
+    ) -> bool:
+        """LLM 検出キャッシュが存在するか（軽い存在チェック。値はデシリアライズしない）。"""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM llm_detection "
+                "WHERE content_hash=? AND model=? AND flatten=? AND detector_version=?",
+                (content_hash, model, int(flatten), detector_version),
+            ).fetchone()
+        return row is not None
+
     def list_documents(self) -> list[DocInfo]:
-        """キャッシュ済み文書の一覧（新しい順）。各文書の NER キャッシュ済みモデルも付ける。"""
+        """キャッシュ済み文書の一覧（新しい順）。NER 済みモデルと LLM 済み有無も付ける。"""
         with self._conn() as c:
             rows = c.execute(
                 "SELECT d.content_hash, d.source_kind, d.source_name, d.char_count, "
                 "d.chunk_count, d.created_at, "
                 "(SELECT GROUP_CONCAT(DISTINCT model) FROM ner n "
-                " WHERE n.content_hash = d.content_hash) "
+                " WHERE n.content_hash = d.content_hash), "
+                "EXISTS(SELECT 1 FROM llm_detection l "
+                " WHERE l.content_hash = d.content_hash) "
                 "FROM documents d ORDER BY d.created_at DESC"
             ).fetchall()
         return [
@@ -231,6 +255,7 @@ class NerCache:
                 chunk_count=r[4],
                 created_at=r[5],
                 models=tuple((r[6] or "").split(",")) if r[6] else (),
+                has_llm=bool(r[7]),
             )
             for r in rows
         ]
