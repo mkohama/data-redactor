@@ -27,6 +27,9 @@ dependencies = [
     "tabulate>=0.9.0",
     "tiktoken>=0.5.0",
     "xlrd>=2.0.2",
+    "openai>=2.43.0",
+    "azure-identity>=1.25.3",
+    "pydantic>=2.13.4",
 ]
 
 [project.scripts]
@@ -41,8 +44,17 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+# external/ は pii-masker の git submodule（他リポジトリのコード）。整形・lint・型チェックの対象外
+# （`black .` / `ruff check .` / `mypy .` がリポジトリ全体を走るため、submodule を触らないよう除外）。
+[tool.black]
+extend-exclude = "^/external/"
+
+[tool.ruff]
+extend-exclude = ["external"]
+
 [tool.mypy]
 python_version = "3.11"
+exclude = ["^external/"]
 
 # 型スタブを提供しない（または lint 実行環境に入っていない）サードパーティ
 # ライブラリの import エラーを抑制する。
