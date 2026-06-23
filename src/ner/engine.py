@@ -368,3 +368,59 @@ def _pipe_in_batches(
         size += len(t)
     if batch:
         yield from nlp.pipe(batch)
+
+
+# SudachiPy 単体トークナイザ（GiNZA/NER とは独立・激軽 ~0.02s）。初回のみ生成してキャッシュ。
+_SUDACHI: Any = None
+
+
+def _sudachi_tokenizer() -> Any:
+    global _SUDACHI
+    if _SUDACHI is None:
+        from sudachipy import dictionary, tokenizer
+
+        _SUDACHI = (
+            dictionary.Dictionary().create(),
+            tokenizer.Tokenizer.SplitMode.C,
+        )
+    return _SUDACHI
+
+
+def sudachi_analyze_chunks(
+    chunks: Iterable[str], *, flatten_tables: bool = False
+) -> Analysis:
+    """GiNZA NER を回さず **SudachiPy 単体**でトークン化のみ行う軽量解析（§13 ③）。
+
+    ``text``/``original_text``/``offset_map`` は :func:`~src.ner.preprocess.build_body` と同一
+    （spaCy 非依存）。``tokens`` は Sudachi 形態素（surface/品詞/オフセット）、``entities`` は空
+    （NER を回さない）。LLM-only / ルールベースのみ の経路で **辞書照合用トークン**を得るために使う。
+    各小片（``_prepare_pieces``）はバイト数安全（≤``SAFE_CHUNK_BYTES``）なので Sudachi 上限に掛からない。
+    """
+    pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
+    body = _body_from_pieces(pieces)
+    tk, mode = _sudachi_tokenizer()
+    tokens: list[AnalyzedToken] = []
+    offset = 0  # 平坦化テキスト（body.text）基準のオフセット
+    sep_len = len(CHUNK_SEPARATOR)
+    for idx, piece in enumerate(pieces):
+        if idx > 0:  # 小片の区切り（CHUNK_SEPARATOR）の分だけ進める
+            offset += sep_len
+        for m in tk.tokenize(piece.flat, mode):
+            tag = "-".join(p for p in m.part_of_speech() if p != "*")
+            tokens.append(
+                AnalyzedToken(
+                    start=m.begin() + offset,
+                    end=m.end() + offset,
+                    surface=m.surface(),
+                    tag=tag,
+                    pos="",
+                )
+            )
+        offset += len(piece.flat)
+    return Analysis(
+        text=body.text,
+        tokens=tuple(tokens),
+        entities=(),
+        original_text=body.original_text,
+        offset_map=body.offset_map,
+    )

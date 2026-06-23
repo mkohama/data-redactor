@@ -93,3 +93,36 @@ def test_allowlist_excludes_non_dict_candidate(engine: MaskingEngine) -> None:
     c = _find(a.candidates, "その人")
     assert c
     assert c[0].confidence == "除外"
+
+
+def test_llm_only_path_runs_without_ginza() -> None:
+    """run_ner=False（§13 ④）：GiNZA を回さず 辞書＋regex＋LLM だけで候補が出る。
+
+    models=[] のエンジン（NerEngine を 1 つも持たない）で動く＝GiNZA 非依存を実証。
+    辞書照合は SudachiPy 単体トークナイズ（§13 ③）で効く。Sudachi 品詞票・NER 票は出ない（A 案）。
+    """
+    eng = MaskingEngine(
+        dictionary=MaskDictionary({normalize("ニコン"): ("ニコン", "社名")}),
+        models=[],  # NER エンジンを持たない＝GiNZA は一切ロードしない
+    )
+    chunks = ["ニコンの田中: a@example.com まで"]
+    det = _llm_span(chunks, "田中", "Person")
+    a = eng.analyze(chunks, run_ner=False, llm_detection=det)
+
+    nikon = _find(a.candidates, "ニコン")
+    assert nikon and nikon[0].confidence == "確定"  # 辞書は Sudachi 単体トークンで効く
+
+    email = _find(a.candidates, "a@example.com")
+    assert email and email[0].confidence == "強"  # regex は常時
+
+    tanaka = _find(a.candidates, "田中")
+    assert tanaka and tanaka[0].confidence == "中"
+    assert ("llm", "Person") in tanaka[0].votes
+
+    # NER 経路の票（sudachi 品詞 / GiNZA）は一切入らない（A 案）。
+    assert all(
+        ch not in ("sudachi", "ja_ginza", "ja_ginza_electra")
+        for c in a.candidates
+        for ch, _ in c.votes
+    )
+    assert a.timings == ()  # モデルを回していない

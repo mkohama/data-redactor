@@ -41,7 +41,7 @@ from src.masking.allowlist import MaskAllowlist
 from src.masking.cache import NerCache, content_hash
 from src.masking.dictionary import MAX_MATCH_TOKENS, MaskDictionary, normalize
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
-from src.ner.engine import Analysis, ProgressCallback
+from src.ner.engine import Analysis, ProgressCallback, sudachi_analyze_chunks
 
 if TYPE_CHECKING:  # 型のみ（実行時 import しない＝engine は src.llm/IO に依存しない）
     from src.llm.schema import LlmDetection
@@ -340,6 +340,7 @@ class MaskingEngine:
         ner_cache: NerCache | None = None,
         progress: ProgressCallback | None = None,
         llm_detection: LlmDetection | None = None,
+        run_ner: bool = True,
     ) -> MaskAnalysis:
         """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。
 
@@ -354,96 +355,68 @@ class MaskingEngine:
         （最速の既定バッチで処理するため。小バッチ化は本末転倒）。「どの段階か」を示すのが目的。
         """
         chunks = list(chunks)
-        n_models = len(self.engines)
-        n_stages = n_models + 1  # 各モデル ＋ 候補集約
-
-        # NER 層（激重）を (content_hash, model, flatten) でキャッシュ。ヒットすれば GiNZA を
-        #   スキップ。マスキング層（下の候補生成）は辞書/除外に依存するので毎回再計算する。
-        chash = content_hash(chunks) if ner_cache is not None else ""
         per_model: list[tuple[str, Analysis]] = []
         timings: list[tuple[str, float]] = []
-        for idx, e in enumerate(self.engines):
-            cached = (
-                ner_cache.get(chash, e.model_name, flatten_tables)
-                if ner_cache is not None
-                else None
-            )
-            if progress is not None:  # 重い解析の前にこの段階を表示（実行中に見える）
-                label = f"{e.model_name} を解析" + (
-                    "（キャッシュ）" if cached else "中"
+        other_raw: list[Candidate] = []
+
+        if run_ner:
+            # NER 経路（NLP 処理＝GiNZA 2モデル。激重）。(content_hash, model, flatten) でキャッシュ。
+            #   ヒットすれば GiNZA をスキップ。下の候補生成（辞書/除外依存）は毎回再計算する。
+            n_models = len(self.engines)
+            n_stages = n_models + 1  # 各モデル ＋ 候補集約
+            chash = content_hash(chunks) if ner_cache is not None else ""
+            for idx, e in enumerate(self.engines):
+                cached = (
+                    ner_cache.get(chash, e.model_name, flatten_tables)
+                    if ner_cache is not None
+                    else None
                 )
-                progress(idx, n_stages, label)
-            t0 = perf_counter()
-            if cached is not None:
-                a = cached
-            else:
-                a = e.analyze_chunks(chunks, flatten_tables=flatten_tables)
                 if (
-                    ner_cache is not None
-                ):  # 未確定でも解析過程として保存（再解析を一瞬に）
-                    ner_cache.put(chash, e.model_name, flatten_tables, a)
-            timings.append((e.model_name, perf_counter() - t0))
-            per_model.append((e.model_name, a))
-        if progress is not None:
-            progress(n_models, n_stages, "候補を集約・確信度づけ中")
-        base = per_model[0][1]
+                    progress is not None
+                ):  # 重い解析の前にこの段階を表示（実行中に見える）
+                    label = f"{e.model_name} を解析" + (
+                        "（キャッシュ）" if cached else "中"
+                    )
+                    progress(idx, n_stages, label)
+                t0 = perf_counter()
+                if cached is not None:
+                    a = cached
+                else:
+                    a = e.analyze_chunks(chunks, flatten_tables=flatten_tables)
+                    if (
+                        ner_cache is not None
+                    ):  # 未確定でも解析過程として保存（再解析を一瞬に）
+                        ner_cache.put(chash, e.model_name, flatten_tables, a)
+                timings.append((e.model_name, perf_counter() - t0))
+                per_model.append((e.model_name, a))
+            if progress is not None:
+                progress(n_models, n_stages, "候補を集約・確信度づけ中")
+            base = per_model[0][1]
+            # NLP（NER）チャネルの票＝Sudachi 品詞 ∪ GiNZA NER（§13。A 案: Sudachi 票は NER 実行時のみ）。
+            other_raw = _sudachi_raw(base.tokens, base.text) + _ner_raw(
+                per_model, base.text
+            )
+        else:
+            # 軽量経路（§13 ③）：GiNZA を回さず SudachiPy 単体でトークンのみ（辞書照合用）。
+            #   Sudachi 品詞票・NER 票は出さない（A 案）。ルールベース＋LLM のみで候補を作る。
+            if progress is not None:
+                progress(0, 1, "候補を集約・確信度づけ中（NER なし）")
+            base = sudachi_analyze_chunks(chunks, flatten_tables=flatten_tables)
+
         text = base.text
         tokens = base.tokens
         surfaces = [t.surface for t in tokens]
 
-        # ②③ 辞書に依存しない票（Sudachi 品詞 ∪ NER）。両フェーズで共通なので一度だけ作る。
-        #     Product_Other 系（その他）はノイズ過多のため NER からは除外（埋没社名・商標は辞書で拾う）。
-        other_raw: list[Candidate] = []
-        for t in tokens:
-            category = _sudachi_category(t.tag)
-            if category is not None:
-                other_raw.append(
-                    _raw(t.start, t.end, text, category, ("sudachi", t.tag))
-                )
-        for model_name, analysis in per_model:
-            for ent in analysis.entities:
-                category = _NER_LABEL_CATEGORY.get(ent.label.upper())
-                if category is None:
-                    continue
-                # NER スパンを `、`/`。`/改行で分割（実在名に出ない＝セル/文をまたいだ融合の人工物。
-                #   例 平文化セル境界の `N、D`）。各片に同じ NER 票を付ける。融合でも実体を取りこぼさない。
-                for sp_s, sp_e in _split_on_separators(text, ent.start, ent.end):
-                    other_raw.append(
-                        _raw(sp_s, sp_e, text, category, (model_name, ent.label))
-                    )
         # LLM（pii-masker）検出を `llm` チャネルの票として合流（J2）。新カテゴリ・新確信度は作らず、
         #   tally_votes に1チャネルとして流すだけ＝単独→中／NER 相乗り→強／確定は名簿のみ（§7-②）。
         if llm_detection is not None:
             other_raw.extend(_llm_raw(llm_detection, text))
 
-        def matches_raw(
-            dictionary: MaskDictionary, channel: str, suffix: str
-        ) -> list[Candidate]:
-            out: list[Candidate] = []
-            for m in dictionary.match(surfaces):
-                start = tokens[m.start_token].start
-                end = tokens[m.end_token - 1].end
-                out.append(
-                    _raw(
-                        start, end, text, m.category, (channel, f"{m.category}{suffix}")
-                    )
-                )
-            return out
-
-        # 実辞書の票（確定の根拠）。両フェーズで共通。
-        dict_raw = matches_raw(self.dictionary, "dict", "(辞書)")
-
-        # `embed: true` の辞書語をサブワード境界で内包照合（SmashMark の Smash、CBMark の CB 等）。
-        #   命中はトークン全体でなく**一致したサブワード部分だけ**を span に。dict 票＝確定扱い。
-        embed_raw: list[Candidate] = []
-        for ti, sub_s, sub_e, _canon, category in self.dictionary.embedded_matches(
-            surfaces
-        ):
-            es = tokens[ti].start + sub_s
-            ee = tokens[ti].start + sub_e
-            embed_raw.append(
-                _raw(es, ee, text, category, ("dict", f"{category}(辞書·内包)"))
-            )
+        # 実辞書の票（確定の根拠）＋ `embed: true` のサブワード内包照合。両フェーズで共通。
+        dict_raw = _dict_matches_raw(
+            self.dictionary, tokens, surfaces, text, "dict", "(辞書)"
+        )
+        embed_raw = _embed_raw(self.dictionary, tokens, surfaces, text)
 
         # フェーズ① 実辞書で確信度づけ
         clusters = _cluster(text, dict_raw + embed_raw + other_raw)
@@ -453,7 +426,9 @@ class MaskingEngine:
         if promote:
             promoted = _promoted_dictionary(self.dictionary, clusters, extra_terms)
             if promoted is not None:
-                session_raw = matches_raw(promoted, "session", "(確認済)")
+                session_raw = _dict_matches_raw(
+                    promoted, tokens, surfaces, text, "session", "(確認済)"
+                )
                 clusters = _cluster(
                     text, dict_raw + embed_raw + session_raw + other_raw
                 )
@@ -642,6 +617,75 @@ def _split_on_separators(text: str, start: int, end: int) -> list[tuple[int, int
     if seg_start is not None:
         spans.append((seg_start, end))
     return spans
+
+
+# --------------------------------------------------------------------------- #
+# チャネル別の票生成（§13 のチャネル分離）。各関数は「生候補（confidence 未確定）」の列を返す。
+# 集約（_cluster/tally_votes/_confidence）はチャネル非依存なので、ここを足し引きするだけで
+# 「走ったチャネルだけ集計」が表現できる（NER 任意化＝④ の土台）。
+# --------------------------------------------------------------------------- #
+def _dict_matches_raw(
+    dictionary: MaskDictionary,
+    tokens: tuple[AnalyzedToken, ...],
+    surfaces: list[str],
+    text: str,
+    channel: str,
+    suffix: str,
+) -> list[Candidate]:
+    """辞書のトークン照合を ``channel`` 票（生候補）にする（dict→確定 / session→強 の根拠）。"""
+    out: list[Candidate] = []
+    for m in dictionary.match(surfaces):
+        start = tokens[m.start_token].start
+        end = tokens[m.end_token - 1].end
+        out.append(
+            _raw(start, end, text, m.category, (channel, f"{m.category}{suffix}"))
+        )
+    return out
+
+
+def _embed_raw(
+    dictionary: MaskDictionary,
+    tokens: tuple[AnalyzedToken, ...],
+    surfaces: list[str],
+    text: str,
+) -> list[Candidate]:
+    """``embed: true`` 辞書語のサブワード境界内包照合を dict 票（生候補）にする。
+
+    命中はトークン全体でなく**一致したサブワード部分だけ**を span にする（`SmashMark`→`Smash` 等）。
+    """
+    out: list[Candidate] = []
+    for ti, sub_s, sub_e, _canon, category in dictionary.embedded_matches(surfaces):
+        es = tokens[ti].start + sub_s
+        ee = tokens[ti].start + sub_e
+        out.append(_raw(es, ee, text, category, ("dict", f"{category}(辞書·内包)")))
+    return out
+
+
+def _sudachi_raw(tokens: tuple[AnalyzedToken, ...], text: str) -> list[Candidate]:
+    """Sudachi 品詞（固有名詞）を ``sudachi`` 票（生候補）にする（NLP/NER チャネルの一部）。"""
+    out: list[Candidate] = []
+    for t in tokens:
+        category = _sudachi_category(t.tag)
+        if category is not None:
+            out.append(_raw(t.start, t.end, text, category, ("sudachi", t.tag)))
+    return out
+
+
+def _ner_raw(per_model: list[tuple[str, Analysis]], text: str) -> list[Candidate]:
+    """GiNZA NER エンティティを各モデル名チャネルの票（生候補）にする。
+
+    Product_Other 系（その他）はノイズ過多のため除外。NER スパンは `、`/`。`/改行で分割
+    （セル/文/チャンクをまたいだ融合の人工物を片へ割る。融合でも実体を取りこぼさない）。
+    """
+    out: list[Candidate] = []
+    for model_name, analysis in per_model:
+        for ent in analysis.entities:
+            category = _NER_LABEL_CATEGORY.get(ent.label.upper())
+            if category is None:
+                continue
+            for sp_s, sp_e in _split_on_separators(text, ent.start, ent.end):
+                out.append(_raw(sp_s, sp_e, text, category, (model_name, ent.label)))
+    return out
 
 
 def _looks_like_code(surface: str) -> bool:

@@ -89,6 +89,8 @@ module = [
     "pydantic.*",
     "spacy",
     "spacy.*",
+    "sudachipy",
+    "sudachipy.*",
     "streamlit",
     "streamlit.*",
     "yaml",
