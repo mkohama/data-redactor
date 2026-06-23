@@ -65,7 +65,7 @@ def test_single_window_propagates_fields_and_offsets() -> None:
     assert det.model == "gpt-4.1-mini"
     assert det.detector_version == "v1"
     assert det.not_found == ()
-    by_text = {text[s.start:s.end]: s for s in det.spans}
+    by_text = {text[s.start : s.end]: s for s in det.spans}
     assert set(by_text) == {"田中", "佐藤"}
     assert by_text["田中"].ene_type == "Person"
     assert by_text["田中"].reason == "姓"
@@ -86,7 +86,7 @@ def test_window_start_applied_in_later_window() -> None:
     assert len(det.spans) == 1
     s = det.spans[0]
     assert (s.start, s.end) == (6, 8)
-    assert text[s.start:s.end] == "佐藤"
+    assert text[s.start : s.end] == "佐藤"
 
 
 def test_not_found_is_propagated() -> None:
@@ -119,7 +119,7 @@ def test_overlap_duplicate_is_resolved() -> None:
     assert len(det.spans) == 1
     s = det.spans[0]
     assert (s.start, s.end) == (6, 12)
-    assert text[s.start:s.end] == "TARGET"
+    assert text[s.start : s.end] == "TARGET"
 
 
 def test_empty_text() -> None:

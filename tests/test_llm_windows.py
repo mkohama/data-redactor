@@ -39,8 +39,8 @@ def test_greedy_packing_groups_segments_under_budget() -> None:
     wins = iter_windows(text, max_tokens=2, overlap=0)
     # 2 トークン予算 → 2 セグメントずつ ＝ 2 窓
     assert len(wins) == 2
-    assert text[wins[0][0]:wins[0][1]] == "あ" + CHUNK_SEPARATOR + "い"
-    assert text[wins[1][0]:wins[1][1]] == "う" + CHUNK_SEPARATOR + "え"
+    assert text[wins[0][0] : wins[0][1]] == "あ" + CHUNK_SEPARATOR + "い"
+    assert text[wins[1][0] : wins[1][1]] == "う" + CHUNK_SEPARATOR + "え"
 
 
 def test_oversized_segment_is_its_own_window() -> None:
@@ -59,6 +59,6 @@ def test_overlap_extends_later_windows_backward() -> None:
     ov = iter_windows(text, max_tokens=1, overlap=100)
     assert len(no_ov) == len(ov) == 4
     # overlap=0 の 2 窓目は seg1 のみ。overlap 有では直前 seg0 までさかのぼって含む。
-    assert text[no_ov[1][0]:no_ov[1][1]] == "seg1"
+    assert text[no_ov[1][0] : no_ov[1][1]] == "seg1"
     assert ov[1][0] < no_ov[1][0]
-    assert "seg0" in text[ov[1][0]:ov[1][1]]
+    assert "seg0" in text[ov[1][0] : ov[1][1]]

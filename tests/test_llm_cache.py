@@ -82,21 +82,26 @@ def test_cached_detect_runs_once_then_hits_cache(tmp_path) -> None:
         return out, []
 
     text = "田中さんの記録"
-    kw = dict(
-        flatten=False,
-        detector_version="v1",
-        detect_fn=detect_fn,
-        locate_fn=locate_fn,
-    )
-    d1 = cached_detect(cache, "h", text, **kw)
-    assert calls["n"] == 1
-    assert len(d1.spans) == 1 and text[d1.spans[0].start:d1.spans[0].end] == "田中"
 
-    d2 = cached_detect(cache, "h", text, **kw)
+    def run(version: str = "v1") -> LlmDetection:
+        return cached_detect(
+            cache,
+            "h",
+            text,
+            flatten=False,
+            detector_version=version,
+            detect_fn=detect_fn,
+            locate_fn=locate_fn,
+        )
+
+    d1 = run()
+    assert calls["n"] == 1
+    assert len(d1.spans) == 1 and text[d1.spans[0].start : d1.spans[0].end] == "田中"
+
+    d2 = run()
     assert calls["n"] == 1  # 2 回目は検出を走らせない（キャッシュヒット）
     assert d2 == d1
 
     # detector_version を上げるとミス＝再検出
-    kw_v2 = {**kw, "detector_version": "v2"}
-    cached_detect(cache, "h", text, **kw_v2)
+    run("v2")
     assert calls["n"] == 2

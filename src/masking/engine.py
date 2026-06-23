@@ -35,12 +35,16 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 from src.masking.allowlist import MaskAllowlist
 from src.masking.cache import NerCache, content_hash
 from src.masking.dictionary import MAX_MATCH_TOKENS, MaskDictionary, normalize
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
 from src.ner.engine import Analysis, ProgressCallback
+
+if TYPE_CHECKING:  # 型のみ（実行時 import しない＝engine は src.llm/IO に依存しない）
+    from src.llm.schema import LlmDetection
 
 # クラスタ代表カテゴリの選択優先度（地名・その他は低い）
 _CAT_PRIORITY = ["人名", "社名", "商標", "連絡先", "地名", "その他"]
@@ -96,6 +100,30 @@ _NER_LABEL_CATEGORY: dict[str, str] = {
     "AIRPORT": "地名",
     # 連絡先（Phone_Number/Email/URL）は意図的に含めない（上のコメント参照。正規表現に委ねる）。
 }
+
+# LLM（pii-masker）の ENE type → data-redactor の6カテゴリ（§7-④。内部語彙は6カテゴリに畳む）。
+# 生 ene_type は LlmSpan 側に温存し、出口1 で細分表示する（merge 語彙は汚さない）。
+_ENE_TO_CATEGORY: dict[str, str] = {
+    "Person": "人名",
+    "Company": "社名",
+    "Department": "社名",  # 内部組織名は recall 重要＝その他(弱)に落とさず社名側へ
+    "Province": "地名",
+    "City": "地名",
+    "Country": "地名",
+    "Address": "地名",
+    "Facility": "地名",
+    "Email": "連絡先",
+    "Phone_Number": "連絡先",
+    "Trademark": "商標",  # pii-masker への要望 type。主要カテゴリなので必須
+    # 識別子は「その他」へ畳むが、LLM 由来は微弱降格を免除し中（レビュー）に残す（_LLM_IDENTIFIER_TYPES）。
+    "Employee_ID": "その他",
+    "Account": "その他",
+    "IP_Address": "その他",
+}
+
+# 「その他」へ畳むが、LLM が付けたこれらは _looks_like_code による微弱降格を**免除**する
+# （`7-410` 型の社員番号等が消えると recall 漏れ＝致命的。中＝レビューに必ず残す。§7-④）。
+_LLM_IDENTIFIER_TYPES = frozenset({"Employee_ID", "Account", "IP_Address"})
 
 # 連絡先（category=連絡先）の正規表現。NER は @ や数字に過剰発火して不安定なので、
 # 「形」が決まっている連絡先は決定的な正規表現で拾う（§ docs-dev/マスキング設計.md §10）。
@@ -250,6 +278,8 @@ def vote_category(channel: str, label: str) -> str | None:
         return label.split("(", 1)[0] or None
     if channel == "regex":  # 連絡先（メール等）の決定的検出。label がそのままカテゴリ。
         return label or None
+    if channel == "llm":  # LLM（pii-masker）票。label は ENE type。
+        return _ENE_TO_CATEGORY.get(label)
     if channel == "sudachi":
         return _sudachi_category(label)
     return _NER_LABEL_CATEGORY.get(label.upper())
@@ -309,6 +339,7 @@ class MaskingEngine:
         allowlist: MaskAllowlist | None = None,
         ner_cache: NerCache | None = None,
         progress: ProgressCallback | None = None,
+        llm_detection: LlmDetection | None = None,
     ) -> MaskAnalysis:
         """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。
 
@@ -380,6 +411,10 @@ class MaskingEngine:
                     other_raw.append(
                         _raw(sp_s, sp_e, text, category, (model_name, ent.label))
                     )
+        # LLM（pii-masker）検出を `llm` チャネルの票として合流（J2）。新カテゴリ・新確信度は作らず、
+        #   tally_votes に1チャネルとして流すだけ＝単独→中／NER 相乗り→強／確定は名簿のみ（§7-②）。
+        if llm_detection is not None:
+            other_raw.extend(_llm_raw(llm_detection, text))
 
         def matches_raw(
             dictionary: MaskDictionary, channel: str, suffix: str
@@ -436,15 +471,7 @@ class MaskingEngine:
             clusters = sorted(clusters + contacts, key=lambda c: (c.start, c.end))
 
         # コードらしき誤検出（中/弱）を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
-        #   確定/強（辞書・連絡先・2モデル一致・昇格）は守る＝中/弱 のみ対象。
-        clusters = [
-            (
-                replace(c, confidence="微弱")
-                if c.confidence in ("中", "弱") and _looks_like_code(c.surface)
-                else c
-            )
-            for c in clusters
-        ]
+        clusters = _demote_code_like(clusters)
 
         # 除外リスト(allowlist)：人が「機密でない」と登録した語を「除外」へ落とす
         #   （辞書＝名簿は守る。連絡先 regex の誤検出メール等は検出由来なので除外可）。
@@ -555,6 +582,42 @@ def _raw(
 ) -> Candidate:
     """確信度未確定の生候補（confidence はクラスタ時に決める）。"""
     return Candidate(start, end, text[start:end], category, "", (vote,))
+
+
+def _llm_raw(detection: LlmDetection, text: str) -> list[Candidate]:
+    """LLM 検出（``LlmDetection``）の各スパンを ``llm`` チャネルの生票に変換する（Stage B）。
+
+    票のラベルは生 ENE type（``vote_category`` が ``_ENE_TO_CATEGORY`` で6カテゴリへ写す）。
+    生成段階のカテゴリは仮（最終カテゴリは tally_votes が決める）が、未投票時の保険として写像値を入れる。
+    """
+    out: list[Candidate] = []
+    for sp in detection.spans:
+        category = _ENE_TO_CATEGORY.get(sp.ene_type, "その他")
+        out.append(_raw(sp.start, sp.end, text, category, ("llm", sp.ene_type)))
+    return out
+
+
+def _has_llm_identifier_vote(c: Candidate) -> bool:
+    """LLM が識別子（社員番号/アカウント/IP）と判定した票を持つか（微弱降格の免除判定）。"""
+    return any(ch == "llm" and label in _LLM_IDENTIFIER_TYPES for ch, label in c.votes)
+
+
+def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
+    """中/弱 の「コードらしき」誤検出を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
+
+    確定/強（辞書・連絡先・2モデル一致・昇格）は守る＝中/弱 のみ対象。例外：LLM が識別子
+    （社員番号/アカウント/IP）と判定したものは免除＝レビューに残す（§7-④。`7-410` 型でも消さない）。
+    """
+    return [
+        (
+            replace(c, confidence="微弱")
+            if c.confidence in ("中", "弱")
+            and _looks_like_code(c.surface)
+            and not _has_llm_identifier_vote(c)
+            else c
+        )
+        for c in candidates
+    ]
 
 
 # NER スパンを割る文字＝実在の人名・社名に決して現れない区切り（平文化が注入する `、`/`。`、
