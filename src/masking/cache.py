@@ -103,6 +103,15 @@ class NerCache:
                 "content_hash TEXT PRIMARY KEY, "
                 "added_json TEXT, removed_json TEXT, updated_at TEXT)"
             )
+            # LLM 検出層（Stage A）のキャッシュ。NER 層と同じ「激重層だけキャッシュ」の思想。
+            #   鍵に detector_version（pii-masker 版＋プロンプト＋窓ポリシー）を含める＝改版で自動ミス→再取得。
+            #   値は LlmDetection の JSON 文字列（(de)シリアライズは src.llm.schema が持つ＝cache は中身に非依存）。
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS llm_detection ("
+                "content_hash TEXT, model TEXT, flatten INTEGER, detector_version TEXT, "
+                "detections_json TEXT, created_at TEXT, "
+                "PRIMARY KEY (content_hash, model, flatten, detector_version))"
+            )
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)
@@ -261,6 +270,42 @@ class NerCache:
                     model,
                     int(flatten),
                     json.dumps(analysis_to_dict(analysis), ensure_ascii=False),
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+
+    # --- LLM 検出層（Stage A）。値は LlmDetection の JSON 文字列（中身は src.llm.schema が定義）。
+    #     cache は「激重層の成果を content_hash で引く」storage に徹し、LlmDetection の構造には依存しない。
+    def get_llm(
+        self, content_hash: str, model: str, flatten: bool, detector_version: str
+    ) -> str | None:
+        """LLM 検出のキャッシュ（detections_json）を返す。無ければ None。"""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT detections_json FROM llm_detection "
+                "WHERE content_hash=? AND model=? AND flatten=? AND detector_version=?",
+                (content_hash, model, int(flatten), detector_version),
+            ).fetchone()
+        return row[0] if row else None
+
+    def put_llm(
+        self,
+        content_hash: str,
+        model: str,
+        flatten: bool,
+        detector_version: str,
+        detections_json: str,
+    ) -> None:
+        """LLM 検出（detections_json）を保存。同じ鍵は上書き。"""
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO llm_detection VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    content_hash,
+                    model,
+                    int(flatten),
+                    detector_version,
+                    detections_json,
                     datetime.now().isoformat(timespec="seconds"),
                 ),
             )

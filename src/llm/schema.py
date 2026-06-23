@@ -6,6 +6,7 @@ pii-masker の型をそのまま外に漏らさない（依存をアダプタ境
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 
@@ -38,4 +39,36 @@ class LlmDetection:
     detector_version: str
 
 
-__all__ = ["LlmSpan", "LlmDetection"]
+def detection_to_json(d: LlmDetection) -> str:
+    """:class:`LlmDetection` を JSON 文字列へ（キャッシュ保存用）。"""
+    return json.dumps(
+        {
+            "model": d.model,
+            "detector_version": d.detector_version,
+            "spans": [[s.start, s.end, s.ene_type, s.reason, s.how] for s in d.spans],
+            "not_found": [[t, x] for t, x in d.not_found],
+        },
+        ensure_ascii=False,
+    )
+
+
+def detection_from_json(s: str) -> LlmDetection:
+    """:func:`detection_to_json` の逆。"""
+    d = json.loads(s)
+    return LlmDetection(
+        spans=tuple(
+            LlmSpan(start=sp[0], end=sp[1], ene_type=sp[2], reason=sp[3], how=sp[4])
+            for sp in d.get("spans", [])
+        ),
+        not_found=tuple((nf[0], nf[1]) for nf in d.get("not_found", [])),
+        model=d.get("model", ""),
+        detector_version=d.get("detector_version", ""),
+    )
+
+
+__all__ = [
+    "LlmSpan",
+    "LlmDetection",
+    "detection_to_json",
+    "detection_from_json",
+]
