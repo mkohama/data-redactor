@@ -82,6 +82,7 @@ module = [
     "pdfminer.*",
     "pii_masker",
     "pii_masker.*",
+    "pytest",
     "pptx",
     "pptx.*",
     "pydantic",

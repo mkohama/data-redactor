@@ -1,0 +1,95 @@
+"""現行 ``MaskingEngine.analyze`` の特性化テスト（チャネル分離リファクタの安全網）。
+
+analyze は recall 中核。チャネル分離リファクタ（§13）で挙動を変えていないことを保証するため、
+決定的な契約を固定する：辞書→確定／regex(メール)→強／LLM 票の合流（単独→中）／
+LLM 識別子の微弱免除／allowlist→除外。GiNZA(ja_ginza) を実走する（このマシンで実行可）。
+GiNZA 由来の細部には依存せず、決定的チャネルの振る舞いだけを検証する。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.llm.schema import LlmDetection, LlmSpan
+from src.masking.allowlist import MaskAllowlist
+from src.masking.dictionary import MaskDictionary, normalize
+from src.masking.engine import MaskingEngine
+from src.ner.preprocess import build_body
+
+
+@pytest.fixture(scope="module")
+def engine() -> MaskingEngine:
+    eng = MaskingEngine(dictionary=MaskDictionary.empty(), models=["ja_ginza"])
+    for e in eng.engines:
+        _ = e.nlp  # モデルを先にロード（テスト時間の安定化）
+    return eng
+
+
+def _find(candidates, surface: str):
+    return [c for c in candidates if c.surface == surface]
+
+
+def _llm_span(chunks: list[str], surface: str, ene_type: str) -> LlmDetection:
+    """``surface`` の本文位置に ene_type の LLM 検出を1件持つ LlmDetection を作る。"""
+    text = build_body(chunks).text
+    i = text.index(surface)
+    return LlmDetection(
+        spans=(LlmSpan(i, i + len(surface), ene_type, None, "exact"),),
+        not_found=(),
+        model="m",
+        detector_version="v",
+    )
+
+
+def test_dict_is_definite_and_email_is_strong_contact(engine: MaskingEngine) -> None:
+    """辞書語→確定（dict 票）／メール→連絡先・強（regex 票・1件まるごと）。"""
+    engine.dictionary = MaskDictionary({normalize("ニコン"): ("ニコン", "社名")})
+    a = engine.analyze(["ニコンへ連絡: a@example.com まで"])
+
+    nikon = _find(a.candidates, "ニコン")
+    assert nikon, "辞書語が候補に出ること"
+    assert nikon[0].confidence == "確定"
+    assert nikon[0].category == "社名"
+    assert any(ch == "dict" for ch, _ in nikon[0].votes)
+
+    email = _find(a.candidates, "a@example.com")
+    assert email, "メールが1件まるごと候補に出ること"
+    assert email[0].category == "連絡先"
+    assert email[0].confidence == "強"
+    assert any(ch == "regex" for ch, _ in email[0].votes)
+
+
+def test_llm_only_person_is_chu(engine: MaskingEngine) -> None:
+    """LLM 単独（人名）→ 中（1 チャネル）。確定にも強にもしない。"""
+    engine.dictionary = MaskDictionary.empty()
+    chunks = ["昨日その人が来訪した"]
+    det = _llm_span(chunks, "その人", "Person")
+    a = engine.analyze(chunks, llm_detection=det)
+    c = _find(a.candidates, "その人")
+    assert c, "LLM スパンが候補に出ること"
+    assert ("llm", "Person") in c[0].votes
+    assert c[0].category == "人名"
+    assert c[0].confidence == "中"
+
+
+def test_llm_identifier_not_demoted_to_bibyaku(engine: MaskingEngine) -> None:
+    """LLM 識別子（Employee_ID）はコードらしくても微弱に落とさない（弱で残る＝レビュー可視）。"""
+    engine.dictionary = MaskDictionary.empty()
+    chunks = ["番号は 7-410 です"]
+    det = _llm_span(chunks, "7-410", "Employee_ID")
+    a = engine.analyze(chunks, llm_detection=det)
+    c = _find(a.candidates, "7-410")
+    assert c
+    assert c[0].confidence != "微弱"
+    assert ("llm", "Employee_ID") in c[0].votes
+
+
+def test_allowlist_excludes_non_dict_candidate(engine: MaskingEngine) -> None:
+    """allowlist 一致の非辞書候補→除外（辞書は守る・検出由来は外せる）。"""
+    engine.dictionary = MaskDictionary.empty()
+    chunks = ["昨日その人が来訪した"]
+    det = _llm_span(chunks, "その人", "Person")
+    a = engine.analyze(chunks, llm_detection=det, allowlist=MaskAllowlist(["その人"]))
+    c = _find(a.candidates, "その人")
+    assert c
+    assert c[0].confidence == "除外"
