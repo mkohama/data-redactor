@@ -1435,34 +1435,65 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
-    """マージ&確信度タブ（出口2）：**走ったチャネル**＋常時ルールベースを集約し候補レビュー（§13）。
+    """マージ&確信度タブ（出口2）：辞書＋正規表現に、**実行済み or キャッシュ済み**の
+    NER / LLM チャネルを自動合流して候補レビューする（§13・案A）。
 
     常に：辞書＋正規表現（決定的・軽い。辞書のため Sudachi トークナイズが内部で走る）。
-    NER 検出タブを実行済みなら GiNZA NER 票を、LLM 検出タブを実行済みなら LLM 票を合流する。
-    **GiNZA は NER 検出を実行したときだけ回る**（未実行なら辞書＋regex＋LLM で完結＝軽い）。
+    NER / LLM は「このセッションで実行済み」または「キャッシュ済み」なら**自動で合流**する
+    （いずれもキャッシュ参照のみ＝GiNZA / Azure の再実行はしない）。未実行かつ未キャッシュなら
+    合流しない（＝勝手に重い処理を走らせない）。状態は実行ボタンの手前に明示する。
     """
-    run_ner = "ner" in stored
-    has_llm = "llm" in stored
+    chash = content_hash(stored["chunks"])
+    cache = _ner_cache()
+
+    # NER：セッション実行済み or 必要モデルが全てキャッシュ済みなら合流（どちらも GiNZA 再実行なし）。
+    ner_in_session = "ner" in stored
+    want = set(stored["models"])
+    ner_cached = bool(want) and want.issubset(
+        cache.cached_ner_models(chash, flatten_tables)
+    )
+    run_ner = ner_in_session or ner_cached
+
+    # LLM：セッション実行済み or キャッシュ済みなら合流（キャッシュからは Azure 呼び出しなしで読む）。
+    llm_in_session = "llm" in stored
+    llm_cached = cache.has_llm(chash, LLM_MODEL, flatten_tables, _DETECTOR_VERSION)
+    has_llm = llm_in_session or llm_cached
+
+    def _src(in_session: bool) -> str:
+        return "実行済み" if in_session else "キャッシュ"
+
     if "analysis" not in stored:
         chans = ["辞書", "正規表現"]
         if run_ner:
-            chans.append("NER(GiNZA)")
+            chans.append(f"NER（{_src(ner_in_session)}）")
         if has_llm:
-            chans.append("LLM")
+            chans.append(f"LLM（{_src(llm_in_session)}）")
+        # 「今どういう状況か」「押すと何が合流するか」を明示する（案A：迷子防止）。
+        if run_ner or has_llm:
+            note = (
+                "・NER / LLM は **実行済み or キャッシュ済み** のチャネルを自動で合流します"
+                "（キャッシュ参照のみ＝GiNZA / Azure の**再実行はしません**＝一瞬）。\n"
+            )
+        else:
+            note = (
+                "・NER も LLM も **未実行・未キャッシュ** です。今は **辞書＋正規表現のみ** で集約します"
+                "（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで一度実行すると、以降ここに自動合流）。\n"
+            )
         clicked = st.button("▶ マージ&確信度を実行", type="primary", key="run_merge")
         if not clicked:
             st.info(
                 f"『▶ マージ&確信度を実行』で **{' ＋ '.join(chans)}** の票を集約し確信度づけします。\n\n"
-                "・**走ったチャネルだけ**合流します（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで実行）。\n"
-                "・辞書＋正規表現は常時。確信度＝投票チャネル数（単独→中／2チャネル→強／辞書→確定／regex→強）。\n"
-                + (
-                    "・**GiNZA は未実行＝軽い**（辞書のため Sudachi のみ内部で動作）。"
-                    if not run_ner
-                    else "・NER 実行済み＝GiNZA 票も合流（NER 層はキャッシュ）。"
-                )
+                + note
+                + "・辞書＋正規表現は常時。確信度＝投票チャネル数（単独→中／2チャネル→強／辞書→確定／regex→強）。"
             )
             return
+        # LLM 検出を用意：セッション優先、無ければキャッシュから読む（ヒット＝Azure を呼ばない）。
         det = (stored.get("llm") or {}).get("detection")
+        if det is None and llm_cached:
+            with st.spinner("LLM 検出をキャッシュから読み込み中 ..."):
+                _, det = run_llm_detection(
+                    stored["chunks"], flatten_tables, force=False
+                )
         with st.spinner("候補を集約・確信度づけ中 ..."):
             stored["analysis"] = analyze_masking(
                 stored["chunks"],
@@ -1473,13 +1504,16 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
                 llm_detection=det,
                 run_ner=run_ner,
             )
+        # 実際に合流したチャネルを記録（後続の再描画でキャプションがブレないように）。
+        stored["analysis_channels"] = {"ner": run_ner, "llm": has_llm}
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
         stored["mask_ver"] = 0
+    used = stored.get("analysis_channels", {"ner": run_ner, "llm": has_llm})
     st.caption(
         "合流したチャネル: 辞書＋正規表現"
-        + ("＋NER" if run_ner else "")
-        + ("＋LLM" if has_llm else "")
+        + ("＋NER" if used.get("ner") else "")
+        + ("＋LLM" if used.get("llm") else "")
         + "　— 確信度＝チャネル投票数。LLM 単独は『🤖 LLM検出』タブ（出口1）。"
     )
     render_masking_result(stored)
