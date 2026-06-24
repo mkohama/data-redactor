@@ -69,25 +69,38 @@ pii-masker 側にあり、data-redactor は薄いアダプタ（[src/llm/](src/l
 #### detector_version の運用ルール（キャッシュ無効化）
 
 LLM 検出キャッシュは `(content_hash, model, flatten, detector_version)` をキーにします。
-**検出結果に影響する設定を変えたら、`app.py` の `_DETECTOR_VERSION` の対応する部分を上げる**——
-こうするとキャッシュが不一致になり自動で再検出されます（上げ忘れると古い結果が使い回される＝最大の落とし穴）。
+**検出結果に影響する設定を変えたら detector_version を変える**——こうするとキャッシュが不一致になり自動で
+再検出されます（変え忘れると古い結果が使い回される＝最大の落とし穴）。
 
-`_DETECTOR_VERSION`（[app.py](app.py) 内・例 `pii-masker@9d9942e|win7000ov200|ene-v1`）は
-**独立した 3 つの版**を `|` 区切りで持つ手書き文字列で、**上げる契機も書き換え方もそれぞれ別**です:
+detector_version（例 `pii-masker@9d9942e|win7000ov200|ene-v1`）は **独立した 3 つの版**を `|` 区切りで
+持ち、`app.py` の `_detector_version()` が合成します。**変える契機も方法もそれぞれ別**です:
 
-| 部分 | 上げる契機 | 書き換え方 | 担当 |
-|---|---|---|---|
-| `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | 新しい短縮ハッシュに置換 | `sync-pii-masker` が自動 |
-| `ene-vN` | `src/masking/engine.py` の `_ENE_TO_CATEGORY`（ENE type→カテゴリ）を変えたとき | **数字を +1**（`ene-v1`→`ene-v2`→…） | 手動 |
-| `win…` | 窓ポリシー（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` / `DEFAULT_OVERLAP_TOKENS`）を変えたとき | **実値を埋め込む**（例 `win7000ov200`→`win6000ov400`） | 手動・**pii-masker とは無関係** |
+| 部分 | 変える契機 | 方法 |
+|---|---|---|
+| `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | `sync-pii-masker` が新ハッシュに**自動置換**（`app.py` の `_DETECTOR_STATIC`） |
+| `ene-vN` | `src/masking/engine.py` の `_ENE_TO_CATEGORY`（ENE type→カテゴリ）を変えたとき | `_DETECTOR_STATIC` の数字を**手動で +1**（`ene-v1`→`ene-v2`→…） |
+| `win…` | 窓ポリシー（窓の大きさ）を変えたいとき | **環境変数を設定するだけ**（下記）。値から `win…` が自動合成され、キャッシュも自動無効化 |
 
-技術的に効いているのは「**文字列全体が前回と変わること**」だけ（変わればキャッシュキーが不一致になり再検出される）。
-`ene-vN` の連番や `win…` の実値埋め込みは、どの版で作られたキャッシュかを**人が追えるようにするための規約**で、
-意味を持つのは可読性だけです。手で編集するときは「変えたら必ずどこか上げる」を守れば OK。
+> 技術的に効いているのは「**文字列全体が前回と変わること**」だけ（変わればキャッシュキーが不一致＝再検出）。
+> `ene-vN` の連番は人が版を追うための規約で、意味は可読性のみ。`win…` は実値（例 `win6000ov400`）が
+> 埋め込まれるので、どのキャッシュがどの窓ポリシーで作られたか後から分かります。
 
-> `win…`・`ene-vN` は pii-masker の更新有無に関係なく、**こちらが windows.py / engine.py を編集したとき**に
-> その場で上げる作業です（下の pii-masker 追従手順とは別物）。逆に pii-masker を更新しても windows.py を
-> 触っていなければ `win…` は変えません。
+##### 窓ポリシー（窓の大きさ）の調整 — 環境変数
+
+LLM に本文を渡す前の「窓」分割の大きさは **`.env` の環境変数だけで調整**できます（コード編集・コミット不要）。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `LLM_WINDOW_MAX_TOKENS` | 7000 | 1 窓の上限トークン数（小さいほど窓が増え API 回数↑だが mini の長文取りこぼしは減る） |
+| `LLM_WINDOW_OVERLAP_TOKENS` | 200 | 窓間の重なり（境界で実体が切れる取りこぼしを緩和） |
+
+値を変えると detector_version の `win…` が自動で変わり、**LLM 検出キャッシュが自動で無効化＝再検出**されます。
+値を元に戻せば元のキャッシュに再びヒットします。既定（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` /
+`DEFAULT_OVERLAP_TOKENS`）はコミット済みのベースラインで、env はそれを上書きするだけです。
+
+> `ene-vN`（手動）と `win…`（env）は pii-masker の更新有無に関係なく、こちら都合で変える設定です
+> （下の pii-masker 追従手順とは別物）。逆に pii-masker を更新しても、窓ポリシーや type-map を
+> 触っていなければ `win…`・`ene-vN` は変わりません。
 
 #### pii-masker が更新されたら（追従手順）
 

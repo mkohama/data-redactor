@@ -14,6 +14,8 @@ from src.core.document.splitters.token_utils import tiktoken_len
 from src.ner.preprocess import CHUNK_SEPARATOR
 
 # 窓の既定サイズ（① の決定: 容量でなく「信頼できる長さ」で切る。mini の長文 recall 劣化を避ける）。
+# これはコミット済みのベースライン。実運用の上書きは app.py 側で env（LLM_WINDOW_MAX_TOKENS /
+# LLM_WINDOW_OVERLAP_TOKENS）から行い、値は detector_version の win… に自動反映される（windows.py は純粋に保つ）。
 DEFAULT_MAX_TOKENS = 7000
 # 窓間の小 overlap（境界で文脈/実体が切れるのを緩和。重複検出は detect_layer の解決で潰れる）。
 DEFAULT_OVERLAP_TOKENS = 200

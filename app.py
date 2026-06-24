@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 import tempfile
 import time
@@ -35,6 +36,7 @@ from src.masking import (
 from src.llm import cached_detect
 from src.llm.detect_layer import DEFAULT_MODEL as LLM_MODEL
 from src.llm.schema import LlmDetection
+from src.llm.windows import DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS
 from src.masking.engine import vote_category
 from src.ner import (
     AVAILABLE_MODELS,
@@ -990,11 +992,46 @@ def analyze_masking(
     return analysis
 
 
-# detector_version: プロンプト（pii-masker 版）＋窓ポリシー＋type-map をまとめた版。
-# これを変えると LLM 検出キャッシュが自動ミス→再取得（§6）。書き換え方（README「detector_version の運用ルール」）:
-#   pii-masker@<hash>=submodule 更新で sync-pii-masker が自動 / ene-vN=type-map を変えたら数字を +1 /
-#   win…=窓ポリシー（windows.py）を変えたら実値を埋め込む（例 win6000ov400）。要は文字列が前回と変わればよい。
-_DETECTOR_VERSION = "pii-masker@9d9942e|win7000ov200|ene-v1"
+# detector_version の**静的部分**：pii-masker のコミット版（`pii-masker@<hash>`）と type-map 版（`ene-vN`）。
+#   - pii-masker@<hash> … submodule 更新時に sync-pii-masker が自動で書き換える（この hash 文字列を正規表現で置換）。
+#   - ene-vN          … _ENE_TO_CATEGORY（type→カテゴリ）を変えたら数字を +1（手動）。
+# 窓ポリシー（win…）はここに**書かない**。実値（env or windows.py 既定）から _detector_version() が自動合成する
+# ＝窓ポリシーを env で変えるだけで detector_version が変わりキャッシュが自動無効化（コード編集・手動バンプ不要）。
+_DETECTOR_STATIC = "pii-masker@9d9942e|ene-v1"
+
+
+def _env_int(name: str, default: int) -> int:
+    """環境変数を int で読む。未設定・不正値なら ``default``（チューニング用の安全側フォールバック）。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _window_policy() -> tuple[int, int]:
+    """LLM 検出の窓ポリシー (max_tokens, overlap)。env で上書き可・既定は windows.py の定数。
+
+    ``LLM_WINDOW_MAX_TOKENS`` / ``LLM_WINDOW_OVERLAP_TOKENS`` を .env に置くだけで調整でき、
+    値を変えると _detector_version() 経由で **LLM 検出キャッシュが自動で無効化** される（再検出）。
+    """
+    return (
+        _env_int("LLM_WINDOW_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+        _env_int("LLM_WINDOW_OVERLAP_TOKENS", DEFAULT_OVERLAP_TOKENS),
+    )
+
+
+def _detector_version() -> str:
+    """LLM 検出器の版 ``pii-masker@<hash>|win<max>ov<ov>|ene-vN``。
+
+    win… は現在の窓ポリシー（env or 既定）から合成して挟む。既定（7000/200）なら従来文字列と一致するので
+    既存キャッシュもヒットする。pii-masker@<hash>・ene-vN は _DETECTOR_STATIC（静的）から取る。
+    """
+    head, ene = _DETECTOR_STATIC.split("|", 1)  # "pii-masker@<hash>", "ene-vN"
+    max_tokens, overlap = _window_policy()
+    return f"{head}|win{max_tokens}ov{overlap}|{ene}"
 
 
 def run_llm_detection(
@@ -1010,14 +1047,18 @@ def run_llm_detection(
     ``(content_hash, model, flatten, detector_version)`` で、同一文書は再呼び出ししない。
     ``force=True`` でキャッシュ無視の再検出（LLM 層のみ。NER キャッシュには触れない）。
     ``progress(i, n)`` は窓ごとの進捗（キャッシュヒット時は呼ばれない）。
+    窓ポリシー（max_tokens/overlap）は env で上書き可（_window_policy）。版にも反映されるので整合する。
     """
+    max_tokens, overlap = _window_policy()
     body = build_body(chunks, flatten_tables=flatten_tables)
     detection = cached_detect(
         _ner_cache(),
         content_hash(chunks),
         body.text,
         flatten=flatten_tables,
-        detector_version=_DETECTOR_VERSION,
+        detector_version=_detector_version(),
+        max_tokens=max_tokens,
+        overlap_tokens=overlap,
         progress=progress,
         force=force,
     )
@@ -1253,7 +1294,7 @@ def _render_state_header(stored: dict) -> None:
     cached_models = cache.cached_ner_models(chash, flatten)
     ner = mark("ner" in stored, bool(want) and want.issubset(cached_models))
     llm = mark(
-        "llm" in stored, cache.has_llm(chash, LLM_MODEL, flatten, _DETECTOR_VERSION)
+        "llm" in stored, cache.has_llm(chash, LLM_MODEL, flatten, _detector_version())
     )
     draft = cache.get_draft(chash)
     merge = "✅" if "analysis" in stored else "⬜"
@@ -1367,7 +1408,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
     """LLM検出タブ（独立経路・出口1）：キャッシュ状態に応じて 実行 / 表示＋再実行 を出し分ける。"""
     chash = content_hash(stored["chunks"])
     llm_cached = _ner_cache().has_llm(
-        chash, LLM_MODEL, flatten_tables, _DETECTOR_VERSION
+        chash, LLM_MODEL, flatten_tables, _detector_version()
     )
     in_session = "llm" in stored
 
@@ -1458,7 +1499,7 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
 
     # LLM：セッション実行済み or キャッシュ済みなら合流（キャッシュからは Azure 呼び出しなしで読む）。
     llm_in_session = "llm" in stored
-    llm_cached = cache.has_llm(chash, LLM_MODEL, flatten_tables, _DETECTOR_VERSION)
+    llm_cached = cache.has_llm(chash, LLM_MODEL, flatten_tables, _detector_version())
     has_llm = llm_in_session or llm_cached
 
     def _src(in_session: bool) -> str:

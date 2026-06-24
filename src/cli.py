@@ -668,8 +668,8 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
         if rc_ruff or rc_mypy or rc_test:
             click.echo("⚠ 検証で失敗があります。修正してからコミットしてください。")
 
-    # 残りの手動チェックリスト（pii-masker 更新で発生する作業のみ。窓ポリシー win… は
-    # windows.py を編集したとき＝pii-masker 更新とは別の作業なので、ここには載せない）。
+    # 残りの手動チェックリスト（pii-masker 更新で発生する作業のみ。窓ポリシー win… は env で調整する
+    # こちら都合の設定＝pii-masker 更新とは別の作業なので、ここには載せない）。
     click.echo(
         "\n===== 残りの手動ステップ =====\n"
         "1. 上の ENE ドリフト・submodule 差分を確認し、必要なら _ENE_TO_CATEGORY 更新＋ene-vN バンプ\n"
