@@ -1472,12 +1472,12 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
         if run_ner or has_llm:
             note = (
                 "・NER / LLM は **実行済み or キャッシュ済み** のチャネルを自動で合流します"
-                "（キャッシュ参照のみ＝GiNZA / Azure の**再実行はしません**＝一瞬）。\n"
+                "（キャッシュ参照のみ＝GiNZA / Azure の**再実行はしません**＝一瞬）。\n\n"
             )
         else:
             note = (
                 "・NER も LLM も **未実行・未キャッシュ** です。今は **辞書＋正規表現のみ** で集約します"
-                "（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで一度実行すると、以降ここに自動合流）。\n"
+                "（NER は『🔍 NER検出』、LLM は『🤖 LLM検出』タブで一度実行すると、以降ここに自動合流）。\n\n"
             )
         clicked = st.button("▶ マージ&確信度を実行", type="primary", key="run_merge")
         if not clicked:
