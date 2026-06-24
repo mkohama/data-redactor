@@ -556,11 +556,11 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
 
     機械的な手順を自動化する：① submodule のポインタ更新（REF 省略時は追跡ブランチの最新／
     REF 指定でそのコミット・タグへ）→ ② 新 HEAD の短縮ハッシュ取得 → ③ app.py の
-    _DETECTOR_VERSION の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュを自動ミスさせる）
+    _DETECTOR_STATIC の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュを自動ミスさせる）
     → ④ ENE type ドリフト警告と submodule の変更点表示 → ⑤ ruff/mypy/pytest。
 
     **コミットはしない**（submodule ポインタと app.py を stage するだけ）。インターフェース契約・
-    ENE マップ・ene-vN バンプ・実機 e2e（az login）は人手で確認してからコミットすること。
+    ENE マップ更新・実機 e2e（az login）は人手で確認してからコミットすること（ENE マップは版バンプ不要）。
     """
     from src.masking.engine import _ENE_TO_CATEGORY
 
@@ -596,7 +596,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
     new_hash = _git_out(["rev-parse", "--short", "HEAD"], cwd=_SUBMODULE)
     click.echo(f"pii-masker HEAD: {new_hash}")
 
-    # ③ detector_version の書き換え（ハッシュ部分のみ。win/ene-vN は人手）
+    # ③ detector_version の書き換え（ハッシュ部分のみ。win… は env 由来で自動・type-map は版に含めない）
     if old_hash == new_hash:
         click.echo("detector_version のハッシュは最新です（書き換え不要）。")
     elif old_hash is None:
@@ -639,8 +639,8 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
             click.echo(
                 "⚠ マップに無い ENE type（『その他』に落ちる＝recall 漏れの恐れ）: "
                 + ", ".join(unmapped)
-                + "\n  → src/masking/engine.py の _ENE_TO_CATEGORY に追加し、"
-                "_DETECTOR_VERSION の ene-vN を上げてください。"
+                + "\n  → src/masking/engine.py の _ENE_TO_CATEGORY に追加してください"
+                "（detector_version のバンプは不要＝マップは解析時に毎回当たる後段変換。次の解析で反映）。"
             )
         else:
             click.echo("マップ漏れの新 type はありません。")
@@ -672,7 +672,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
     # こちら都合の設定＝pii-masker 更新とは別の作業なので、ここには載せない）。
     click.echo(
         "\n===== 残りの手動ステップ =====\n"
-        "1. 上の ENE ドリフト・submodule 差分を確認し、必要なら _ENE_TO_CATEGORY 更新＋ene-vN バンプ\n"
+        "1. 上の ENE ドリフト・submodule 差分を確認し、必要なら _ENE_TO_CATEGORY を更新（版バンプ不要）\n"
         "2. 契約変更（detect / locate_all の戻り値）があれば src/llm のアダプタを修正\n"
         "3. 実機（az login 済み）で 🤖 LLM検出 を回し件数/カテゴリを目視\n"
         "4. docs-dev/insight-memo.md に日付つきで記録\n"

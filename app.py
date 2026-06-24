@@ -992,12 +992,13 @@ def analyze_masking(
     return analysis
 
 
-# detector_version の**静的部分**：pii-masker のコミット版（`pii-masker@<hash>`）と type-map 版（`ene-vN`）。
-#   - pii-masker@<hash> … submodule 更新時に sync-pii-masker が自動で書き換える（この hash 文字列を正規表現で置換）。
-#   - ene-vN          … _ENE_TO_CATEGORY（type→カテゴリ）を変えたら数字を +1（手動）。
-# 窓ポリシー（win…）はここに**書かない**。実値（env or windows.py 既定）から _detector_version() が自動合成する
-# ＝窓ポリシーを env で変えるだけで detector_version が変わりキャッシュが自動無効化（コード編集・手動バンプ不要）。
-_DETECTOR_STATIC = "pii-masker@9d9942e|ene-v1"
+# detector_version の**静的部分**：pii-masker のコミット版（`pii-masker@<hash>`）だけ。
+#   submodule 更新時に sync-pii-masker が自動で書き換える（この hash 文字列を正規表現で置換）。
+# 窓ポリシー（win…）はここに書かず、実値（env or windows.py 既定）から _detector_version() が自動合成する
+# ＝env で変えるだけで detector_version が変わりキャッシュ自動無効化（コード編集・手動バンプ不要）。
+# 旧 ene-vN（type-map 版）は廃止：_ENE_TO_CATEGORY は解析時に毎回当たる後段変換で、LLM 検出キャッシュ
+#   （生 ene_type のみ保存）に影響しない＝バンプ不要だったため。変更は次の解析で自動反映される。
+_DETECTOR_STATIC = "pii-masker@9d9942e"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1024,14 +1025,14 @@ def _window_policy() -> tuple[int, int]:
 
 
 def _detector_version() -> str:
-    """LLM 検出器の版 ``pii-masker@<hash>|win<max>ov<ov>|ene-vN``。
+    """LLM 検出器の版 ``pii-masker@<hash>|win<max>ov<ov>``。
 
-    win… は現在の窓ポリシー（env or 既定）から合成して挟む。既定（7000/200）なら従来文字列と一致するので
-    既存キャッシュもヒットする。pii-masker@<hash>・ene-vN は _DETECTOR_STATIC（静的）から取る。
+    win… は現在の窓ポリシー（env or 既定）から合成する。pii-masker@<hash> は _DETECTOR_STATIC（静的・
+    sync-pii-masker が自動書換）。type-map（_ENE_TO_CATEGORY）は版に含めない（解析時の後段変換で、検出
+    キャッシュに影響しないため。マップの変更は次の解析で自動反映される）。
     """
-    head, ene = _DETECTOR_STATIC.split("|", 1)  # "pii-masker@<hash>", "ene-vN"
     max_tokens, overlap = _window_policy()
-    return f"{head}|win{max_tokens}ov{overlap}|{ene}"
+    return f"{_DETECTOR_STATIC}|win{max_tokens}ov{overlap}"
 
 
 def run_llm_detection(

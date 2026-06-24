@@ -72,18 +72,22 @@ LLM 検出キャッシュは `(content_hash, model, flatten, detector_version)` 
 **検出結果に影響する設定を変えたら detector_version を変える**——こうするとキャッシュが不一致になり自動で
 再検出されます（変え忘れると古い結果が使い回される＝最大の落とし穴）。
 
-detector_version（例 `pii-masker@9d9942e|win7000ov200|ene-v1`）は **独立した 3 つの版**を `|` 区切りで
-持ち、`app.py` の `_detector_version()` が合成します。**変える契機も方法もそれぞれ別**です:
+detector_version（例 `pii-masker@9d9942e|win7000ov200`）は **2 つの版**を `|` 区切りで持ち、
+`app.py` の `_detector_version()` が合成します。**変える契機も方法もそれぞれ別**です:
 
 | 部分 | 変える契機 | 方法 |
 |---|---|---|
 | `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | `sync-pii-masker` が新ハッシュに**自動置換**（`app.py` の `_DETECTOR_STATIC`） |
-| `ene-vN` | `src/masking/engine.py` の `_ENE_TO_CATEGORY`（ENE type→カテゴリ）を変えたとき | `_DETECTOR_STATIC` の数字を**手動で +1**（`ene-v1`→`ene-v2`→…） |
 | `win…` | 窓ポリシー（窓の大きさ）を変えたいとき | **環境変数を設定するだけ**（下記）。値から `win…` が自動合成され、キャッシュも自動無効化 |
 
 > 技術的に効いているのは「**文字列全体が前回と変わること**」だけ（変わればキャッシュキーが不一致＝再検出）。
-> `ene-vN` の連番は人が版を追うための規約で、意味は可読性のみ。`win…` は実値（例 `win6000ov400`）が
-> 埋め込まれるので、どのキャッシュがどの窓ポリシーで作られたか後から分かります。
+> `win…` は実値（例 `win6000ov400`）が埋め込まれるので、どのキャッシュがどの窓ポリシーで作られたか
+> 後から分かります。どちらも手で数字をバンプする必要はありません（hash は自動・win… は env から自動）。
+
+> **type-map（`_ENE_TO_CATEGORY`）は detector_version に含めません。** ENE type→カテゴリの対応づけは
+> 解析（マージ）時に毎回当たる**後段変換**で、LLM 検出キャッシュ（保存するのは生 `ene_type` のみ）には
+> 影響しないからです。よって `_ENE_TO_CATEGORY` を変えても**版バンプは不要**——次の解析で自動的に反映されます
+> （キャッシュ済みの生検出に新しいマップを当て直すだけ＝Azure 再呼び出しも不要）。
 
 ##### 窓ポリシー（窓の大きさ）の調整 — 環境変数
 
@@ -98,9 +102,8 @@ LLM に本文を渡す前の「窓」分割の大きさは **`.env` の環境変
 値を元に戻せば元のキャッシュに再びヒットします。既定（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` /
 `DEFAULT_OVERLAP_TOKENS`）はコミット済みのベースラインで、env はそれを上書きするだけです。
 
-> `ene-vN`（手動）と `win…`（env）は pii-masker の更新有無に関係なく、こちら都合で変える設定です
-> （下の pii-masker 追従手順とは別物）。逆に pii-masker を更新しても、窓ポリシーや type-map を
-> 触っていなければ `win…`・`ene-vN` は変わりません。
+> `win…`（env）は pii-masker の更新有無に関係なく、こちら都合で変える設定です（下の pii-masker
+> 追従手順とは別物）。逆に pii-masker を更新しても、窓ポリシーを触っていなければ `win…` は変わりません。
 
 #### pii-masker が更新されたら（追従手順）
 
@@ -116,7 +119,7 @@ uv run data-redactor sync-pii-masker
 
 1. submodule のポインタを更新（`<ref>` 省略時は追跡ブランチの最新）
 2. 新 HEAD の短縮ハッシュを取得
-3. `app.py` の `_DETECTOR_VERSION` の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュが
+3. `app.py` の `_DETECTOR_STATIC` の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュが
    `(content_hash, model, flatten, detector_version)` 不一致で**自動ミス→再取得**になる。ここを忘れると
    検出器が変わっても古いキャッシュが使い回される＝最大の落とし穴）
 4. **ENE type ドリフト検査**（pii-masker のプロンプトの型 vs `src/masking/engine.py` の
@@ -128,7 +131,7 @@ uv run data-redactor sync-pii-masker
 自動化できない（**人手で確認してからコミット**する）部分:
 
 - インターフェース契約の変更（`detect` / `locate_all` の戻り値）→ [src/llm/](src/llm/) のアダプタを修正
-- 新しい ENE type が増えていたら → `_ENE_TO_CATEGORY` に追加し、`ene-vN` を上げる（上の運用ルール）
+- 新しい ENE type が増えていたら → `_ENE_TO_CATEGORY` に追加（版バンプ不要・次の解析で自動反映。上の運用ルール）
 - 実機（`az login` 済み）で 🤖 LLM検出 を回して件数/カテゴリを目視
 - 問題なければ `git commit`
 
