@@ -234,6 +234,19 @@ class NerCache:
             ).fetchone()
         return row is not None
 
+    def llm_versions(self, content_hash: str) -> set[str]:
+        """この文書に保存済みの LLM 検出 ``detector_version`` 集合（flatten/model 問わず）。
+
+        「キャッシュはあるが現行の detector_version とは違う＝要更新」を一覧で示すための材料。
+        現行版が含まれていれば有効、含まれていなければ旧版のみ（再検出で更新）と判断できる。
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT detector_version FROM llm_detection WHERE content_hash=?",
+                (content_hash,),
+            ).fetchall()
+        return {r[0] for r in rows}
+
     def list_documents(self) -> list[DocInfo]:
         """キャッシュ済み文書の一覧（新しい順）。NER 済みモデルと LLM 済み有無も付ける。"""
         with self._conn() as c:

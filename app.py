@@ -183,13 +183,28 @@ def _select_table_fragment(
     st.session_state[sel_key] = ids[rows[0]] if rows else None
 
 
+def _llm_cache_status(content_hash: str, flatten: bool, has_llm: bool) -> str:
+    """🗂 ピッカー用の LLM キャッシュ状態。``✓``=現行設定で有効 / ``⚠ 要更新``=旧版のみ / ``—``=無し。
+
+    現在の ``(LLM_MODEL, flatten, _detector_version())`` に一致する行があれば「✓」（そのまま使える）。
+    LLM 検出履歴はあるが現行設定に一致しなければ「⚠ 要更新」（窓ポリシー等が変わった＝再検出が要る）。
+    実際のキャッシュヒット条件（has_llm）と同じ鍵で判定するので、表示と挙動がズレない。
+    """
+    if not has_llm:
+        return "—"
+    if _ner_cache().has_llm(content_hash, LLM_MODEL, flatten, _detector_version()):
+        return "✓"
+    return "⚠ 要更新"
+
+
 @st.fragment
-def _cache_picker_fragment(docs: list) -> None:
+def _cache_picker_fragment(docs: list, flatten: bool) -> None:
     """🗂 キャッシュ選択の UI 一式（テーブル＋選択依存の操作）を 1 つの fragment にまとめる。
 
     行クリックは **この fragment だけ** 再実行され、画面全体は再描画しない。
     選択した content_hash を ``st.session_state["cache_sel"]`` に入れる（``render_input`` が読む）。
-    ``docs`` は呼び出し側がソース名で安定ソート済み（並び替えで取り違えない）。
+    ``docs`` は呼び出し側がソース名で安定ソート済み（並び替えで取り違えない）。``flatten`` は現在の平文化
+    設定で、LLM 列の「現行設定で有効か（✓）/要更新（⚠）」判定に使う。
     NER のやり直し（キャッシュ無視）は読み込み時でなく **🔍 NER検出 タブ**で行う（パイプライン化に伴う移設）。
     """
     df = pd.DataFrame(
@@ -200,14 +215,15 @@ def _cache_picker_fragment(docs: list) -> None:
                 "チャンク": d.chunk_count,
                 "文字数": d.char_count,
                 "NER": _short_models(d.models) or "—",
-                "LLM": "✓" if d.has_llm else "—",
+                "LLM": _llm_cache_status(d.content_hash, flatten, d.has_llm),
                 "解析日時": d.created_at,
             }
             for d in docs
         ]
     )
     st.caption(
-        f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択。NER/LLM 列で解析状態が分かります）"
+        f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択）。"
+        "LLM 列: **✓**=現在の設定で有効／**⚠ 要更新**=キャッシュはあるが窓ポリシー等が変わり再検出が必要／**—**=無し。"
     )
     event = st.dataframe(
         df,
@@ -237,8 +253,11 @@ def _cache_picker_fragment(docs: list) -> None:
 
 def render_input(
     input_mode: str,
+    flatten_tables: bool,
 ) -> tuple[tuple | None, str, str, Callable[[], list[str]] | None]:
     """入力ウィジェットを描画し、解析に必要な情報を返す。
+
+    ``flatten_tables`` は現在の平文化設定で、🗂 キャッシュ選択の LLM 列の有効/要更新判定に渡す。
 
     重いテキスト化／ダウンロードは**ここでは行わず**、``get_chunks`` 呼び出しに遅延させる
     （実際にチャンクを取り出すのは「解析する」ボタンが押されたときだけ）。
@@ -350,7 +369,7 @@ def render_input(
         # 選択 UI 一式（テーブル＋強制再解析チェック＋案内）は 1 つの fragment 内で描く。
         # **ソース名で安定ソート**して渡すので、解析（created_at 更新）で行が動かず選択がズレない。
         docs = sorted(docs, key=lambda doc: doc.source_name)
-        _cache_picker_fragment(docs)
+        _cache_picker_fragment(docs, flatten_tables)
 
         # fragment が session_state に書いた選択・強制再解析を読んで get_chunks を組む（ここでは
         # 選択依存のウィジェットを描かない＝行クリックで再描画されない外側に widget を置かない）。
@@ -876,8 +895,18 @@ def render_cache_view() -> None:
         f"キャッシュ済み: {len(docs)} 文書　"
         "（**種別**はプルダウンで修正できます＝再解析で `cache` に潰れた行を元の出所へ。"
         "編集後は [💾 種別の変更を保存] を押す）"
+        "　LLM 列: **✓**=現行 detector_version で有効／**⚠ 要更新**=旧版のキャッシュのみ（窓ポリシー等が変わった）／**—**=無し。"
     )
+    current_ver = _detector_version()
     kind_options = ["text", "file", "kb", "cache"]
+
+    def _llm_col(d) -> str:
+        # 管理ビューは flatten 文脈を持たないので detector_version 一致のみで判定する。
+        vers = cache.llm_versions(d.content_hash)
+        if not vers:
+            return "—"
+        return "✓" if current_ver in vers else "⚠ 要更新"
+
     df = pd.DataFrame(
         [
             {
@@ -887,7 +916,7 @@ def render_cache_view() -> None:
                 "チャンク": d.chunk_count,
                 "文字数": d.char_count,
                 "NER": _short_models(d.models) or "—",
-                "LLM": "✓" if d.has_llm else "—",
+                "LLM": _llm_col(d),
                 "解析日時": d.created_at,
                 "hash": d.content_hash[:12],
             }
@@ -1725,7 +1754,9 @@ def main() -> None:
         ],
         horizontal=True,
     )
-    input_id, input_kind, source_label, get_chunks = render_input(input_mode)
+    input_id, input_kind, source_label, get_chunks = render_input(
+        input_mode, flatten_tables
+    )
 
     # 結果は (モード × 入力方法) ごとに別スロットへ保存する。これで入力方法を切り替えると
     # その方法の最後の結果（無ければ案内）が出て、別タブから戻れば元の結果が復元される
