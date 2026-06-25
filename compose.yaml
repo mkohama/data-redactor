@@ -10,7 +10,8 @@ services:
     container_name: data-redactor-ui
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      # ホスト 8508 → コンテナ 8501（ホストの 8501 は他で使用中のため 8508 を割当）
+      - "8508:8501"
     env_file: .env
     user: "${UID:-1000}:${GID:-1000}"
     volumes:

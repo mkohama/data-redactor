@@ -206,7 +206,7 @@ git submodule update --init
 cp .env.example .env
 
 # 3) 起動（ビルド＋デタッチ）。初回ビルドは torch＋ELECTRA 重みの DL で時間がかかります
-make docker-up        # → http://localhost:8501
+make docker-up        # → http://localhost:8508（ホスト 8508 → コンテナ 8501）
 
 make docker-logs      # ログ追従
 make docker-down      # 停止・削除

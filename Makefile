@@ -45,7 +45,7 @@ docker-up:
 	@mkdir -p ./data
 	env UID=$(HOST_UID) GID=$(HOST_GID) docker compose up -d --build
 	@echo ""
-	@echo "  UI: http://localhost:8501"
+	@echo "  UI: http://localhost:8508"
 
 docker-down:
 	@echo "Stopping data-redactor..."
