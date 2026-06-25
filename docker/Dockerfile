@@ -60,14 +60,6 @@ RUN groupadd -g ${APP_GID} appuser && \
 # builder から仮想環境のみコピー（torch / spaCy / GiNZA を含む）
 COPY --from=builder /app/.venv /app/.venv
 
-# アプリのソースツリーを COPY（wheel に含まれないルートスクリプトと submodule）。
-#   - app.py / main.py        : エントリ（streamlit run app.py）
-#   - src/                    : エンジン・マスキング・LLM アダプタ（config.py も src 配下）
-#   - external/pii-masker/src : path-injection で import する pii-masker 本体
-COPY app.py main.py ./
-COPY src/ src/
-COPY external/pii-masker/src/ external/pii-masker/src/
-
 # 環境変数
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
@@ -76,9 +68,21 @@ ENV HF_HOME="/opt/hf-cache"
 
 # GiNZA electra を prewarm（torch＋ELECTRA 重みをイメージに焼く）。spacy.load が .venv 内の
 # ja_ginza_electra パッケージ配下と HF_HOME の双方へ書き込む可能性があるため、両方を後で a+rX。
+# ★ ソース COPY より前に置く: prewarm は .venv（依存）にのみ依存する。pii-masker submodule や
+#   app/src を更新しても、依存が変わらない限りこの重い層はキャッシュ再利用される（再 DL されない）。
+#   依存（pyproject/uv.lock）を変えたときだけ builder の uv sync ともども再実行される＝正しい挙動。
 RUN mkdir -p "${HF_HOME}" && \
     python -c "import spacy; spacy.load('ja_ginza_electra')" && \
     chmod -R a+rX "${HF_HOME}" /app/.venv
+
+# アプリのソースツリーを COPY（wheel に含まれないルートスクリプトと submodule）。
+# pii-masker 更新で最初に invalidate されるのはここ。以降は軽い処理だけなので再ビルドが速い。
+#   - app.py / main.py        : エントリ（streamlit run app.py）
+#   - src/                    : エンジン・マスキング・LLM アダプタ（config.py も src 配下）
+#   - external/pii-masker/src : path-injection で import する pii-masker 本体
+COPY app.py main.py ./
+COPY src/ src/
+COPY external/pii-masker/src/ external/pii-masker/src/
 
 # データ永続化のマウント点を用意（cache.db / mask_dict.yaml / mask_allowlist.yaml）
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
