@@ -51,10 +51,17 @@ RUN uv pip install --reinstall-package torch --no-cache \
            /app/.venv/lib/python*/site-packages/*triton*.dist-info \
            /app/.venv/lib/python*/site-packages/*cuda*.dist-info
 
-# 不要なビルドアーティファクトを削除してイメージサイズを削減
-RUN find /app/.venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+# 不要なビルドアーティファクトを削除してイメージサイズを削減。
+# - __pycache__ / *.pyc / *.pyo: バイトコード（prewarm 後に必要分は再生成される）。
+# - tests: 各パッケージのテストスイート（numpy/pandas/transformers/spacy 等。実行時不要）。
+#   ★ ディレクトリ名が "tests" のものだけ消す。numpy.testing / pandas._testing / streamlit.testing は
+#     実モジュールなので消さない（名前が異なるのでマッチしない）。
+# - share/jupyter: pydeck の Jupyter nbextension（~23MB）。Streamlit 実行には不要。
+RUN find /app/.venv -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true && \
     find /app/.venv -type f -name "*.pyc" -delete 2>/dev/null || true && \
-    find /app/.venv -type f -name "*.pyo" -delete 2>/dev/null || true
+    find /app/.venv -type f -name "*.pyo" -delete 2>/dev/null || true && \
+    find /app/.venv -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf /app/.venv/share/jupyter 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime — 最終的な実行イメージ
