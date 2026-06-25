@@ -85,6 +85,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 # HF/transformers キャッシュは appuser が所有する /app 配下に置く（root 不要・再帰 chmod 不要）。
 ENV HF_HOME="/app/.cache/huggingface"
+# Azure CLI（entra_id 認証）のキャッシュ位置を固定。compose で ${HOME}/.azure をここにマウントすると、
+# 実行 UID の HOME 解決に依存せず AzureCliCredential が az login キャッシュを見つけられる。
+ENV AZURE_CONFIG_DIR="/home/appuser/.azure"
 
 # 永続化マウント点と HF キャッシュ用ディレクトリを appuser 所有で用意（venv には触れない＝複製しない）。
 RUN mkdir -p /app/data "${HF_HOME}" && chown appuser:appuser /app /app/data /app/.cache "${HF_HOME}"

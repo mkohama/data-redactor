@@ -17,8 +17,10 @@ services:
     volumes:
       # 機密データの永続化（cache.db / mask_dict.yaml / mask_allowlist.yaml）。
       - ./data:/app/data
-      # -- Entra ID 認証（ホストの az login キャッシュを流用する場合はコメントを外す）--
-      # - ${HOME}/.azure:/home/appuser/.azure:rw
+      # Entra ID 認証（spec-summarizer と同じ entra_id 方式）: ホストの az login キャッシュを流用する。
+      # ★ az login は WSL/Linux 側で実行すること（Windows の ~/.azure は DPAPI 暗号化されており
+      #   Linux コンテナ内の az では復号できず認証に失敗する）。SP 環境変数方式を使うなら下行は不要。
+      - ${HOME}/.azure:/home/appuser/.azure:rw
     # -- kb-mcp がホスト側で動く場合、コンテナからは localhost ではなく host.docker.internal で繋ぐ。
     #    .env で KB_MCP_URL=http://host.docker.internal:8000/mcp とし、Linux では以下を有効化する
     #    （Docker Desktop / Mac / Windows では既定で解決できるため不要）。
