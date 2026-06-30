@@ -200,3 +200,21 @@ def test_stage1_keeps_legit_ascii_company_strong() -> None:
     [c] = _cluster(text, cands)
     assert c.category == "社名"
     assert c.confidence == "強"
+
+
+def test_stage1_hyphenated_allcaps_person_weakened() -> None:
+    """`WEXPC-YCD`（全大文字ASCII＋ハイフン）を NER が人名と言っても特別に数えない（実在人名でない）。"""
+    text = "WEXPC-YCD"
+    cands = [Candidate(0, len(text), text, "人名", "", (("ja_ginza", "Person"),))]
+    [c] = _cluster(text, cands)
+    assert c.category != "人名"
+    assert c.confidence == "弱"
+
+
+def test_demote_jargon_caps_other_keeps_company() -> None:
+    """Stage2：全大文字ASCIIの その他/弱 は微弱へ。ただし社名（IBM）は守る（IBM/SAP 保護）。"""
+    other = Candidate(0, 9, "WEXPC-YCD", "その他", "弱", (("ja_ginza", "Person"),))
+    company = Candidate(0, 3, "IBM", "社名", "中", (("ja_ginza", "Company"),))
+    d_other, d_company = _demote_code_like([other, company])
+    assert d_other.confidence == "微弱"  # 全大文字ASCII（社名でない）→ 微弱
+    assert d_company.confidence == "中"  # 社名は守る

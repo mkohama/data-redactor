@@ -165,9 +165,6 @@ _KANJI_RE = re.compile(r"[㐀-鿿]")
 # 英数字コード（16D / 1L / 37D）。ASCII のみ＋数字混在＝識別子。実在の人名・社名はまず数字を含まない
 # （`7-Eleven`/`3M` 等は稀＝辞書登録で守る）。`-`/`.`/`&` は社名にあり得るのでマーカーには入れない。
 _ASCII_DIGIT_CODE_RE = re.compile(r"^[\x21-\x7e]*[0-9][\x21-\x7e]*$")
-# 全大文字ASCII（略語/ジャーゴン。FIARSL / EGPDPRY）。NER の **人名** 票はこれを実在人名と見なさない
-# （実在の人名に全大文字ASCIIは無い）。社名は IBM/SAP/AWS 等があるので別扱い（_system_category の Stage 1）。
-_ALLCAPS_ASCII_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
 
 
 @dataclass(frozen=True)
@@ -342,11 +339,11 @@ def _system_category(
             continue
         if not llm:  # Stage 1: NER の特別票を surface で弱める（カテゴリ非対称）
             if cat == "人名" and (
-                _looks_like_code(surface) or _ALLCAPS_ASCII_RE.match(surface)
+                _looks_like_code(surface) or _is_jargon_caps(surface)
             ):
-                cat = "その他"
+                cat = "その他"  # 全大文字ASCII（WEXPC-YCD 等）/コードは実在人名でない
             elif cat == "社名" and _looks_like_code(surface):
-                cat = "その他"
+                cat = "その他"  # 社名は IBM/SAP 等を守るためコードらしき のみ弱める
         cats.append(cat)
     return min(cats, key=lambda c: _CAT_RANK.get(c, 99)) if cats else None
 
@@ -626,13 +623,19 @@ def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
 
     確定/強（辞書・連絡先・2系統一致・昇格）は守る＝中/弱 のみ対象。例外：LLM が識別子
     （社員番号/アカウント/IP）と判定したものは免除＝レビューに残す（§7-④。`7-410` 型でも消さない）。
+
+    全大文字ASCII（``WEXPC-YCD`` 等）も微弱へ落とすが、**社名は除く**（``IBM``/``SAP`` 等の正当な
+    略語社名を守る。Stage 1 で人名→その他へ弱められた全大文字ASCIIはここで隠れる）。
     """
     return [
         (
             replace(c, confidence="微弱")
             if c.confidence in ("中", "弱")
-            and _looks_like_code(c.surface)
             and not _has_llm_identifier_vote(c)
+            and (
+                _looks_like_code(c.surface)
+                or (_is_jargon_caps(c.surface) and c.category != "社名")
+            )
             else c
         )
         for c in candidates
@@ -755,6 +758,20 @@ def _looks_like_code(surface: str) -> bool:
     if _ASCII_DIGIT_CODE_RE.match(surface):
         return True
     return len(surface) == 1 and not _KANJI_RE.match(surface)
+
+
+def _is_jargon_caps(surface: str) -> bool:
+    """全大文字ASCII（略語/ジャーゴン。``FIARSL`` / ``WEXPC-YCD`` / ``EGPDPRY``）か。
+
+    ASCII のみ・英大文字を含み・**英小文字を含まない**（``-`` や数字・区切りの混在は許す）。
+    実在の人名はこの形にならない（人名は Titlecase か日本語）ので **NER の人名票を弱める**判定に使う
+    （:func:`_system_category` の Stage 1）。社名は ``IBM``/``SAP``/``AWS`` 等があるので社名には使わない。
+    """
+    return (
+        surface.isascii()
+        and any("A" <= c <= "Z" for c in surface)
+        and not any("a" <= c <= "z" for c in surface)
+    )
 
 
 def _contact_candidates(text: str) -> list[Candidate]:
