@@ -76,27 +76,22 @@ _PLACEHOLDER_PREFIX = {
 # そもそもの自動マスク対象は 人名・社名・商標（地名は弱＝レビュー）。
 _NER_LABEL_CATEGORY: dict[str, str] = {
     "PERSON": "人名",
+    # 社名は**企業系3ラベルのみ**に絞る（実在の会社・企業グループ）。SHOW_ORGANIZATION(興行団体)・
+    # SPORTS_ORGANIZATION_OTHER・POLITICAL_*・GOVERNMENT・INTERNATIONAL_ORGANIZATION は業務文書で
+    # ゴミ（一般語の誤爆）になりやすいので**含めない**。これらの実在組織は LLM(Company)＋辞書で拾う。
     "COMPANY": "社名",
     "COMPANY_GROUP": "社名",
     "CORPORATION_OTHER": "社名",
-    "SHOW_ORGANIZATION": "社名",
-    "INTERNATIONAL_ORGANIZATION": "社名",
-    "POLITICAL_ORGANIZATION_OTHER": "社名",
-    "GOVERNMENT": "社名",
-    "POLITICAL_PARTY": "社名",
-    "SPORTS_ORGANIZATION_OTHER": "社名",
     # Nationality(国籍)・Ethnic_Group_Other(民族)・Family(一族) は会社/組織ではないので含めない。
+    # 地名は **_OTHER 系を含めない**（GPE_OTHER/GEOLOGICAL_REGION_OTHER/LOCATION_OTHER/
+    # DOMESTIC_REGION_OTHER/CONTINENTAL_REGION_OTHER/FACILITY_OTHER）。粒度が粗く一般語の
+    # 誤爆になりやすい。具体的な地名（都市/県/国/住所/駅/空港/施設の部位）だけ残す。
+    # 地名は元々 弱（レビュー止まり・自動マスク外）なので主効果は一覧のノイズ削減。
     "CITY": "地名",
     "PROVINCE": "地名",
     "COUNTRY": "地名",
-    "GPE_OTHER": "地名",
     "ADDRESS": "地名",
     "POSTAL_ADDRESS": "地名",
-    "GEOLOGICAL_REGION_OTHER": "地名",
-    "LOCATION_OTHER": "地名",
-    "DOMESTIC_REGION_OTHER": "地名",
-    "CONTINENTAL_REGION_OTHER": "地名",
-    "FACILITY_OTHER": "地名",
     "FACILITY_PART": "地名",
     "STATION": "地名",
     "AIRPORT": "地名",
