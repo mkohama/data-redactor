@@ -165,6 +165,12 @@ _KANJI_RE = re.compile(r"[㐀-鿿]")
 # 英数字コード（16D / 1L / 37D）。ASCII のみ＋数字混在＝識別子。実在の人名・社名はまず数字を含まない
 # （`7-Eleven`/`3M` 等は稀＝辞書登録で守る）。`-`/`.`/`&` は社名にあり得るのでマーカーには入れない。
 _ASCII_DIGIT_CODE_RE = re.compile(r"^[\x21-\x7e]*[0-9][\x21-\x7e]*$")
+# 日本語の「文字」（ひらがな・カタカナ・漢字）。区切り記号 `・`(U+30FB) や `「` は**含めない**
+# ＝NER の人名票を弱める判定で「日本語人名は信頼する」ためのゲートに使う（_looks_like_nonperson_latin）。
+_JP_LETTER_RE = re.compile(r"[ぁ-ゖァ-ヺー㐀-䶿一-鿿]")
+# ラテン英字の連なり（語）と、実在人名の語の形＝Titlecase（先頭大文字＋以降小文字。John / Smith）。
+_ASCII_WORD_RE = re.compile(r"[A-Za-z]+")
+_TITLECASE_RE = re.compile(r"[A-Z][a-z]*")
 
 
 @dataclass(frozen=True)
@@ -326,8 +332,11 @@ def _system_category(
     誤爆するため、NER の特別票を surface で「その他」に落とし、**コードノイズが LLM と組んで
     「強」になる経路を断つ**（その後 1 系統＝中→ Stage 2 ``_demote_code_like`` で微弱化される）。
     カテゴリ非対称：
-    - **人名**：全大文字ASCII（FIARSL）／コードらしき → その他（実在人名に全大文字ASCIIは無い）。
-    - **社名**：コードらしき のみ → その他（``IBM``/``SAP`` 等の全大文字ASCII単体は正当ゆえ守る）。
+    - **人名**：ラテン文字主体で **Titlecase 語の並びでない**もの（``EndTime``/``MarkID``/``dElem``/
+      ``Wafer ID``/``FIARSL``/``theta・「`` 等）／コードらしき → その他（:func:`_looks_like_nonperson_latin`）。
+      実在のラテン人名は Titlecase（``John``/``Smith``/``Anne-Marie``）なので、それ以外は識別子/術語の誤爆。
+      かな/漢字を含む人名（``小坂``）は信頼して残す。英語人名の recall は LLM（2系統＝強）と辞書が担保。
+    - **社名**：コードらしき のみ → その他（``IBM``/``SAP``/``Apple``/``eBay`` 等の ASCII 社名は正当ゆえ守る）。
     LLM 票は弱めない（文脈判定を尊重）。
     """
     cats: list[str] = []
@@ -339,11 +348,11 @@ def _system_category(
             continue
         if not llm:  # Stage 1: NER の特別票を surface で弱める（カテゴリ非対称）
             if cat == "人名" and (
-                _looks_like_code(surface) or _is_jargon_caps(surface)
+                _looks_like_code(surface) or _looks_like_nonperson_latin(surface)
             ):
-                cat = "その他"  # 全大文字ASCII（WEXPC-YCD 等）/コードは実在人名でない
+                cat = "その他"  # EndTime/Wafer ID/theta・「 等＝Titlecase でない＝実在人名でない
             elif cat == "社名" and _looks_like_code(surface):
-                cat = "その他"  # 社名は IBM/SAP 等を守るためコードらしき のみ弱める
+                cat = "その他"  # 社名は IBM/SAP/Apple/eBay 等を守るためコードらしき のみ弱める
         cats.append(cat)
     return min(cats, key=lambda c: _CAT_RANK.get(c, 99)) if cats else None
 
@@ -758,6 +767,34 @@ def _looks_like_code(surface: str) -> bool:
     if _ASCII_DIGIT_CODE_RE.match(surface):
         return True
     return len(surface) == 1 and not _KANJI_RE.match(surface)
+
+
+def _looks_like_nonperson_latin(surface: str) -> bool:
+    """ラテン文字主体（かな/漢字を含まない）の表層が、**実在人名の形を成していない**か。
+
+    実在のラテン人名は「各語が **Titlecase**（先頭大文字＋以降小文字）」（``John`` / ``Smith`` /
+    ``Anne-Marie``）。この形に**合致しない** ASCII 語は、人名でなく識別子/術語/コード片とみなして
+    NER の人名票を弱める（:func:`_system_category` の Stage 1・**人名のみ**）。明示的に弾く構造：
+
+    - **全小文字**（``theta`` / ``list`` / ``print``）＝実在の固有名は全小文字にならない。
+    - **camelCase / PascalCase の途中コブ**（``EndTime`` / ``MarkID`` / ``dElem`` / ``OutputItegrity``）
+      ＝語の途中に大文字。
+    - **全大文字**（``FIARSL``）／**2文字以上の全大文字語を含む複合**（``Wafer ID`` の ``ID``）。
+    - **記号・ブラケット混じり**（``theta・「``）＝Titlecase 語に分解できない。
+
+    日本語（かな/漢字）を含む表層は対象外＝**NER の日本語人名判定を信頼**する（``小坂`` 等は守る。
+    ``サブエラーコード`` のようなカタカナ汎用語は表層で固有名と区別できず、辞書/除外リストの仕事）。
+    数字・記号のみ（ラテン英字を含まない）は別経路 :func:`_looks_like_code` に委ねる。
+
+    ⚠ ``McDonald`` / ``DeWitt`` / ``DiCaprio`` 等の途中大文字を持つ外国姓も巻き込む（Titlecase でない）。
+    LLM（2系統一致＝強）と辞書で救済される前提＝英語人名の recall は NER 単独の仕事ではない。
+    """
+    if _JP_LETTER_RE.search(surface):
+        return False  # かな/漢字を含む＝NER の日本語人名判定を信頼（弱めない）
+    words = _ASCII_WORD_RE.findall(surface)
+    if not words:
+        return False  # ラテン英字が無い（数字/記号のみ）＝_looks_like_code の担当
+    return not all(_TITLECASE_RE.fullmatch(w) for w in words)
 
 
 def _is_jargon_caps(surface: str) -> bool:
