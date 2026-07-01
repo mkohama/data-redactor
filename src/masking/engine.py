@@ -169,6 +169,10 @@ _CJK_SEP_CHARS = "・･「」『』（）〔〕【】〈〉《》｢｣"
 _CJK_SEP_ADJ_ASCII_RE = re.compile(
     rf"[A-Za-z][{_CJK_SEP_CHARS}]|[{_CJK_SEP_CHARS}][A-Za-z]"
 )
+# 先頭/末尾に垂れたハイフン類・中黒＝スパン境界の人工物（`AP-` / `R-` / `-C02` / `AP・` / `田中・`）。
+# 実在名は英数字/CJK 文字で始まり終わる（`Coca-Cola`/`Anne-Marie` は**内部**ハイフンなので対象外＝守る）。
+# 長音 `ー`(U+30FC) は含めない（`サーバー` 等の正当なカナ語末に出るため）。
+_DANGLING_SEP_RE = re.compile(r"^[-‐‑–—―・･]|[-‐‑–—―・･]$")
 # 日本語の「文字」（ひらがな・カタカナ・漢字）。区切り記号 `・`(U+30FB) や `「` は**含めない**
 # ＝NER の人名票を弱める判定で「日本語人名は信頼する」ためのゲートに使う（_looks_like_nonperson_latin）。
 _JP_LETTER_RE = re.compile(r"[ぁ-ゖァ-ヺー㐀-䶿一-鿿]")
@@ -765,6 +769,8 @@ def _looks_like_code(surface: str) -> bool:
     - **CJK区切り/括弧が ASCII 英字に隣接**（例 ``AP・`` / ``theta・「`` / ``会社「A」``）＝NER スパンが
       セル/引用の境界を巻き込んだ人工物。**隣接に限る**ので、区切りが仮名間にある実在語
       （``C型補正値リミット・チェック結果``）や純カナの中黒名（``ジョン・スミス``）は対象外＝守る。
+    - **先頭/末尾に垂れたハイフン類・中黒**（例 ``AP-`` / ``R-`` / ``-C02`` / ``田中・``）＝境界の人工物。
+      内部ハイフンの実在名（``Coca-Cola`` / ``Anne-Marie``）や長音 ``ー`` は対象外＝守る。
     - **1 文字語（漢字を除く）**＝ASCII 英字・かな・数字・記号 1 文字（例 ``N`` / ``D``）。実在名では
       まず無い。ただし**漢字 1 文字は実在姓**（林・森・関 等）があるので保護＝対象外。
 
@@ -782,6 +788,10 @@ def _looks_like_code(surface: str) -> bool:
     if _CJK_SEP_ADJ_ASCII_RE.search(surface):
         return (
             True  # ASCII英字に隣接する中黒/括弧＝スパン境界の人工物（AP・ / theta・「）
+        )
+    if _DANGLING_SEP_RE.search(surface):
+        return (
+            True  # 先頭/末尾に垂れたハイフン類・中黒＝境界の人工物（AP- / R- / -C02）
         )
     return len(surface) == 1 and not _KANJI_RE.match(surface)
 
