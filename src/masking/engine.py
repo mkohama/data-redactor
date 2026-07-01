@@ -628,13 +628,17 @@ def _has_llm_identifier_vote(c: Candidate) -> bool:
 
 
 def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
-    """中/弱 の「コードらしき」誤検出を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
+    """中/弱 の低価値検出を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
 
     確定/強（辞書・連絡先・2系統一致・昇格）は守る＝中/弱 のみ対象。例外：LLM が識別子
     （社員番号/アカウント/IP）と判定したものは免除＝レビューに残す（§7-④。`7-410` 型でも消さない）。
 
-    全大文字ASCII（``WEXPC-YCD`` 等）も微弱へ落とすが、**社名は除く**（``IBM``/``SAP`` 等の正当な
-    略語社名を守る。Stage 1 で人名→その他へ弱められた全大文字ASCIIはここで隠れる）。
+    対象は次のいずれか（LLM 識別子は上記のとおり免除）：
+    - **コードらしき表層**（:func:`_looks_like_code`。`Em_NoYes`/`16D`/`AP・` 等）。
+    - **全大文字ASCII**（``WEXPC-YCD`` 等）。ただし**社名は除く**（``IBM``/``SAP`` 等の正当な略語社名を守る）。
+    - **「その他」カテゴリ全般**（＝隠すべきか不明な低価値。Sudachi ``固有名詞-一般`` の「ただの固有名詞」や、
+      Stage 1 で特別→その他へ降格されたノイズ ``EndTime`` 等）。地名・LLM 識別子は「その他」でないため対象外
+      （地名は弱＝要レビューのまま、識別子は上の免除で弱に残る）。
     """
     return [
         (
@@ -644,6 +648,7 @@ def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
             and (
                 _looks_like_code(c.surface)
                 or (_is_jargon_caps(c.surface) and c.category != "社名")
+                or c.category == "その他"
             )
             else c
         )
