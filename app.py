@@ -620,13 +620,20 @@ def _sorted_by_confidence(items, *, key, mask_rank=None):
     )
 
 
-def _auto_mask_spans(analysis) -> set:
-    """既定でマスクする出現の span 集合（確定/強）。共有選択 ``mask_sel`` の初期値（現状と同一）。"""
-    return {
-        (c.start, c.end)
-        for c in analysis.candidates
-        if c.confidence in AUTO_MASK_CONFIDENCE
-    }
+def _auto_mask_spans(engine, analysis) -> set:
+    """既定でマスクする出現の span 集合（共有選択 ``mask_sel`` の初期値）。
+
+    確信度は出現ごとに決まるが、自動選択は **実体単位**で行う：ある表層（実体）に 確定/強 の出現が
+    1 つでもあれば、その表層の**全出現**を選ぶ（＝CLI の ``apply(expand=True)`` と同じ）。
+    1 か所だけ 2系統一致で強・残りが LLM 単独で中、という社名（例 ``C社ファイル`` 4出現中1が強）を
+    「一部」しかマスクしない**漏れを防ぐ**。同形異義語（``小浜市``=地名 / ``小浜さん``=人名）は
+    どの出現も 2系統一致にならず中止まりなので、この自動選択には引っかからない（出現ごとの区別は保つ）。
+    """
+    spans: set[tuple[int, int]] = set()
+    for g in engine.group_candidates(analysis.candidates):
+        if g.confidence in AUTO_MASK_CONFIDENCE:
+            spans.update((m.start, m.end) for m in g.members)
+    return spans
 
 
 def _apply_selection(engine, analysis, sel: set):
@@ -1225,7 +1232,7 @@ def render_masking_result(stored: dict) -> None:
     # ドラフトは content_hash 単位で DB に永続化するので、**再起動・再解析でも手動選択が消えない**。
     # 実体ごと/出現ごとの両ビューがこの 1 つの集合を読み書きするので、切替で選択が消えない。
     chash = content_hash(chunks)
-    auto = _auto_mask_spans(analysis)
+    auto = _auto_mask_spans(engine, analysis)
     if "mask_sel" not in stored:
         draft = _ner_cache().get_draft(chash)
         if draft is not None:
