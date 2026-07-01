@@ -160,11 +160,14 @@ _KANJI_RE = re.compile(r"[㐀-鿿]")
 # 英数字コード（16D / 1L / 37D）。ASCII のみ＋数字混在＝識別子。実在の人名・社名はまず数字を含まない
 # （`7-Eleven`/`3M` 等は稀＝辞書登録で守る）。`-`/`.`/`&` は社名にあり得るのでマーカーには入れない。
 _ASCII_DIGIT_CODE_RE = re.compile(r"^[\x21-\x7e]*[0-9][\x21-\x7e]*$")
-# CJK の区切り・括弧（中黒・各種括弧）。実在の人名/社名の表層には出ず、NER スパンがセル/引用の境界を
-# 巻き込んだ人工物（`AP・` / `theta・「` / `会社「A」`）。ASCII 英字と**混在**する surface を断片とみなす。
-# 純カナの中黒名（`ジョン・スミス` / `ソニー・ミュージック`）は ASCII 英字が無いので対象外＝守る。
-_CJK_SEP_RE = re.compile(r"[・･「」『』（）〔〕【】〈〉《》｢｣]")
-_ASCII_ALPHA_RE = re.compile(r"[A-Za-z]")
+# CJK の区切り・括弧（中黒・各種括弧）が **ASCII 英字に隣接**する surface。NER スパンがセル/引用の
+# 境界を巻き込んだ人工物（`AP・` / `theta・「` / `会社「A」`）に特徴的。**隣接に限る**のが肝：
+# `C型補正値リミット・チェック結果` のように区切りが仮名間にある実在語（ASCII の `C` は `型` に付く）は
+# 拾わない。純カナの中黒名（`ジョン・スミス` / `ソニー・ミュージック`）も ASCII 隣接が無いので対象外＝守る。
+_CJK_SEP_CHARS = "・･「」『』（）〔〕【】〈〉《》｢｣"
+_CJK_SEP_ADJ_ASCII_RE = re.compile(
+    rf"[A-Za-z][{_CJK_SEP_CHARS}]|[{_CJK_SEP_CHARS}][A-Za-z]"
+)
 # 日本語の「文字」（ひらがな・カタカナ・漢字）。区切り記号 `・`(U+30FB) や `「` は**含めない**
 # ＝NER の人名票を弱める判定で「日本語人名は信頼する」ためのゲートに使う（_looks_like_nonperson_latin）。
 _JP_LETTER_RE = re.compile(r"[ぁ-ゖァ-ヺー㐀-䶿一-鿿]")
@@ -635,7 +638,8 @@ def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
 
     対象は次のいずれか（LLM 識別子は上記のとおり免除）：
     - **コードらしき表層**（:func:`_looks_like_code`。`Em_NoYes`/`16D`/`AP・` 等）。
-    - **全大文字ASCII**（``WEXPC-YCD`` 等）。ただし**社名は除く**（``IBM``/``SAP`` 等の正当な略語社名を守る）。
+    - **全大文字ASCII**（``WEXPC-YCD`` 等）。ただし**社名・商標は除く**（``IBM``/``SAP`` 等の略語社名・
+      ``MCSX`` 等の全大文字な商標/型番を守る。全大文字は人名でないので Stage 1 で人名→その他へ既に落ちる）。
     - **「その他」カテゴリ全般**（＝隠すべきか不明な低価値。Sudachi ``固有名詞-一般`` の「ただの固有名詞」や、
       Stage 1 で特別→その他へ降格されたノイズ ``EndTime`` 等）。地名・LLM 識別子は「その他」でないため対象外
       （地名は弱＝要レビューのまま、識別子は上の免除で弱に残る）。
@@ -647,7 +651,7 @@ def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
             and not _has_llm_identifier_vote(c)
             and (
                 _looks_like_code(c.surface)
-                or (_is_jargon_caps(c.surface) and c.category != "社名")
+                or (_is_jargon_caps(c.surface) and c.category not in ("社名", "商標"))
                 or c.category == "その他"
             )
             else c
@@ -757,8 +761,9 @@ def _looks_like_code(surface: str) -> bool:
       （例 ``Em_NoYes`` / ``Em_OffOn::idOff`` / ``ピッチ@`` / ``~C02`` / ``37D]==0``）。
     - 英字も日本語（かな・漢字）も含まない＝数字・記号のみ（例 ``7-410``）。
     - **ASCII のみ＋数字を含む**（例 ``16D`` / ``1L`` / ``37D``）。実在の人名・社名はまず数字を含まない。
-    - **ASCII 英字＋CJK区切り/括弧の混在**（例 ``AP・`` / ``theta・「`` / ``会社「A」``）＝NER スパンが
-      セル/引用の境界を巻き込んだ人工物。純カナの中黒名（``ジョン・スミス``）は ASCII 英字が無いので対象外＝守る。
+    - **CJK区切り/括弧が ASCII 英字に隣接**（例 ``AP・`` / ``theta・「`` / ``会社「A」``）＝NER スパンが
+      セル/引用の境界を巻き込んだ人工物。**隣接に限る**ので、区切りが仮名間にある実在語
+      （``C型補正値リミット・チェック結果``）や純カナの中黒名（``ジョン・スミス``）は対象外＝守る。
     - **1 文字語（漢字を除く）**＝ASCII 英字・かな・数字・記号 1 文字（例 ``N`` / ``D``）。実在名では
       まず無い。ただし**漢字 1 文字は実在姓**（林・森・関 等）があるので保護＝対象外。
 
@@ -773,8 +778,10 @@ def _looks_like_code(surface: str) -> bool:
         return True
     if _ASCII_DIGIT_CODE_RE.match(surface):
         return True
-    if _CJK_SEP_RE.search(surface) and _ASCII_ALPHA_RE.search(surface):
-        return True  # ASCII英字＋中黒/括弧＝スパン境界の人工物（AP・ / theta・「）
+    if _CJK_SEP_ADJ_ASCII_RE.search(surface):
+        return (
+            True  # ASCII英字に隣接する中黒/括弧＝スパン境界の人工物（AP・ / theta・「）
+        )
     return len(surface) == 1 and not _KANJI_RE.match(surface)
 
 
