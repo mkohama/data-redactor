@@ -7,7 +7,7 @@
 # （`id -u` を使うため）。
 # =============================================================================
 
-.PHONY: help docker-build docker-up docker-down docker-logs clean clean-images
+.PHONY: help docker-build docker-sync-build docker-up docker-down docker-logs clean clean-images
 
 .DEFAULT_GOAL := help
 
@@ -22,10 +22,12 @@ help:
 	@echo ""
 	@echo "=== data-redactor Docker Commands ==="
 	@echo ""
-	@echo "  make docker-build    Build Docker image"
-	@echo "  make docker-up       Start container (build + detached)"
-	@echo "  make docker-down     Stop and remove container"
-	@echo "  make docker-logs     View container logs"
+	@echo "  make docker-build       Build Docker image"
+	@echo "  make docker-sync-build  Bump pii-masker submodule (venv-free) + build"
+	@echo "                          (optional: PII_REF=<commit/tag/branch>)"
+	@echo "  make docker-up          Start container (build + detached)"
+	@echo "  make docker-down        Stop and remove container"
+	@echo "  make docker-logs        View container logs"
 	@echo ""
 	@echo "=== Maintenance ==="
 	@echo ""
@@ -39,6 +41,25 @@ help:
 docker-build:
 	@echo "Building Docker image..."
 	env UID=$(HOST_UID) GID=$(HOST_GID) docker compose build
+
+# pii-masker（submodule）を取り込んでからイメージを再ビルドする（ビルド/配布機向け）。
+# ★ ホスト側 .venv を作らない: sync-pii-masker（uv run）と違い git + perl だけで機械的に済ませる。
+#    イメージに効くのは 2 つ (a) external/pii-masker/src の更新 (b) app.py の pii-masker@<hash> だけで、
+#    どちらも venv 不要。ENE ドリフト検査 / ruff / mypy / pytest は開発機の `sync-pii-masker` に委ねる。
+#    置換は perl（Git Bash 同梱）で行う: sed -i は CRLF を LF に潰すが perl -i -pe は改行を保持する。
+# 既定は追跡ブランチの最新へ更新。特定の版に固定するなら: make docker-sync-build PII_REF=<commit/tag/branch>
+docker-sync-build:
+	@echo "Syncing pii-masker submodule (venv-free)..."
+	@if [ -n "$(PII_REF)" ]; then \
+		git -C external/pii-masker fetch && git -C external/pii-masker checkout "$(PII_REF)"; \
+	else \
+		git submodule update --remote external/pii-masker; \
+	fi
+	@HASH=$$(git -C external/pii-masker rev-parse --short HEAD); \
+	 echo "pii-masker HEAD: $$HASH"; \
+	 perl -i -pe "s/pii-masker\@[0-9a-fA-F]+/pii-masker\@$$HASH/" app.py; \
+	 echo "Rewrote app.py detector hash -> pii-masker@$$HASH (LLM cache will auto-miss)"
+	@$(MAKE) docker-build
 
 docker-up:
 	@echo "Starting data-redactor UI..."

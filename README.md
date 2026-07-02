@@ -123,6 +123,14 @@ LLM（pii-masker）に「何を抜かせるか」を **`.env` の環境変数だ
 #### pii-masker が更新されたら（追従手順）
 
 pii-masker（submodule）を更新するときの手順。それを取り込み、LLM 検出キャッシュを正しく無効化します。
+更新を反映する経路は **2 つ**あり、マシンの役割で使い分けます。
+
+- **開発機（`.venv` あり・検証まで回す）** → `sync-pii-masker`（下記）。取り込み＋ENE ドリフト検査＋
+  ruff/mypy/pytest まで一括で回し、目視して **commit** します。検証はここに属する作業です。
+- **ビルド/配布機（`.venv` を作りたくない）** → `make docker-sync-build`（後述の「Docker で起動」節）。
+  git + perl だけで submodule ポインタと `app.py` のハッシュを書き換え、そのままイメージを再ビルドします。
+  ホスト側 `.venv` を一切作らず、検証は開発機のコミット済み状態に委ねます。
+
 機械的な部分は **`sync-pii-masker` サブコマンド**が自動化します。
 
 ```powershell
@@ -227,6 +235,34 @@ make docker-logs      # ログ追従
 make docker-down      # 停止・削除
 make clean            # コンテナ＋ボリュームごと削除
 ```
+
+### pii-masker を取り込んで再ビルド（ビルド/配布機向け・venv 不要）
+
+pii-masker（submodule）の更新を反映してイメージを作り直したいだけなら、`make docker-sync-build` を使います。
+
+```bash
+# 追跡ブランチの最新を取り込んで再ビルド
+make docker-sync-build
+
+# 特定のコミット/タグ/ブランチに固定して取り込む
+make docker-sync-build PII_REF=<commit/tag/branch>
+```
+
+`uv run data-redactor sync-pii-masker` と違い **git + perl だけ**で動くため、**ホスト側に `.venv` を作りません**
+（`uv run` は `.venv` を自動生成するので、ビルド機ではそれを避けたい）。やることは 2 つだけです。
+
+1. `git submodule update --remote external/pii-masker`（`PII_REF` 指定時はその版へ `checkout`）
+2. `app.py` の `_DETECTOR_STATIC` の `pii-masker@<hash>` を新 HEAD に書き換え（LLM 検出キャッシュを自動ミスさせる）
+
+そのまま `make docker-build` に続きます。イメージに効くのはこの 2 点（`external/pii-masker/src` の中身と
+`app.py` のハッシュ）だけで、どちらも venv 不要だからこう割り切れます。
+
+> **ENE ドリフト検査・ruff/mypy/pytest・契約変更の目視は回りません**（それらは `.venv` が要る開発機の作業）。
+> ビルド機は「開発機で `sync-pii-masker` → 目視 → commit 済み」の状態を取り込む前提で使ってください。
+> `.venv` すら要らない最小構成なら、コミット済みなら `git pull && make docker-build` だけでも反映できます
+> （`docker-sync-build` は、まだコミットされていない submodule 最新を取りに行きたいとき用）。
+>
+> perl を使うのは `sed -i` が CRLF を LF に潰すのを避けるため（Git Bash 同梱の perl は改行を保持する）。
 
 成果物: [docker/Dockerfile](docker/Dockerfile)・[.dockerignore](.dockerignore)・[compose.yaml](compose.yaml)・[Makefile](Makefile)。
 
