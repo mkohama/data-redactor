@@ -570,6 +570,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out", type=Path, help="結果を書き出す（.csv なら CSV、それ以外は JSON）"
     )
+    parser.add_argument(
+        "--show-all",
+        action="store_true",
+        help="画面に全区分を全件表示（既定は★確実のみ＋件数サマリ）",
+    )
+    parser.add_argument(
+        "--print-limit",
+        type=int,
+        default=50,
+        help="★確実の画面表示件数の上限（既定 50。--out には全件出る）",
+    )
     args = parser.parse_args(argv)
 
     if not args.glossary.exists():
@@ -659,21 +670,44 @@ def main(argv: list[str] | None = None) -> int:
         f"\n判定内訳: 確実に秘匿 {len(certain)} / 秘匿の可能性 {len(maybe)}"
         f" / 要確認 {len(review)} / 不要 {len(keep)}"
     )
-    print(f"\n===== ★確実に秘匿すべき（要マスク×確信度高・{len(certain)} 件） =====")
-    if certain:
-        for p in certain:
-            show(p)
+
+    if args.show_all:
+        # 全区分を全件表示（従来挙動）。件数が少ないとき・画面で全部見たいとき用。
+        sections = [
+            (f"★確実に秘匿すべき（要マスク×確信度高・{len(certain)} 件）", certain),
+            (f"秘匿の可能性（要マスク×中/低・{len(maybe)} 件・要レビュー）", maybe),
+            (f"要確認（判断材料不足・{len(review)} 件）", review),
+            (f"不要（{len(keep)} 件）", keep),
+        ]
+        for title, group in sections:
+            print(f"\n===== {title} =====")
+            for p in group:
+                show(p)
+            if not group:
+                print("  （該当なし）")
     else:
-        print("  （該当なし）")
-    print(f"\n----- 秘匿の可能性（要マスク×中/低・{len(maybe)} 件・要レビュー） -----")
-    for p in maybe:
-        show(p)
-    print(f"\n----- 要確認（判断材料不足・{len(review)} 件） -----")
-    for p in review:
-        show(p)
-    print(f"\n----- 不要（{len(keep)} 件） -----")
-    for p in keep:
-        show(p)
+        # 既定は画面を汚さない: 成果物の核＝★確実だけ出す。残りは件数のみ（詳細は --out へ）。
+        cap = args.print_limit
+        print(
+            f"\n===== ★確実に秘匿すべき（要マスク×確信度高・{len(certain)} 件） ====="
+        )
+        if certain:
+            for p in certain[:cap]:
+                show(p)
+            if len(certain) > cap:
+                print(f"  … 他 {len(certain) - cap} 件（全件は --out / --show-all で）")
+        else:
+            print("  （該当なし）")
+        print(
+            f"\n秘匿の可能性 {len(maybe)} 件 / 要確認 {len(review)} 件 / 不要 {len(keep)} 件"
+            " は画面では省略。"
+        )
+        if args.out is not None:
+            print("  → 全件の詳細（根拠つき）は書き出したファイルを参照。")
+        else:
+            print(
+                "  → 全件を残すには --out out.csv を付ける（--show-all で画面に全表示）。"
+            )
 
     if args.out is not None:
         write_output(pairs, args.out)
