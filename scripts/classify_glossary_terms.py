@@ -14,16 +14,16 @@
     C: 用語 / D: 英語名称 / E: 日本語名称 / F: 種類 / G: 概要・メモ
   （列は**ヘッダ名で探す**ので、位置がずれても・欠けても動く。用語列さえあれば可。）
 
-判定基準（何を秘匿とみなすか）:
-  - 要マスク: ①固有名詞（社名・組織名・製品名・ブランド名・人名）＝原則マスク／
-    ②社内固有の略語・短縮記号・造語的な識別子（★重点対象）／③コードネーム・型番・
-    社内プロジェクト名・独自アルゴリズム/方式名。
-  - 不要: **一般的な単語だけで構成される語句**（「1st column」等。技術語でも普通の語の組合せ）／
-    公知の標準用語・標準略語（PID/USB/API 等）。
-  - 要確認: 概要・メモが乏しく固有か一般か決められない。
-  各用語を Azure OpenAI gpt-4.1-mini に投げ、mask / confidence（高中低）/ category / reason（根拠）
-  を返させる。「要マスク × 確信度高」＝確実に秘匿すべき確定候補として最上段に出す。
-  出力 CSV には表層ベースの ``abbrev``（略語らしさ）列も付ける（略語を重点レビューする用）。
+対象の絞り込み（2 段）:
+  1. コードで確定的に絞る: **略語のみを対象**（``looks_like_abbrev``）。
+     日本語のみの用語・句・普通の語は略語でないので除外（LLM に送らない＝コスト減）。
+  2. 残った略語を LLM で判定: **自社固有の名前を指す略語か** を見る。
+     - 要マスク: 展開しても自社固有の名前（機能名/製品名/コードネーム/独自方式）で外部に通じない略語。
+     - 不要: 公知の一般略語（UI/API/USB 等）／一般概念を社内で短縮しただけの略語
+       （Baseline Check→BSCK のように展開が一般概念）。
+     - 要確認: 展開や意味が分からず決められない。
+  Azure OpenAI gpt-4.1-mini に投げ、mask / confidence（高中低）/ category / reason（根拠）を返させる。
+  「要マスク × 確信度高」＝確実に秘匿すべき確定候補として最上段に出す。
   ※これは候補であって確定辞書ではない。最終判断は必ず人手レビュー。
 
 送信先の制約:
@@ -198,43 +198,39 @@ _CONF_CANON = {
 
 _PROMPT_HEADER = """\
 あなたは、ある製造業・技術系企業の社内文書のマスキング（秘匿）を支援する専門家です。
-以下は自社の「用語集」の抜粋です。外部に開示すると自社の製品・技術・組織・取引先の情報が
-漏れる「秘匿すべき語」を、高い精度で選び出してください。
-判定材料は「用語」の表記そのものと「概要・メモ」（説明）。種類・英語名称・日本語名称も見ます。
+以下は自社「用語集」から抽出した**略語・短縮記号**の一覧です（略語だけに絞り込んであります）。
+各略語について、それが **自社固有の機能・製品・方式・コードネームなどを指す固有の略語か** を
+判定してください。判定材料: 略語の表記、英語名称（＝略語の展開・正式綴り）、日本語名称、種類、概要・メモ。
 
 【要マスク(yes)にするもの】
-1. 固有名詞: 会社名・組織名・部署名、製品名・ブランド名・サービス名、人名。＝原則マスクする。
-2. 略語・独自の短縮記号・造語的な識別子（★今回とくに重点的に拾いたい対象）:
-   社内固有の略語/コード/記号（例のような、一般には通じない短縮語や記号）。
-3. コードネーム・型番・社内プロジェクト名・独自アルゴリズム/方式の名称。
+- 展開しても **自社固有の名前**（機能名・製品名・コードネーム・独自方式/アルゴリズム名など）で、
+  外部には通じない略語。＝それ自体が自社の何かを露呈する。
 
 【不要(no)にするもの】
-- **一般的な単語だけで構成される語句**（複合語・句を含む）。意味が技術的でも、普通の単語の
-  組み合わせなら対象外。例:「1st column」「second column」「current value」「output image」
-  「露光時間」「入力データ」。
-- 業界・学術で広く公知の標準用語・標準略語・規格名。例:「PID」「USB」「API」「JPEG」「CPU」。
-  ＝略語でも "誰でも知っている公知のもの" は秘匿不要。
+1. 一般的・公知の略語（業界や一般で通用するもの）。例:「UI」「API」「USB」「CPU」「LED」「PC」「OS」。
+2. **一般的な言葉を社内で短くしただけの略語**（展開すると一般的な概念になるもの）。
+   例:「Baseline Check → BSCK」「Current Value → CV」。中身が一般概念なら、社内独自の綴りでも対象外。
 
 【要確認(unsure)】
-- 概要・メモが乏しい等で、固有か一般か決められない語。
+- 展開や意味が分からず、固有の名前か一般概念か決められない略語。
 
-確信度（confidence）＝「秘匿すべき」とどれだけ確実に言えるか:
-- high: 社名などの固有名詞・社内固有の略語/コードだと明確、または概要・メモに固有性の明確な根拠。
+確信度（confidence）＝「自社固有の名前を指す略語だ」とどれだけ確実に言えるか:
+- high: 展開・概要から自社固有の名前だと明確。
 - mid: 可能性は高いが確証がやや弱い。
 - low: 手がかりが薄い。
 
-原則:
-- **一般的な単語で構成される言葉は対象外（不要）に倒す**（「1st column」等は秘匿しない）。
-- **略語・短縮記号・造語的な識別子は重点的に拾う**。ただし公知の標準略語（PID/USB 等）は不要。
-- **社名・組織名・製品名などの固有名詞は原則マスク**（安易に不要にしない）。
-- reason には、そう判定した具体的な根拠を「用語の表記」または「概要・メモ」から引いて書く。
+最重要の原則:
+- **判断の軸は「略語の展開（中身）が自社固有の名前か、一般的な概念か」**。
+  展開が一般概念なら不要（社内独自の短縮でも）。公知の略語も不要。
+- 迷ったら yes に水増しせず unsure にする。
+- reason には、英語名称（展開）・概要から「なぜ固有／一般と判断したか」を具体的に書く。
 
 出力は JSON オブジェクト 1 個のみ。キー "results" に配列を入れる。
 各要素は {"no": 用語の番号(整数), "mask": "yes"|"no"|"unsure",
 "confidence": "high"|"mid"|"low", "category": "分類の短い語", "reason": "判定の根拠(日本語1〜2文)"}。
 入力の全番号について、過不足なく 1 要素ずつ返すこと。
 
-# 用語一覧
+# 略語一覧
 """
 
 
@@ -500,7 +496,6 @@ def _sort_key(pair: tuple[GlossaryRow, Judgement]) -> tuple[int, int, str]:
 # CSV の列順（判定系を前に寄せ、一覧でスキャンしやすく。長文の memo/reason は後ろ）。
 _CSV_FIELDS = [
     "certain",
-    "abbrev",
     "mask",
     "confidence",
     "term",
@@ -515,6 +510,13 @@ _CSV_FIELDS = [
 
 # 略語・短縮記号らしい ASCII トークンにマッチ（空白を含む句・純粋な小文字語は除外）。
 _ABBREV_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z\-_.]*")
+_CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def _is_japanese_only(term: str) -> bool:
+    """用語が日本語のみ（かな/漢字/カナを含み、ラテン文字を含まない）か。対象外判定の内訳表示用。"""
+    return bool(_CJK_RE.search(term)) and _LATIN_RE.search(term) is None
 
 
 def looks_like_abbrev(term: str) -> bool:
@@ -553,7 +555,6 @@ def write_output(pairs: list[tuple[GlossaryRow, Judgement]], out: Path) -> None:
     rows = [
         {
             "certain": "確実" if is_certain(j) else "",
-            "abbrev": "略語" if looks_like_abbrev(r.term) else "",
             "mask": j.mask,
             "confidence": j.confidence,
             "term": r.term,
@@ -640,12 +641,24 @@ def main(argv: list[str] | None = None) -> int:
     if not args.glossary.exists():
         raise SystemExit(f"エラー: 用語集が存在しません: {args.glossary}")
 
-    rows, warnings = load_glossary_rows(args.glossary, args.sheet, args.header_row)
-    if args.limit is not None:
-        rows = rows[: args.limit]
-    print(f"用語集: {args.glossary}（判定対象 {len(rows)} 件）")
+    all_rows, warnings = load_glossary_rows(args.glossary, args.sheet, args.header_row)
+    print(f"用語集: {args.glossary}（全 {len(all_rows)} 件）")
     for w in warnings:
         print(f"  ⚠ {w}")
+
+    # 事前フィルタ（コードで確定的に絞る）: 略語のみを対象とする。
+    #   - 日本語のみ／句／普通の語 は略語でないので除外（→ LLM に送らない＝コスト減）。
+    #   - 残った略語のうち「一般略語か・一般概念の社内言い換えか」は LLM が判定する（プロンプト）。
+    rows = [r for r in all_rows if looks_like_abbrev(r.term)]
+    excluded = [r for r in all_rows if not looks_like_abbrev(r.term)]
+    ja_only = sum(1 for r in excluded if _is_japanese_only(r.term))
+    print(
+        f"対象を略語に限定: {len(rows)} 件を判定。"
+        f"対象外 {len(excluded)} 件（日本語のみ {ja_only} / その他非略語 {len(excluded) - ja_only}）"
+    )
+    if args.limit is not None:
+        rows = rows[: args.limit]
+        print(f"  --limit {args.limit}: 先頭 {len(rows)} 件だけ判定")
 
     if args.mock:
         print(
