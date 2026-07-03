@@ -490,16 +490,41 @@ def _sort_key(pair: tuple[GlossaryRow, Judgement]) -> tuple[int, int, str]:
     return (_MASK_ORDER.get(j.mask, 9), _CONF_ORDER.get(j.confidence, 9), "")
 
 
+# CSV の列順（判定系を前に寄せ、一覧でスキャンしやすく。長文の memo/reason は後ろ）。
+_CSV_FIELDS = [
+    "certain",
+    "mask",
+    "confidence",
+    "term",
+    "english",
+    "japanese",
+    "kind",
+    "category",
+    "reason",
+    "memo",
+    "row",
+]
+
+
+def _oneline(s: str) -> str:
+    """セル内改行・連続空白を 1 個の空白に潰す（1 レコード＝物理 1 行を保証）。
+
+    memo（Excel の Alt+Enter 改行）や reason（LLM 出力の改行）が入ると、CSV レコードが
+    複数行に割れて一覧性・編集性が落ちるため、CSV 書き出し時だけ 1 行化する。
+    """
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def write_output(pairs: list[tuple[GlossaryRow, Judgement]], out: Path) -> None:
     rows = [
         {
             "certain": "確実" if is_certain(j) else "",
+            "mask": j.mask,
+            "confidence": j.confidence,
             "term": r.term,
             "english": r.english or "",
             "japanese": r.japanese or "",
             "kind": r.kind or "",
-            "mask": j.mask,
-            "confidence": j.confidence,
             "category": j.category,
             "reason": j.reason,
             "memo": r.memo or "",
@@ -507,24 +532,18 @@ def write_output(pairs: list[tuple[GlossaryRow, Judgement]], out: Path) -> None:
         }
         for r, j in pairs
     ]
-    fields = [
-        "certain",
-        "term",
-        "english",
-        "japanese",
-        "kind",
-        "mask",
-        "confidence",
-        "category",
-        "reason",
-        "memo",
-        "row",
-    ]
     if out.suffix.lower() == ".csv":
         with out.open("w", encoding="utf-8-sig", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fields)
+            writer = csv.DictWriter(fh, fieldnames=_CSV_FIELDS)
             writer.writeheader()
-            writer.writerows(rows)
+            for row in rows:
+                # 各セルを 1 行化（row は int なのでそのまま）。1 用語＝1 行を保証。
+                writer.writerow(
+                    {
+                        k: (_oneline(v) if isinstance(v, str) else v)
+                        for k, v in row.items()
+                    }
+                )
     else:
         out.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
