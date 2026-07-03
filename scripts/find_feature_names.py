@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -239,11 +240,16 @@ def scan_folder(
     folder: Path,
     include_dirs: bool,
     progress: Callable[[int], None] | None = None,
-) -> tuple[list[TermHit], int, int]:
-    """フォルダ配下の名前を走査し (hits, 走査数, 照合不能な用語数) を返す。
+) -> tuple[list[TermHit], int, int, int]:
+    """フォルダ配下の名前を走査し (hits, 走査数, 照合不能な用語数, エラー数) を返す。
 
     走査は O(ファイル数 × 用語数) で大きな入力では時間がかかるため、``progress`` を渡すと
     一定間隔で走査済み件数を通知する（無音で固まっているように見えるのを防ぐ）。
+
+    堅牢性: ``os.walk`` の**列挙名**を使い、個別ファイルへ stat をかけない（``rglob`` + ``is_file``
+    は、長すぎるパス・壊れたショートカット・走査中に消えたファイルで ``FileNotFoundError`` を投げ、
+    1 件で全体が落ちていた）。アクセス不能ディレクトリは ``onerror`` で数えて飛ばし、個別処理も
+    ``OSError`` を握って続行する（1 件のエラーで全走査を無駄にしない）。
     """
     matchers: list[tuple[TermEntry, _Matcher]] = []
     skipped = 0
@@ -257,34 +263,44 @@ def scan_folder(
     seen: dict[str, TermHit] = {}
     order: list[str] = []
     scanned = 0
-    for p in folder.rglob("*"):
-        is_file = p.is_file()
-        if p.is_dir():
-            if not include_dirs:
+    errors = 0
+
+    def on_walk_error(_exc: OSError) -> None:
+        nonlocal errors
+        errors += 1  # アクセスできないディレクトリは飛ばして続行
+
+    for dirpath, dirnames, filenames in os.walk(folder, onerror=on_walk_error):
+        # ファイル名（拡張子を落とす）＋ --include-dirs ならディレクトリ名も対象に。
+        names = [(fn, True) for fn in filenames]
+        if include_dirs:
+            names += [(dn, False) for dn in dirnames]
+        for nm, is_file in names:
+            scanned += 1
+            if progress is not None and scanned % 200 == 0:
+                progress(scanned)  # 無音回避（200 件ごとに現況を出す）
+            try:
+                name = Path(nm).stem if is_file else nm  # 拡張子は落とす
+                key = build_file_key(name)
+                p = Path(dirpath) / nm
+                try:
+                    rel: Path = p.relative_to(folder)
+                except ValueError:
+                    rel = p
+            except OSError:
+                errors += 1  # 想定外の I/O 由来。その 1 件だけ飛ばす
                 continue
-        elif not is_file:
-            continue
-        scanned += 1
-        if progress is not None and scanned % 200 == 0:
-            progress(scanned)  # 無音回避（200 件ごとに現況を出す）
-        name = p.stem if is_file else p.name  # 拡張子は落とす
-        key = build_file_key(name)
-        try:
-            rel = p.relative_to(folder)
-        except ValueError:
-            rel = p
-        for e, m in matchers:
-            if matches(m, key):
-                hit = seen.get(e.term)
-                if hit is None:
-                    hit = TermHit(e.term, e.raw_term, e.english, e.japanese)
-                    seen[e.term] = hit
-                    order.append(e.term)
-                hit.files.append(rel)
+            for e, m in matchers:
+                if matches(m, key):
+                    hit = seen.get(e.term)
+                    if hit is None:
+                        hit = TermHit(e.term, e.raw_term, e.english, e.japanese)
+                        seen[e.term] = hit
+                        order.append(e.term)
+                    hit.files.append(rel)
 
     hits = [seen[t] for t in order]
     hits.sort(key=lambda h: (-len(h.files), h.term))
-    return hits, scanned, skipped
+    return hits, scanned, skipped, errors
 
 
 # --------------------------------------------------------------------------- #
@@ -366,10 +382,16 @@ def main(argv: list[str] | None = None) -> int:
     def progress(n: int) -> None:
         print(f"  走査中… {n} 件目", flush=True)
 
-    hits, scanned, skipped = scan_folder(
+    hits, scanned, skipped, errors = scan_folder(
         entries, args.folder, args.include_dirs, progress
     )
     print(f"走査対象 {scanned} 件 / 照合できなかった用語 {skipped} 件", flush=True)
+    if errors:
+        print(
+            f"  ⚠ 読めずに飛ばした項目 {errors} 件"
+            "（アクセス不能ディレクトリ・長すぎるパス・走査中に消えたファイル等）",
+            flush=True,
+        )
 
     print(f"\n===== 機能名候補（{len(hits)} 件・ファイル数の多い順） =====")
     for h in hits:
