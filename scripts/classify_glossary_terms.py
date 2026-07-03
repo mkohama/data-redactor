@@ -305,9 +305,28 @@ def _parse_results(raw: str, n: int) -> list[Judgement]:
 LlmFn = Callable[[str], str]
 
 
+def _ensure_pii_masker_importable() -> None:
+    """pii-masker（pip 非対応の git submodule）を import 可能にする path-injection。
+
+    本体の src/llm/_paths.py と同じ方針で ``external/pii-masker/src`` を sys.path に通す
+    （このスクリプトは src に依存しない自己完結にしたいので、その注入だけ写した）。
+    submodule 未取得なら分かりやすく落とす。
+    """
+    src = Path(__file__).resolve().parents[1] / "external" / "pii-masker" / "src"
+    if not src.is_dir():
+        raise SystemExit(
+            f"エラー: pii-masker が見つかりません（{src}）。\n"
+            "  git submodule update --init --recursive で取得してください。"
+        )
+    p = str(src)
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
 def _azure_llm(model: str) -> LlmFn:
     """pii-masker の Azure クライアントを使う実機用 LLM 呼び出しを返す（遅延 import）。"""
-    from pii_masker.client import get_client  # 実機でのみ pii_masker を要求
+    _ensure_pii_masker_importable()
+    from pii_masker.client import get_client  # type: ignore[import-not-found]
 
     client = get_client(model)
 
