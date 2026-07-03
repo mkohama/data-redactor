@@ -29,6 +29,7 @@ import json
 import re
 import sys
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -237,8 +238,13 @@ def scan_folder(
     entries: list[TermEntry],
     folder: Path,
     include_dirs: bool,
+    progress: Callable[[int], None] | None = None,
 ) -> tuple[list[TermHit], int, int]:
-    """フォルダ配下の名前を走査し (hits, 走査数, 照合不能な用語数) を返す。"""
+    """フォルダ配下の名前を走査し (hits, 走査数, 照合不能な用語数) を返す。
+
+    走査は O(ファイル数 × 用語数) で大きな入力では時間がかかるため、``progress`` を渡すと
+    一定間隔で走査済み件数を通知する（無音で固まっているように見えるのを防ぐ）。
+    """
     matchers: list[tuple[TermEntry, _Matcher]] = []
     skipped = 0
     for e in entries:
@@ -259,6 +265,8 @@ def scan_folder(
         elif not is_file:
             continue
         scanned += 1
+        if progress is not None and scanned % 200 == 0:
+            progress(scanned)  # 無音回避（200 件ごとに現況を出す）
         name = p.stem if is_file else p.name  # 拡張子は落とす
         key = build_file_key(name)
         try:
@@ -343,14 +351,25 @@ def main(argv: list[str] | None = None) -> int:
     if not args.folder.is_dir():
         raise SystemExit(f"エラー: フォルダが存在しません: {args.folder}")
 
+    print(f"用語集を読み込み中… {args.glossary}", flush=True)
     entries, warnings = load_glossary_terms(args.glossary, args.sheet, args.header_row)
-    print(f"用語集: {args.glossary}（照合キー {len(entries)} 件）")
+    print(f"用語集: {args.glossary}（照合キー {len(entries)} 件）", flush=True)
     for w in warnings:
-        print(f"  ⚠ {w}")
+        print(f"  ⚠ {w}", flush=True)
 
-    print(f"走査: {args.folder}（配下のファイル名を単語境界一致）")
-    hits, scanned, skipped = scan_folder(entries, args.folder, args.include_dirs)
-    print(f"走査対象 {scanned} 件 / 照合できなかった用語 {skipped} 件")
+    print(
+        f"走査開始: {args.folder}（配下のファイル名を単語境界一致。"
+        f"照合キー {len(entries)} 件 × ファイル数だけ時間がかかる）",
+        flush=True,
+    )
+
+    def progress(n: int) -> None:
+        print(f"  走査中… {n} 件目", flush=True)
+
+    hits, scanned, skipped = scan_folder(
+        entries, args.folder, args.include_dirs, progress
+    )
+    print(f"走査対象 {scanned} 件 / 照合できなかった用語 {skipped} 件", flush=True)
 
     print(f"\n===== 機能名候補（{len(hits)} 件・ファイル数の多い順） =====")
     for h in hits:
