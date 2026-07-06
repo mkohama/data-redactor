@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 import webbrowser
@@ -505,14 +506,40 @@ def mask(
             click.echo(f"\n監査出力を書き出しました（UTF-8）: {audit_out.resolve()}")
 
 
+def _run_lint(tool: str, args: list[str]) -> int:
+    """ruff / mypy を**堅牢に**実行する（PATH 解決 → uvx フォールバック → 実行不能なら警告して 0）。
+
+    実行機ごとに ruff/mypy の入り方が違う（グローバル Python / venv / uvx 経由）。素の実行ファイル名
+    だけに頼ると PATH に無い環境で ``FileNotFoundError``（WinError 2）で全体が落ちる。順に試す：
+    ①PATH 上の実体（``shutil.which``）②``uvx <tool>``（＝プロジェクトの手動運用と同じエフェメラル実行）
+    ③``uv tool run <tool>``（uvx が PATH に無い場合の等価コマンド）。どれも起動できなければ警告して
+    0 を返す（検証は諦めるが、sync 本体＝submodule 更新・stage は成功済みなので処理全体は落とさない）。
+    """
+    exe = shutil.which(tool)
+    candidates: list[list[str]] = []
+    if exe:
+        candidates.append([exe, *args])
+    candidates.append(["uvx", tool, *args])
+    candidates.append(["uv", "tool", "run", tool, *args])
+    for cmd in candidates:
+        try:
+            return subprocess.call(cmd, cwd=_ROOT)
+        except FileNotFoundError:
+            continue
+    click.echo(
+        f"⚠ {tool} を実行できませんでした（PATH にも uv にも見つからず）。手動で確認してください。"
+    )
+    return 0
+
+
 @cli.command()
 def check() -> None:
     """品質ゲート（ruff + mypy）を実行する。"""
     targets = ["src", "main.py", "app.py"]
     click.echo("$ ruff check " + " ".join(targets))
-    rc_ruff = subprocess.call(["ruff", "check", *targets], cwd=_ROOT)
+    rc_ruff = _run_lint("ruff", ["check", *targets])
     click.echo("\n$ mypy " + " ".join(targets))
-    rc_mypy = subprocess.call(["mypy", *targets], cwd=_ROOT)
+    rc_mypy = _run_lint("mypy", [*targets])
     raise SystemExit(rc_ruff or rc_mypy)
 
 
@@ -665,8 +692,8 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
     else:
         click.echo("\n===== 検証（ruff / mypy / pytest） =====")
         targets = ["src", "main.py", "app.py"]
-        rc_ruff = subprocess.call(["ruff", "check", *targets], cwd=_ROOT)
-        rc_mypy = subprocess.call(["mypy", *targets], cwd=_ROOT)
+        rc_ruff = _run_lint("ruff", ["check", *targets])
+        rc_mypy = _run_lint("mypy", [*targets])
         rc_test = subprocess.call([sys.executable, "-m", "pytest", "-q"], cwd=_ROOT)
         if rc_ruff or rc_mypy or rc_test:
             click.echo("⚠ 検証で失敗があります。修正してからコミットしてください。")
