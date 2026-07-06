@@ -845,11 +845,13 @@ def render_dict_editor(dict_path: str) -> None:
             "代表表記": e["canonical"],
             "別名": ", ".join(e["aliases"]),
             "置換": e["mask"],
-            "内包": e["embed"],
+            "部分一致": e["partial"],
         }
         for e in entries
     ]
-    df = pd.DataFrame(rows, columns=["カテゴリ", "代表表記", "別名", "置換", "内包"])
+    df = pd.DataFrame(
+        rows, columns=["カテゴリ", "代表表記", "別名", "置換", "部分一致"]
+    )
     edited = st.data_editor(
         df,
         num_rows="dynamic",
@@ -864,11 +866,11 @@ def render_dict_editor(dict_path: str) -> None:
             "代表表記": st.column_config.TextColumn("代表表記"),
             "別名": st.column_config.TextColumn("別名", help="カンマ区切り"),
             "置換": st.column_config.TextColumn("置換", help="空なら自動採番"),
-            "内包": st.column_config.CheckboxColumn(
-                "内包",
+            "部分一致": st.column_config.CheckboxColumn(
+                "部分一致",
                 default=False,
-                help="複合語の中（例 SmashMark の Smash、CBMark の CB）も伏字にする。"
-                "境界一致なので ECBType の CB は拾わない。",
+                help="他の語の中（例 SmashMark の Smash、iASMap の iAS、IF-X の IF-）も伏字にする。"
+                "境界照合なので ECBType の CB は拾わない。区切り入りでも camelCase でも同じ。",
             ),
         },
     )
@@ -885,7 +887,7 @@ def render_dict_editor(dict_path: str) -> None:
                 "canonical": cell(r["代表表記"]),
                 "aliases": [a.strip() for a in cell(r["別名"]).split(",") if a.strip()],
                 "mask": cell(r["置換"]),
-                "embed": bool(r["内包"]) if not pd.isna(r["内包"]) else False,
+                "partial": bool(r["部分一致"]) if not pd.isna(r["部分一致"]) else False,
             }
             for _, r in edited.iterrows()
         ]
@@ -995,7 +997,7 @@ def render_allowlist_editor(allowlist_path: str) -> None:
     df = pd.DataFrame(
         {
             "除外語": pd.Series([e["surface"] for e in entries], dtype="string"),
-            "内包": pd.Series([e["embed"] for e in entries], dtype="bool"),
+            "部分一致": pd.Series([e["partial"] for e in entries], dtype="bool"),
         }
     )
     edited = st.data_editor(
@@ -1005,10 +1007,10 @@ def render_allowlist_editor(allowlist_path: str) -> None:
         height=500,
         column_config={
             "除外語": st.column_config.TextColumn("除外語"),
-            "内包": st.column_config.CheckboxColumn(
-                "内包",
+            "部分一致": st.column_config.CheckboxColumn(
+                "部分一致",
                 default=False,
-                help="複合語の中（例 GetFBData の FB、NSR用補正ファイル の NSR）も除外する。"
+                help="他の語の中（例 GetFBData の FB、用補正値 の 補正、IF-X の IF-）も除外する。"
                 "境界照合なので FBI の FB は拾わない。命中した候補は丸ごと除外。",
             ),
         },
@@ -1018,9 +1020,9 @@ def render_allowlist_editor(allowlist_path: str) -> None:
         kept = [
             {
                 "surface": str(s).strip(),
-                "embed": bool(emb) if not pd.isna(emb) else False,
+                "partial": bool(p) if not pd.isna(p) else False,
             }
-            for s, emb in zip(edited["除外語"].tolist(), edited["内包"].tolist())
+            for s, p in zip(edited["除外語"].tolist(), edited["部分一致"].tolist())
             if not pd.isna(s) and str(s).strip()
         ]
         save_allowlist_entries(path, kept)
@@ -1276,9 +1278,9 @@ def render_masking_result(stored: dict) -> None:
         path = Path(allowlist_path)
         current = load_allowlist_entries(path) if path.exists() else []
         existing = {e["surface"] for e in current}
-        # UI から送る除外は完全一致（embed=False）。embed 登録は除外リストエディタで行う。
+        # UI から送る除外は完全一致（部分一致=False）。部分一致登録は除外リストエディタで行う。
         merged = current + [
-            {"surface": s, "embed": False} for s in to_exclude if s not in existing
+            {"surface": s, "partial": False} for s in to_exclude if s not in existing
         ]
         save_allowlist_entries(path, merged)
         added = len(merged) - len(current)

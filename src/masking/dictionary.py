@@ -1,45 +1,75 @@
 """マスク辞書（社名・商標・人名の登録リスト）。
 
-こちらが用意する固有名詞の名簿。**SudachiPy の内部辞書とは別物**。テキスト中の語を既定では
-**トークン単位**で照合し、確定のマスク対象として拾う（部分文字列照合はしない＝登録語が
-より長い語の一部になっているとき、例「社A」を「社A工場」の中では誤って拾わない）。
-大小文字・全角半角は正規化で吸収する。
+こちらが用意する固有名詞の名簿。**SudachiPy の内部辞書とは別物**。テキスト中の語を照合して
+確定のマスク対象として拾う。大小文字・全角半角は正規化で吸収する。照合には2段ある:
 
-**`embed: true`** を付けた語だけは、複合トークンの**サブワード境界**でも内包照合する
-（例 `Smash`→`SmashMark` の `Smash`、`CB`→`CBMark` の `CB`。境界一致なので `ECBType` の `CB` は
-拾わない）。命中は一致したサブワード部分だけをマスクする（`SmashMark`→`[商標X]Mark`）。
+- **完全一致（既定）**: 登録語が**まるごとの語**として現れたときだけ拾う（:meth:`match`）。
+  トークン列として一致し、かつ**前後がラテン英数字・区切り（``-`` ``_``）で連続していない**
+  ことを要求する（＝より長い識別子の断片では拾わない。``社A`` を ``社A工場`` で拾わない・
+  ``iAS`` を ``iASMap`` で拾わない・``IF-`` を ``IF-X`` で拾わない）。
 
-YAML 形式（data/mask_dict.yaml。書式は data/mask_dict.sample.yaml 参照）::
+- **部分一致（``部分一致: true`` を付けた語だけ）**: 登録語が**他の語の中に境界沿いで現れたら、
+  その部分だけ**を拾う（:meth:`partial_matches`）。境界＝トークン境界・区切り記号・camelCase/
+  数字境界のいずれでも良い。命中は一致した部分だけをマスクする。
+  例 ``iAS``→``iASMap`` の ``iAS`` / ``IF-``→``IF-X`` の ``IF-``（``[商標]X`` になる）/
+  ``CB``→``CBMark`` の ``CB``。境界照合なので ``ECBType`` の ``CB``（``ECB`` の途中）は拾わない。
 
-    社名:
+  → ユーザーは「まるごと（既定）／部分一致（``部分一致: true``）」だけを意識すればよい。
+  「区切り入りか camelCase か」という実装の区別は不要（同じ ``部分一致: true`` で両方効く）。
+
+YAML 形式（data/mask_dict.yaml。書式は data/mask_dict.sample.yaml 参照）。**全エントリ同一
+フォーマット**＝各エントリは canonical / aliases / mask / partial の全キーを持ち、未定義は
+明示的に null（partial は false）。セクション・キーは英語で統一::
+
+    Company:
       - canonical: 社A
-        aliases: [社A株式会社, ｼｬA]   # 別表記（カタカナ↔英語・略称・旧称）だけ書く
-      - 社B                            # 文字列だけなら canonical 扱い（別名なし）
-    商標:
+        aliases: [社A株式会社, ｼｬA]   # 別表記（無ければ null）
+        mask: 〔社A〕                  # 置換後の固定文字列（無ければ null＝自動採番）
+        partial: false                 # 他の語の中でも拾うか（true/false）
+    Trademark:
       - canonical: 商標X
-        embed: true                    # 複合語の中の 商標X も伏字にする（SmashMark の Smash 等）
-    人名:
-      - 姓A
+        aliases: null
+        mask: null
+        partial: true                  # 他の語の中の 商標X も伏字（SmashMark の Smash 等）
+
+読み込みは旧形式も後方互換で受ける：セクションの日本語（社名/商標/人名）、文字列だけの簡潔形、
+``partial`` の旧キー ``部分一致`` / ``embed``。
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-# YAML のセクション名 → マスク用カテゴリ（「社員名」は「人名」の別名として受理）
-_SECTION_CATEGORY = {"社名": "社名", "商標": "商標", "人名": "人名", "社員名": "人名"}
-# 照合する最大トークン数（多トークン語の上限。コスト上限を兼ねる）
+# YAML のセクション名 → 内部カテゴリ（内部カテゴリ値は日本語のまま。YAML の見た目だけ英語）。
+# キーは casefold 済みで引く（英語は大小無視。日本語は casefold で不変）。旧・日本語セクションも受理。
+_SECTION_CATEGORY = {
+    "company": "社名",
+    "trademark": "商標",
+    "person": "人名",
+    # 旧・日本語セクション（後方互換）
+    "社名": "社名",
+    "商標": "商標",
+    "人名": "人名",
+    "社員名": "人名",
+}
+# 照合する最大トークン/アトム数（多トークン語の上限。コスト上限を兼ねる）
 MAX_MATCH_TOKENS = 12
 
 
 # 連続する空白（半角/全角/タブ/改行）。`match` はトークンを空白なしで連結して照合するため、
 # 登録語のスペース（例 `Tokyo Electron`）も除去して一致させる。
 _WHITESPACE = re.compile(r"\s+")
+
+# 「まるごと一致」の境界ガード用。正規化後（NFKC+casefold）に**ラテン英数字か連結記号**なら、
+# その位置は「まだ識別子が続いている」＝断片なので既定一致では拾わない。CJK（かな/漢字）や
+# 空白・句読点・中黒は連結記号でないので境界とみなす（＝`社A` は `社Aです` で拾う・従来どおり）。
+_LATIN_CONT_RE = re.compile(r"[a-z0-9_-]")
 
 
 def normalize(text: str) -> str:
@@ -78,13 +108,13 @@ class MaskDictionary:
         self,
         surface_map: dict[str, tuple[str, str]],
         placeholders: dict[str, str] | None = None,
-        embed_map: dict[str, tuple[str, str]] | None = None,
+        partial_map: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         self._map = surface_map
         # canonical → 置換語（マスク後の伏せ字）。指定が無い canonical は自動採番に従う。
         self._placeholders = placeholders or {}
-        # `embed: true` の語だけのマップ（複合トークンのサブワード境界で内包照合する対象）。
-        self._embed_map = embed_map or {}
+        # `部分一致: true` の語だけのマップ（他の語の中に境界沿いで内包照合する対象）。
+        self._partial_map = partial_map or {}
 
     @classmethod
     def empty(cls) -> MaskDictionary:
@@ -94,23 +124,23 @@ class MaskDictionary:
     def load(cls, path: str | Path) -> MaskDictionary:
         """YAML を読み込んでマスク辞書を作る。
 
-        各エントリは文字列（canonical のみ）か、``canonical``/``aliases``/``mask`` を持つ辞書。
-        ``mask`` を指定すると、その実体のマスク後の置換語を固定できる（未指定なら自動採番）。
+        各エントリは文字列（canonical のみ）か、``canonical``/``aliases``/``mask``/``部分一致``
+        （旧 ``embed``）を持つ辞書。``mask`` を指定すると置換語を固定できる（未指定なら自動採番）。
         """
         surface_map: dict[str, tuple[str, str]] = {}
         placeholders: dict[str, str] = {}
-        embed_map: dict[str, tuple[str, str]] = {}
+        partial_map: dict[str, tuple[str, str]] = {}
         for entry in load_entries(path):
             canonical, category = entry["canonical"], entry["category"]
             if not canonical:
                 continue
             for surface in [canonical, *entry["aliases"]]:
                 surface_map[normalize(surface)] = (canonical, category)
-                if entry.get("embed"):
-                    embed_map[normalize(surface)] = (canonical, category)
+                if entry.get("partial"):
+                    partial_map[normalize(surface)] = (canonical, category)
             if entry.get("mask"):
                 placeholders[canonical] = entry["mask"]
-        return cls(surface_map, placeholders, embed_map)
+        return cls(surface_map, placeholders, partial_map)
 
     def canonical_of(self, surface: str) -> str | None:
         """表層に対応する canonical（代表表記）を返す。辞書に無ければ None。
@@ -135,7 +165,7 @@ class MaskDictionary:
         """辞書語を**部分文字列として内包するが、トークン単位では一致しない**トークンを返す（監査用）。
 
         返り値は ``(token_index, canonical, category)``。境界を見ない素朴な部分文字列照合なので
-        ``ECBType`` の ``CB`` 等も拾う＝**監査専用**（実マスクは境界を見る :meth:`embedded_matches`）。
+        ``ECBType`` の ``CB`` 等も拾う＝**監査専用**（実マスクは境界を見る :meth:`partial_matches`）。
         トークン全体一致（``match`` で拾う分）や雑音になりやすい 1 文字辞書語は除く。
         """
         out: list[tuple[int, str, str]] = []
@@ -150,52 +180,62 @@ class MaskDictionary:
                     out.append((i, canonical, category))
         return out
 
-    def embedded_matches(
-        self, token_surfaces: list[str]
-    ) -> list[tuple[int, int, int, str, str]]:
-        """`embed: true` の辞書語を、複合トークンの**サブワード境界**で内包照合する。
+    def partial_matches(
+        self, tokens: Sequence[tuple[str, int, int]]
+    ) -> list[tuple[int, int, str, str]]:
+        """``部分一致: true`` の辞書語を、**境界沿いの内包照合**で拾う。
 
-        トークンを camelCase/略語/区切り/数字で割り、サブワード（連続）に一致した語を返す。
-        部分文字列ではなく**境界一致**なので、`SmashMark`→`Smash` / `CBMark`→`CB` は拾い、
-        `ECBType` の `CB`（サブワード `ECB` の一部）は拾わない。単一サブワード＝トークン全体は
-        ``match()`` の担当なので対象外（複合トークンのみ）。
+        入力 ``tokens`` は ``(surface, text_start, text_end)`` の列（全文オフセット付き）。
+        全トークンを**アトム**に割る：各トークンをサブワード（camelCase/略語/数字）と区切り記号
+        （``-`` ``_`` ``·`` 等の 1 文字）に分解し、区切りトークン（``-`` 単独）も 1 アトムにする。
+        空白は「切れ目」（アトム間をまたげない）。登録語の正規化と、連続アトムの正規化連結が
+        一致したら、その**アトム区間の全文スパン**を返す。
 
-        返り値 ``(token_index, sub_start, sub_end, canonical, category)``。sub_start/end は
-        **そのトークン内の文字位置**（呼び出し側がトークン先頭オフセットを足して全文位置にする）。
+        - トークンをまたぐ区切り込みの一致に対応（``IF``/``-``/``X`` で ``IF-``→``IF-X``）。
+        - トークン内 camelCase の一致にも対応（``iASMap``→``iAS`` / ``CBMark``→``CB``）。
+        - アトム境界にしか合わないので途中一致はしない（``ECBType`` の ``CB`` は拾わない）。
+
+        返り値 ``(text_start, text_end, canonical, category)``。
         """
-        if not self._embed_map:
+        if not self._partial_map:
             return []
-        out: list[tuple[int, int, int, str, str]] = []
-        for i, surface in enumerate(token_surfaces):
-            subs = _split_identifier(surface)
-            if len(subs) <= 1:
-                continue  # 複合語のみ（全体一致は match() が拾う）
-            nsubs = [normalize(surface[a:b]) for a, b in subs]
-            n = len(subs)
-            j = 0
-            while j < n:
-                length = next(
-                    (
-                        ln
-                        for ln in range(min(MAX_MATCH_TOKENS, n - j), 0, -1)
-                        if "".join(nsubs[j : j + ln]) in self._embed_map
-                    ),
-                    0,
-                )
-                if length:
-                    canonical, category = self._embed_map[
-                        "".join(nsubs[j : j + length])
-                    ]
-                    out.append(
-                        (i, subs[j][0], subs[j + length - 1][1], canonical, category)
-                    )
-                    j += length
-                else:
-                    j += 1
+        atoms = _partial_atoms(tokens)  # None = 切れ目（空白）
+        out: list[tuple[int, int, str, str]] = []
+        n = len(atoms)
+        j = 0
+        while j < n:
+            if atoms[j] is None:
+                j += 1
+                continue
+            acc = ""
+            hit_len = 0
+            hit_key = ""
+            for length in range(1, min(MAX_MATCH_TOKENS, n - j) + 1):
+                atom = atoms[j + length - 1]
+                if atom is None:  # 切れ目をまたがない
+                    break
+                acc += atom[0]
+                if acc in self._partial_map:
+                    hit_len = length  # 最長一致を採る
+                    hit_key = acc
+            if hit_len:
+                canonical, category = self._partial_map[hit_key]
+                first = atoms[j]
+                last = atoms[j + hit_len - 1]
+                assert first is not None and last is not None
+                out.append((first[1], last[2], canonical, category))
+                j += hit_len
+            else:
+                j += 1
         return out
 
-    def match(self, token_surfaces: list[str]) -> list[DictMatch]:
-        """正規化トークン列に対し、各位置で最長一致の語を拾う（重なりなし）。"""
+    def match(self, token_surfaces: Sequence[str]) -> list[DictMatch]:
+        """正規化トークン列に対し、各位置で最長一致の語を拾う（重なりなし・完全一致）。
+
+        一致は**まるごとの語**に限る：一致区間の前後がラテン英数字・連結記号（``-`` ``_``）で
+        連続していると、より長い識別子の断片なので採らない（``IF-`` を ``IF-X`` で拾わない）。
+        CJK・空白・句読点・中黒は境界とみなす（``社A`` は ``社Aです`` で拾う＝従来どおり）。
+        """
         norm = [normalize(s) for s in token_surfaces]
         matches: list[DictMatch] = []
         i = 0
@@ -204,7 +244,7 @@ class MaskDictionary:
             hit: DictMatch | None = None
             for length in range(min(MAX_MATCH_TOKENS, n - i), 0, -1):
                 key = "".join(norm[i : i + length])
-                if key in self._map:
+                if key in self._map and _whole_word_boundary(norm, i, i + length):
                     canonical, category = self._map[key]
                     hit = DictMatch(i, i + length, canonical, category)
                     break
@@ -216,14 +256,111 @@ class MaskDictionary:
         return matches
 
 
-# YAML セクション名（カテゴリ → 書き出し時のセクション）。読み込みは _SECTION_CATEGORY で吸収。
-_CATEGORY_SECTION = {"社名": "社名", "商標": "商標", "人名": "人名"}
+def _whole_word_boundary(norm: list[str], start: int, end: int) -> bool:
+    """トークン区間 [start, end) が「まるごとの語」境界に挟まれているか（完全一致のガード）。
+
+    区間の直前トークンの末尾・直後トークンの先頭がラテン英数字/連結記号なら、より長い
+    識別子の断片なので False（``IF-X`` の中の ``IF-``/``IF`` を弾く）。CJK・空白・句読点は
+    連結記号でないので True（``社Aです`` の ``社A`` は従来どおり拾う）。
+    """
+    if start > 0:
+        prev = norm[start - 1]
+        if prev and _LATIN_CONT_RE.match(prev[-1]):
+            return False
+    if end < len(norm):
+        nxt = norm[end]
+        if nxt and _LATIN_CONT_RE.match(nxt[0]):
+            return False
+    return True
+
+
+def _partial_atoms(
+    tokens: Sequence[tuple[str, int, int]],
+) -> list[tuple[str, int, int] | None]:
+    """トークン列を部分一致用アトムに割る。``None`` は切れ目（空白＝またげない）。
+
+    各アトムは ``(normalize(部分文字列), text_start, text_end)``。
+    - **ラテン英数のサブワード**（camelCase/略語/数字）＝ ``_split_identifier`` で切る。
+    - **CJK/かな等の連なり**（``_split_identifier`` に載らない文字）＝**トークン内で1アトムに束ねる**。
+      CJK には綴り上の下位境界が無く、morpheme 境界＝トークン境界なので、1トークン内の CJK 連は
+      分割しない（``補`` が ``補正`` を割らない＝境界安全。トークンをまたぐ ``用/補正/値`` は
+      別トークン＝別アトムなので ``補正`` は拾える）。
+    - **区切り記号 1 文字**（``-`` ``_`` ``·`` 等）＝各 1 アトム。区切りトークン（``-`` 単独）もここ。
+    - **空白/正規化で消える文字**＝切れ目（``None``）。
+    """
+    atoms: list[tuple[str, int, int] | None] = []
+    for surface, tstart, _tend in tokens:
+        if not surface:
+            atoms.append(None)
+            continue
+
+        def emit_gap(lo: int, hi: int) -> None:
+            k = lo
+            while k < hi:
+                ch = surface[k]
+                if ch.isspace() or not normalize(ch):
+                    atoms.append(None)  # 空白/正規化で消える文字＝切れ目
+                    k += 1
+                elif ch.isalnum():  # CJK/かな/全角英数：連なりを 1 アトムに束ねる
+                    j = k + 1
+                    while j < hi and surface[j].isalnum() and not surface[j].isspace():
+                        j += 1
+                    atoms.append((normalize(surface[k:j]), tstart + k, tstart + j))
+                    k = j
+                else:  # 区切り記号・記号：1 文字 1 アトム（IF- の "-" 等）
+                    atoms.append((normalize(ch), tstart + k, tstart + k + 1))
+                    k += 1
+
+        prev = 0
+        for a, b in _split_identifier(surface):
+            emit_gap(prev, a)
+            atoms.append((normalize(surface[a:b]), tstart + a, tstart + b))
+            prev = b
+        emit_gap(prev, len(surface))
+    return atoms
+
+
+def contains_partial(surfaces: Sequence[str], keys: set[str]) -> bool:
+    """表層列が ``keys`` のいずれかを**境界沿いに内包**するか（ブール）。
+
+    :meth:`MaskDictionary.partial_matches` と同じアトム分解・境界照合を使う（除外リストと
+    辞書で照合仕様を1本化するための共有関数）。除外リストは候補を丸ごと外すため、位置でなく
+    「含むか否か」だけを返す。``surfaces`` は候補を覆うトークン列でも、候補表層 1 本でもよい。
+    """
+    if not keys:
+        return False
+    # オフセットは使わない（合成 0 起点）。境界（None）とアトム正規化文字列だけ見る。
+    src = [(s, 0, len(s)) for s in surfaces]
+    norms = [a[0] if a is not None else None for a in _partial_atoms(src)]
+    n = len(norms)
+    j = 0
+    while j < n:
+        if norms[j] is None:
+            j += 1
+            continue
+        acc = ""
+        for length in range(1, min(MAX_MATCH_TOKENS, n - j) + 1):
+            nm = norms[j + length - 1]
+            if nm is None:  # 切れ目をまたがない
+                break
+            acc += nm
+            if acc in keys:
+                return True
+        j += 1
+    return False
+
+
+# 内部カテゴリ → 書き出し時の YAML セクション名（英語で統一）。読み込みは _SECTION_CATEGORY で吸収。
+_CATEGORY_SECTION = {"社名": "Company", "商標": "Trademark", "人名": "Person"}
+# 書き出し時のセクション順（英語）。
+_SECTION_ORDER_OUT = ("Company", "Trademark", "Person")
 
 
 def load_entries(path: str | Path) -> list[dict]:
     """YAML を**構造のまま**読み込む（UI 編集・round-trip 用）。
 
-    返り値は ``{"category", "canonical", "aliases": list[str], "mask": str}`` の列。
+    返り値は ``{"category", "canonical", "aliases": list[str], "mask": str, "partial": bool}`` の列。
+    ``partial`` は YAML キー ``部分一致``（旧 ``embed``）のどちらからでも読む（後方互換）。
     （:meth:`MaskDictionary.load` はこれを正規化表層マップに畳む）
 
     旧バグで置換に書かれてしまった文字列 ``"nan"`` は空（未指定）として読み込む（自己修復。
@@ -232,7 +369,8 @@ def load_entries(path: str | Path) -> list[dict]:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     entries: list[dict] = []
     for section, items in raw.items():
-        category = _SECTION_CATEGORY.get(section, section)
+        skey = str(section).strip()
+        category = _SECTION_CATEGORY.get(skey.casefold(), skey)  # 英語は大小無視
         for item in items or []:
             if isinstance(item, str):
                 entries.append(
@@ -241,7 +379,7 @@ def load_entries(path: str | Path) -> list[dict]:
                         "canonical": item,
                         "aliases": [],
                         "mask": "",
-                        "embed": False,
+                        "partial": False,
                     }
                 )
             else:
@@ -254,7 +392,12 @@ def load_entries(path: str | Path) -> list[dict]:
                         "canonical": item.get("canonical") or item.get("name") or "",
                         "aliases": list(item.get("aliases") or []),
                         "mask": mask,
-                        "embed": bool(item.get("embed")),
+                        # `partial`（新・英語）優先・`部分一致`／`embed`（旧）も受理
+                        "partial": bool(
+                            item.get("partial")
+                            or item.get("部分一致")
+                            or item.get("embed")
+                        ),
                     }
                 )
     return entries
@@ -272,10 +415,14 @@ def sort_key(canonical: str) -> str:
 def save_entries(path: str | Path, entries: list[dict]) -> None:
     """構造化エントリを YAML に書き出す（UI 保存用）。
 
-    canonical が空のエントリは捨てる。別名・置換が無ければ文字列だけの簡潔形で書く。
-    セクション順は 社名 → 商標 → 人名 →（その他）。各セクション内は代表表記の辞書順にソート。
+    **全エントリを同一フォーマット（フルセット）で書く**：各エントリは必ず
+    ``canonical`` / ``aliases`` / ``mask`` / ``partial`` の全キーを持つ。未定義は明示的に
+    ``aliases: null`` / ``mask: null``、``partial`` は真偽値なので ``false`` と書く
+    （＝手入力時にどのキーが使えるか一目で分かる）。キーは英語で統一、セクションも英語
+    （Company / Trademark / Person →（その他））。各セクション内は代表表記の辞書順にソート。
+    canonical が空のエントリは捨てる。
     """
-    sections: dict[str, list[tuple[str, dict | str]]] = {}
+    sections: dict[str, list[tuple[str, dict]]] = {}
     for e in entries:
         canonical = (e.get("canonical") or "").strip()
         if not canonical:
@@ -284,20 +431,16 @@ def save_entries(path: str | Path, entries: list[dict]) -> None:
         section = _CATEGORY_SECTION.get(category, category)
         aliases = [a.strip() for a in (e.get("aliases") or []) if a.strip()]
         mask = (e.get("mask") or "").strip()
-        embed = bool(e.get("embed"))
-        item: dict | str
-        if aliases or mask or embed:
-            obj: dict = {"canonical": canonical}
-            if aliases:
-                obj["aliases"] = aliases
-            if mask:
-                obj["mask"] = mask
-            if embed:
-                obj["embed"] = True
-            item = obj
-        else:
-            item = canonical
-        sections.setdefault(section, []).append((canonical, item))
+        # 内部フィールドは `partial`。旧来の `embed` フィールドも受理（後方互換）。
+        partial = bool(e.get("partial") or e.get("embed"))
+        # フルセット：未定義は null（partial は真偽値なので false）。
+        obj = {
+            "canonical": canonical,
+            "aliases": aliases or None,
+            "mask": mask or None,
+            "partial": partial,
+        }
+        sections.setdefault(section, []).append((canonical, obj))
 
     # 各セクション内を代表表記でソートしてから item だけ取り出す。
     sorted_sections: dict[str, list] = {
@@ -306,7 +449,7 @@ def save_entries(path: str | Path, entries: list[dict]) -> None:
     }
 
     ordered = {
-        s: sorted_sections[s] for s in ("社名", "商標", "人名") if s in sorted_sections
+        s: sorted_sections[s] for s in _SECTION_ORDER_OUT if s in sorted_sections
     }
     ordered.update({s: v for s, v in sorted_sections.items() if s not in ordered})
     Path(path).write_text(

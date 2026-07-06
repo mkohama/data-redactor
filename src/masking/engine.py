@@ -478,14 +478,14 @@ class MaskingEngine:
         if llm_detection is not None:
             other_raw.extend(_llm_raw(llm_detection, text))
 
-        # 実辞書の票（確定の根拠）＋ `embed: true` のサブワード内包照合。両フェーズで共通。
+        # 実辞書の票（確定の根拠）＋ `部分一致: true` の境界内包照合。両フェーズで共通。
         dict_raw = _dict_matches_raw(
             self.dictionary, tokens, surfaces, text, "dict", "(辞書)"
         )
-        embed_raw = _embed_raw(self.dictionary, tokens, surfaces, text)
+        partial_raw = _partial_raw(self.dictionary, tokens, text)
 
         # フェーズ① 実辞書で確信度づけ
-        clusters = _cluster(text, dict_raw + embed_raw + other_raw)
+        clusters = _cluster(text, dict_raw + partial_raw + other_raw)
 
         # フェーズ② 強の clean な語＋選択語を「確認済み」として昇格し、分割と確信度づけを再実行。
         #   昇格票は実辞書とは**別チャネル `session`**（→ 確定ではなく強）。確定は実辞書のみ。
@@ -496,7 +496,7 @@ class MaskingEngine:
                     promoted, tokens, surfaces, text, "session", "(確認済)"
                 )
                 clusters = _cluster(
-                    text, dict_raw + embed_raw + session_raw + other_raw
+                    text, dict_raw + partial_raw + session_raw + other_raw
                 )
 
         # 連絡先（メール等）を正規表現で確定検出し、重なる他候補を退けて 1 件まるごとにする。
@@ -721,21 +721,20 @@ def _dict_matches_raw(
     return out
 
 
-def _embed_raw(
+def _partial_raw(
     dictionary: MaskDictionary,
     tokens: tuple[AnalyzedToken, ...],
-    surfaces: list[str],
     text: str,
 ) -> list[Candidate]:
-    """``embed: true`` 辞書語のサブワード境界内包照合を dict 票（生候補）にする。
+    """``部分一致: true`` 辞書語の境界内包照合を dict 票（生候補）にする。
 
-    命中はトークン全体でなく**一致したサブワード部分だけ**を span にする（`SmashMark`→`Smash` 等）。
+    命中はトークン全体でなく**一致した部分だけ**を span にする（`SmashMark`→`Smash` /
+    `IF-X`→`IF-`）。区切りをまたぐ照合に対応するため、トークンを全文オフセット付きで渡す。
     """
+    tok_tuples = [(t.surface, t.start, t.end) for t in tokens]
     out: list[Candidate] = []
-    for ti, sub_s, sub_e, _canon, category in dictionary.embedded_matches(surfaces):
-        es = tokens[ti].start + sub_s
-        ee = tokens[ti].start + sub_e
-        out.append(_raw(es, ee, text, category, ("dict", f"{category}(辞書·内包)")))
+    for start, end, _canon, category in dictionary.partial_matches(tok_tuples):
+        out.append(_raw(start, end, text, category, ("dict", f"{category}(辞書·部分)")))
     return out
 
 

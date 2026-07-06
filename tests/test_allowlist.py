@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """除外リスト（allowlist）の単体テスト。
 
-完全一致 ＋ ``embed`` のサブワード境界内包照合（辞書 embed と対称）、YAML round-trip、
-:func:`apply_allowlist` の確定ガード（辞書票は除外しない）を固定する。GiNZA 非依存。
+完全一致 ＋ ``部分一致``（旧 ``embed``）の境界内包照合（辞書 :func:`contains_partial` と共有）、
+YAML round-trip、:func:`apply_allowlist` の確定ガード（辞書票は除外しない）を固定する。GiNZA 非依存。
 """
 
 from __future__ import annotations
@@ -85,20 +85,38 @@ def test_yaml_roundtrip_and_sort(tmp_path: Path) -> None:
         p, [{"surface": "NSR", "embed": True}, "Zebra", "apple", "apple"]
     )
     entries = load_allowlist_entries(p)
-    # 重複排除・正規化辞書順（apple < Zebra < NSR? 正規化順）＋ embed 保持
-    by = {e["surface"]: e["embed"] for e in entries}
+    # 重複排除・正規化辞書順（apple < Zebra < NSR? 正規化順）＋ partial 保持
+    by = {e["surface"]: e["partial"] for e in entries}
     assert by == {"NSR": True, "Zebra": False, "apple": False}
-    # embed は {surface, embed} 形、非 embed は文字列で書かれる
+    # フルセット英語：全エントリ {surface, partial}・英語セクション exclude
     text = p.read_text(encoding="utf-8")
-    assert "surface: NSR" in text and "embed: true" in text
-    assert "- apple" in text  # 文字列だけの簡潔形
+    assert "exclude:" in text
+    assert "surface: NSR" in text and "partial: true" in text
+    assert "surface: apple" in text and "partial: false" in text  # 簡潔形は廃止
+    assert "除外:" not in text and "部分一致" not in text
 
 
-def test_plain_string_entries_load_as_non_embed(tmp_path: Path) -> None:
+def test_legacy_embed_key_still_read(tmp_path: Path) -> None:
+    """旧 embed キーの YAML も部分一致として読める（後方互換）。"""
+    p = tmp_path / "al.yaml"
+    p.write_text("除外:\n  - surface: NSR\n    embed: true\n", encoding="utf-8")
+    entries = load_allowlist_entries(p)
+    assert entries == [{"surface": "NSR", "partial": True}]
+
+
+def test_partial_separator_and_merged_token() -> None:
+    """区切りをまたぐ部分一致（IF- → IF-X）。辞書と同じアトム方式で、融合1トークンでも効く。"""
+    al = MaskAllowlist([{"surface": "IF-", "部分一致": True}])
+    assert al.matches("IF-X", ["IF", "-", "X"])  # 区切りが独立トークン
+    assert al.matches("IF-X", ["IF-X"])  # 1トークンに融合しても効く（旧方式の穴を解消）
+    assert not al.matches("IF", ["IF"])  # 単独 IF は不一致（安全）
+
+
+def test_plain_string_entries_load_as_non_partial(tmp_path: Path) -> None:
     p = tmp_path / "al.yaml"
     p.write_text("除外:\n  - Em_NoYes\n  - Reject\n", encoding="utf-8")
     entries = load_allowlist_entries(p)
-    assert all(e["embed"] is False for e in entries)
+    assert all(e["partial"] is False for e in entries)
     assert {e["surface"] for e in entries} == {"Em_NoYes", "Reject"}
 
 

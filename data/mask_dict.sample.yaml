@@ -4,29 +4,59 @@
 #   1. このファイルを data/mask_dict.yaml にコピーする。
 #   2. mask_dict.yaml に実際の社名・商標・人名を書く（こちらはコミット対象外）。
 #
-# ルール:
-#   - ここに載せた語は必ずマスク対象（確定）になる。
-#   - 照合は既定でトークン単位（部分文字列では拾わない。例: 変数名 SmashMark の中の Smash は拾わない）。
-#   - 大小文字・全角半角は自動で吸収（SMASH / Smash / smash は同一）。複数語（Tokyo Electron）も可。
-#   - 別表記（カタカナ↔英語・略称・旧称）だけ aliases に書く。
-#   - canonical（代表表記）が同じ別名は、マスク後に同じプレースホルダに統一される。
-#   - mask（任意）を書くと、マスク後の置換語をその語に固定できる（未指定なら [社1] 等を自動採番）。
-#   - embed: true（任意）を付けた語は、複合トークンのサブワード境界でも内包照合する
-#     （例: Smash → SmashMark の Smash、CB → CBMark の CB。境界一致なので ECBType の CB は拾わない）。
-#   - これらは UI の「🗂 マスク辞書」からも確認・追加・編集・保存できる。
+# フォーマット（全エントリ同一・キーは英語で統一）:
+#   - セクションは Company / Trademark / Person（内部カテゴリは 社名/商標/人名。表示は日本語）。
+#   - 各エントリは canonical / aliases / mask / partial の**全キーを必ず書く**（手入力時に
+#     使えるキーが一目で分かるように）。未定義は明示的に null（partial は真偽値なので false）。
+#     canonical … 代表表記（必須）。
+#     aliases  … 別表記（カタカナ↔英語・略称・旧称）のリスト。無ければ null。同じ canonical に
+#                 束ねた別名は、マスク後に同じプレースホルダへ統一される。
+#     mask     … マスク後の置換語を固定（無ければ null＝[社1] 等を自動採番）。
+#     partial  … 「まるごと／部分」の選択（true/false）。↓
+#
+#   照合には2段あり、意識するのは「まるごと（partial:false）／部分一致（partial:true）」だけ:
+#   - partial: false（既定）＝**まるごと一致**: その語がまるごとの語として現れたときだけ隠す。
+#       より長い識別子の断片では拾わない（例: 変数名 SmashMark の中の Smash・社A工場 の中の 社A・
+#       IF-X の中の IF- は拾わない）。
+#   - partial: true ＝他の語の**中**に境界沿いで現れても、その部分を隠す。区切り入り
+#       （IF- → IF-X の「IF-」＝[商標]X になる）でも camelCase（iAS → iASMap の「iAS」）でも同じ。
+#       境界沿いなので ECBType の CB（ECB の途中）は拾わない。「embed か接頭辞か」の区別は不要。
+#
+#   大小文字・全角半角は自動で吸収（SMASH / Smash / smash は同一）。複数語（Tokyo Electron）も可。
+#   UI の「🗂 マスク辞書」からも確認・追加・編集・保存できる。
+#   読み込みは旧形式も後方互換で受ける（日本語セクション 社名/商標/人名・文字列だけの簡潔形・
+#   partial の旧キー 部分一致 / embed）。
 
-社名:
+Company:
   - canonical: eXmotion
     aliases: [エクスモーション, エクスモ, eXmo]
-    mask: 〔メーカーA〕              # 任意。マスク後の伏せ字を固定（未指定なら自動採番）
-  - 社B                            # 別名が無ければ文字列だけでよい
+    mask: 〔メーカーA〕
+    partial: false
+  - canonical: 社B
+    aliases: null
+    mask: null
+    partial: false
 
-商標:
+Trademark:
   - canonical: 商標X
-    aliases: [ｼｮｳﾋｮｳエックス]       # 商標も表記ゆれ（英字↔カタカナ等）を別名に
-    embed: true                    # 複合語の中（例 商標XMark の 商標X）も伏字にする
-  - 商標Y
+    aliases: [ｼｮｳﾋｮｳエックス]
+    mask: null
+    partial: true                  # 他の語の中（例 商標XMark の 商標X）も伏字にする
+  - canonical: IF-
+    aliases: null
+    mask: null
+    partial: true                  # IF-X / IF-Y の「IF-」を伏字に（単独 IF は隠さない）
+  - canonical: 商標Y
+    aliases: null
+    mask: null
+    partial: false
 
-人名:
-  - 姓A
-  - 姓B
+Person:
+  - canonical: 姓A
+    aliases: null
+    mask: null
+    partial: false
+  - canonical: 姓B
+    aliases: null
+    mask: null
+    partial: false
