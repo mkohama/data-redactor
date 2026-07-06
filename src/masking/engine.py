@@ -180,6 +180,11 @@ _CJK_SEP_ADJ_ASCII_RE = re.compile(
 # 実在名は英数字/CJK 文字で始まり終わる（`Coca-Cola`/`Anne-Marie` は**内部**ハイフンなので対象外＝守る）。
 # 長音 `ー`(U+30FC) は含めない（`サーバー` 等の正当なカナ語末に出るため）。
 _DANGLING_SEP_RE = re.compile(r"^[-‐‑–—―・･]|[-‐‑–—―・･]$")
+# スパン境界に付く引用符・バッククォート類（ASCII/全角/スマート）。NER/表がセルや引用符を
+# 巻き込んだ人工物（`"O1234.01` / `＂…` / `“…”`）の判定を邪魔するので、判定前に**先頭/末尾から剥がす**。
+# 剥がした中身で判定するので、`"ソニー"`（中身が実名）は守られ、`"O1234.01`（中身がコード）は落ちる。
+# 先頭/末尾のみ剥がす＝内部のアポストロフィ（`L'Oréal` / `O'Brien`）は残す＝実名を壊さない。
+_EDGE_QUOTES = "\"'`＂｀“”‘’„‟〝〞«»"
 # 丸括弧（ASCII `()`・全角 `（）`）。NER スパンが `LSMonitor(...)` の開き括弧を巻き込むと
 # `LSMonito(` のように**不均衡な括弧**で終わる/始まる人工物になる。ブラケット `[ ] { }` は常に
 # コード（_CODE_MARKER_RE で拾う）だが、丸括弧は `Sony (Japan)` 等の正当な社名に出るので
@@ -800,7 +805,12 @@ def _looks_like_code(surface: str) -> bool:
     :meth:`MaskingEngine.analyze` で **中/弱 のみ** を **微弱**（既定で非表示・自動マスク外）へ落とす（Stage 2）。
     確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝根拠があるものは守る。
     NER の票そのものを弱める Stage 1 は :func:`_system_category` を参照。
+
+    判定前に**先頭/末尾の引用符類を剥がす**（`_EDGE_QUOTES`）：全角/スマート引用符（`＂` `“` `”`）は
+    ASCII 判定を素通りするため、剥がしてから中身で判定する（`"O1234.01`→`O1234.01` はコード判定に載る。
+    `"ソニー"`→`ソニー` は実名なので落ちない）。
     """
+    surface = surface.strip(_EDGE_QUOTES)
     if _CODE_MARKER_RE.search(surface):
         return True
     if not _NAME_CHAR_RE.search(surface):

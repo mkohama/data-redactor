@@ -13,8 +13,20 @@ import pytest
 from src.llm.schema import LlmDetection, LlmSpan
 from src.masking.allowlist import MaskAllowlist
 from src.masking.dictionary import MaskDictionary, normalize
-from src.masking.engine import MaskingEngine
+from src.masking.engine import MaskingEngine, _looks_like_code
 from src.ner.preprocess import build_body
+
+
+def test_looks_like_code_strips_edge_quotes() -> None:
+    """境界の引用符（全角/スマート含む）を剥がして判定：quote+code は code 扱い・引用符付き実名は守る。
+
+    `"O1234.01`（先頭が全角/スマート引用符）が Person で残る誤検出への対処。中身がコードなら
+    落とし、中身が実名（`"ソニー"`）や内部アポストロフィ（`L'Oréal`）は守る。
+    """
+    for s in ['"O1234.01', "＂O1234.01", "“O1234.01”", "'01234.45'"]:
+        assert _looks_like_code(s), s  # quote+code → コード扱い
+    for s in ['"ソニー"', "“ソニー”", "L'Oréal"]:
+        assert not _looks_like_code(s), s  # 引用符付き実名・内部アポストロフィは守る
 
 
 @pytest.fixture(scope="module")
