@@ -178,9 +178,61 @@ def test_yaml_writes_full_set_english(tmp_path) -> None:
     assert "Trademark:" in text and "Company:" in text
     assert "partial: true" in text and "partial: false" in text
     assert "部分一致" not in text and "embed:" not in text
-    # フルセット：未定義は null（partial なしのエントリでも全キーが並ぶ）
+    # フルセット：未定義は null・真偽値は false（全キーが並ぶ）
     assert "aliases: null" in text and "mask: null" in text
+    assert "case_sensitive: false" in text
     # round-trip で戻る
     entries = {e["canonical"]: e for e in load_entries(p)}
     assert entries["iAS"]["partial"] is True and entries["iAS"]["category"] == "商標"
     assert entries["社B"]["partial"] is False and entries["社B"]["category"] == "社名"
+    assert entries["iAS"]["case_sensitive"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 大小区別（case_sensitive）: 略語は大文字の出現だけ拾う。
+# --------------------------------------------------------------------------- #
+
+
+def _cs(pairs: dict[str, tuple[str, str]], *, partial: bool = False) -> MaskDictionary:
+    from src.masking.dictionary import normalize_cs
+
+    cs = {normalize_cs(s): v for s, v in pairs.items()}
+    return MaskDictionary(
+        {}, cs_map=dict(cs), cs_partial_map=dict(cs) if partial else None
+    )
+
+
+def test_case_sensitive_whole_uppercase_only() -> None:
+    """STS(case_sensitive) は STS のみ一致。Sts / sts は不一致（Status の略かも）。"""
+    d = _cs({"STS": ("STS", "商標")})
+    assert [m.canonical for m in d.match(_surfaces("STS"))] == ["STS"]
+    assert d.match(_surfaces("Sts")) == []
+    assert d.match(_surfaces("sts")) == []
+    # 全角 ＳＴＳ は NFKC で STS になり一致
+    assert [m.canonical for m in d.match(_surfaces("ＳＴＳ"))] == ["STS"]
+
+
+def test_case_sensitive_partial_uppercase_only() -> None:
+    """STS(case_sensitive+partial) は STSMap の STS を拾い、StsMap は拾わない。"""
+    d = _cs({"STS": ("STS", "商標")}, partial=True)
+    up = "STSMap"
+    assert [up[s:e] for s, e, *_ in d.partial_matches(_toks(up))] == ["STS"]
+    assert d.partial_matches(_toks("StsMap")) == []
+
+
+def test_case_insensitive_unaffected() -> None:
+    """既定（大小無視）の語は従来どおり大小を吸収する。"""
+    d = _whole({normalize("ABC"): ("ABC", "商標")})
+    assert [m.canonical for m in d.match(_surfaces("abc"))] == ["ABC"]
+    assert [m.canonical for m in d.match(_surfaces("Abc"))] == ["ABC"]
+
+
+def test_case_sensitive_yaml_roundtrip(tmp_path) -> None:
+    p = tmp_path / "d.yaml"
+    p.write_text(
+        "Trademark:\n  - canonical: STS\n    case_sensitive: true\n", encoding="utf-8"
+    )
+    assert load_entries(p)[0]["case_sensitive"] is True
+    d = MaskDictionary.load(p)
+    assert [m.canonical for m in d.match(_surfaces("STS"))] == ["STS"]
+    assert d.match(_surfaces("sts")) == []

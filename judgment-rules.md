@@ -42,6 +42,10 @@ data-redactor が「何を・どのくらいの確からしさで機密と見な
 - **部分一致: true**（旧 `embed`）＝他の語の**中**でも境界沿いに拾い、その部分だけ隠す。区切り入り
   （`IF-`→`IF-X` の `IF-`）でも camelCase（`iAS`→`iASMap`）でも同じフラグで効く（`ECBType` の
   `CB` は境界外で不発）。実装は `MaskDictionary.match`（完全一致）/ `partial_matches`（部分一致）。
+- **大小の扱い**：既定は大小・全角半角を吸収（`SMASH`=`Smash`=`smash`）。**`case_sensitive: true`**（略語向け）
+  にすると大小を区別＝`STS` は `STS` のみ拾い `Sts`（Status の略かも）/`sts` は拾わない。出現展開
+  （`apply`）も case_sensitive 語は大小区別で広げる（`STS` 確定でも `Sts`/`sts` に波及しない）。
+  除外リスト（allowlist）も同じ `case_sensitive` を持つ。
 
 ---
 

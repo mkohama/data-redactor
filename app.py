@@ -846,11 +846,12 @@ def render_dict_editor(dict_path: str) -> None:
             "別名": ", ".join(e["aliases"]),
             "置換": e["mask"],
             "部分一致": e["partial"],
+            "大小区別": e["case_sensitive"],
         }
         for e in entries
     ]
     df = pd.DataFrame(
-        rows, columns=["カテゴリ", "代表表記", "別名", "置換", "部分一致"]
+        rows, columns=["カテゴリ", "代表表記", "別名", "置換", "部分一致", "大小区別"]
     )
     edited = st.data_editor(
         df,
@@ -872,6 +873,12 @@ def render_dict_editor(dict_path: str) -> None:
                 help="他の語の中（例 SmashMark の Smash、iASMap の iAS、IF-X の IF-）も伏字にする。"
                 "境界照合なので ECBType の CB は拾わない。区切り入りでも camelCase でも同じ。",
             ),
+            "大小区別": st.column_config.CheckboxColumn(
+                "大小区別",
+                default=False,
+                help="ON にすると大文字・小文字を区別（略語向け）。例 STS は STS だけ拾い "
+                "Sts/sts は拾わない。OFF（既定）は大小無視（STS=sts=Sts）。",
+            ),
         },
     )
     if st.button("💾 辞書を保存", type="primary", key="dict_save"):
@@ -888,6 +895,9 @@ def render_dict_editor(dict_path: str) -> None:
                 "aliases": [a.strip() for a in cell(r["別名"]).split(",") if a.strip()],
                 "mask": cell(r["置換"]),
                 "partial": bool(r["部分一致"]) if not pd.isna(r["部分一致"]) else False,
+                "case_sensitive": (
+                    bool(r["大小区別"]) if not pd.isna(r["大小区別"]) else False
+                ),
             }
             for _, r in edited.iterrows()
         ]
@@ -998,6 +1008,7 @@ def render_allowlist_editor(allowlist_path: str) -> None:
         {
             "除外語": pd.Series([e["surface"] for e in entries], dtype="string"),
             "部分一致": pd.Series([e["partial"] for e in entries], dtype="bool"),
+            "大小区別": pd.Series([e["case_sensitive"] for e in entries], dtype="bool"),
         }
     )
     edited = st.data_editor(
@@ -1013,6 +1024,11 @@ def render_allowlist_editor(allowlist_path: str) -> None:
                 help="他の語の中（例 GetFBData の FB、用補正値 の 補正、IF-X の IF-）も除外する。"
                 "境界照合なので FBI の FB は拾わない。命中した候補は丸ごと除外。",
             ),
+            "大小区別": st.column_config.CheckboxColumn(
+                "大小区別",
+                default=False,
+                help="ON で大文字・小文字を区別（略語向け）。OFF（既定）は大小無視。",
+            ),
         },
         key="allowlist_editor",
     )
@@ -1021,8 +1037,13 @@ def render_allowlist_editor(allowlist_path: str) -> None:
             {
                 "surface": str(s).strip(),
                 "partial": bool(p) if not pd.isna(p) else False,
+                "case_sensitive": bool(c) if not pd.isna(c) else False,
             }
-            for s, p in zip(edited["除外語"].tolist(), edited["部分一致"].tolist())
+            for s, p, c in zip(
+                edited["除外語"].tolist(),
+                edited["部分一致"].tolist(),
+                edited["大小区別"].tolist(),
+            )
             if not pd.isna(s) and str(s).strip()
         ]
         save_allowlist_entries(path, kept)
@@ -1278,9 +1299,11 @@ def render_masking_result(stored: dict) -> None:
         path = Path(allowlist_path)
         current = load_allowlist_entries(path) if path.exists() else []
         existing = {e["surface"] for e in current}
-        # UI から送る除外は完全一致（部分一致=False）。部分一致登録は除外リストエディタで行う。
+        # UI から送る除外は完全一致（部分一致=False・大小無視）。細かい指定は除外リストエディタで行う。
         merged = current + [
-            {"surface": s, "partial": False} for s in to_exclude if s not in existing
+            {"surface": s, "partial": False, "case_sensitive": False}
+            for s in to_exclude
+            if s not in existing
         ]
         save_allowlist_entries(path, merged)
         added = len(merged) - len(current)

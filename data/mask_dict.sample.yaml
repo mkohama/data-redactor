@@ -6,13 +6,14 @@
 #
 # フォーマット（全エントリ同一・キーは英語で統一）:
 #   - セクションは Company / Trademark / Person（内部カテゴリは 社名/商標/人名。表示は日本語）。
-#   - 各エントリは canonical / aliases / mask / partial の**全キーを必ず書く**（手入力時に
-#     使えるキーが一目で分かるように）。未定義は明示的に null（partial は真偽値なので false）。
-#     canonical … 代表表記（必須）。
-#     aliases  … 別表記（カタカナ↔英語・略称・旧称）のリスト。無ければ null。同じ canonical に
-#                 束ねた別名は、マスク後に同じプレースホルダへ統一される。
-#     mask     … マスク後の置換語を固定（無ければ null＝[社1] 等を自動採番）。
-#     partial  … 「まるごと／部分」の選択（true/false）。↓
+#   - 各エントリは canonical / aliases / mask / partial / case_sensitive の**全キーを必ず書く**
+#     （手入力時に使えるキーが一目で分かるように）。未定義は明示的に null、真偽値は false。
+#     canonical      … 代表表記（必須）。
+#     aliases        … 別表記（カタカナ↔英語・略称・旧称）のリスト。無ければ null。同じ canonical に
+#                       束ねた別名は、マスク後に同じプレースホルダへ統一される。
+#     mask           … マスク後の置換語を固定（無ければ null＝[社1] 等を自動採番）。
+#     partial        … 「まるごと／部分」の選択（true/false）。↓
+#     case_sensitive … 大小を区別するか（true/false）。↓
 #
 #   照合には2段あり、意識するのは「まるごと（partial:false）／部分一致（partial:true）」だけ:
 #   - partial: false（既定）＝**まるごと一致**: その語がまるごとの語として現れたときだけ隠す。
@@ -22,8 +23,12 @@
 #       （IF- → IF-X の「IF-」＝[商標]X になる）でも camelCase（iAS → iASMap の「iAS」）でも同じ。
 #       境界沿いなので ECBType の CB（ECB の途中）は拾わない。「embed か接頭辞か」の区別は不要。
 #
-#   大小文字・全角半角は自動で吸収（SMASH / Smash / smash は同一）。複数語（Tokyo Electron）も可。
-#   UI の「🗂 マスク辞書」からも確認・追加・編集・保存できる。
+#   大小の扱い（case_sensitive）:
+#   - case_sensitive: false（既定）＝大小・全角半角を吸収（SMASH / Smash / smash は同一）。
+#   - case_sensitive: true ＝**大小を区別**（略語向け）。例: STS は STS だけ拾い、Sts（Status の略かも）・
+#       sts は拾わない。全角 ＳＴＳ は NFKC で STS になり一致。
+#
+#   複数語（Tokyo Electron）も可。UI の「🗂 マスク辞書」からも確認・追加・編集・保存できる。
 #   読み込みは旧形式も後方互換で受ける（日本語セクション 社名/商標/人名・文字列だけの簡潔形・
 #   partial の旧キー 部分一致 / embed）。
 
@@ -32,31 +37,38 @@ Company:
     aliases: [エクスモーション, エクスモ, eXmo]
     mask: 〔メーカーA〕
     partial: false
+    case_sensitive: false
   - canonical: 社B
     aliases: null
     mask: null
     partial: false
+    case_sensitive: false
 
 Trademark:
   - canonical: 商標X
     aliases: [ｼｮｳﾋｮｳエックス]
     mask: null
     partial: true                  # 他の語の中（例 商標XMark の 商標X）も伏字にする
+    case_sensitive: false
   - canonical: IF-
     aliases: null
     mask: null
     partial: true                  # IF-X / IF-Y の「IF-」を伏字に（単独 IF は隠さない）
-  - canonical: 商標Y
+    case_sensitive: false
+  - canonical: STS
     aliases: null
     mask: null
     partial: false
+    case_sensitive: true           # 略語：大文字の STS だけ拾う（Sts/sts は拾わない）
 
 Person:
   - canonical: 姓A
     aliases: null
     mask: null
     partial: false
+    case_sensitive: false
   - canonical: 姓B
     aliases: null
     mask: null
     partial: false
+    case_sensitive: false

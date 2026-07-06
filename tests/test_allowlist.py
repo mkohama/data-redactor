@@ -101,7 +101,7 @@ def test_legacy_embed_key_still_read(tmp_path: Path) -> None:
     p = tmp_path / "al.yaml"
     p.write_text("除外:\n  - surface: NSR\n    embed: true\n", encoding="utf-8")
     entries = load_allowlist_entries(p)
-    assert entries == [{"surface": "NSR", "partial": True}]
+    assert entries == [{"surface": "NSR", "partial": True, "case_sensitive": False}]
 
 
 def test_partial_separator_and_merged_token() -> None:
@@ -110,6 +110,18 @@ def test_partial_separator_and_merged_token() -> None:
     assert al.matches("IF-X", ["IF", "-", "X"])  # 区切りが独立トークン
     assert al.matches("IF-X", ["IF-X"])  # 1トークンに融合しても効く（旧方式の穴を解消）
     assert not al.matches("IF", ["IF"])  # 単独 IF は不一致（安全）
+
+
+def test_case_sensitive_exclusion() -> None:
+    """case_sensitive の除外語は大小を区別（STS は STS だけ除外・sts/Sts は除外しない）。"""
+    al = MaskAllowlist([{"surface": "STS", "case_sensitive": True}])
+    assert al.matches("STS")  # 完全一致・大文字
+    assert not al.matches("sts")
+    assert not al.matches("Sts")
+    # 部分一致＋大小区別
+    alp = MaskAllowlist([{"surface": "STS", "partial": True, "case_sensitive": True}])
+    assert alp.matches("STSMap", ["STSMap"])
+    assert not alp.matches("StsMap", ["StsMap"])
 
 
 def test_plain_string_entries_load_as_non_partial(tmp_path: Path) -> None:

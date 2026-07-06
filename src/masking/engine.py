@@ -41,7 +41,12 @@ from typing import TYPE_CHECKING
 
 from src.masking.allowlist import MaskAllowlist
 from src.masking.cache import NerCache, content_hash
-from src.masking.dictionary import MAX_MATCH_TOKENS, MaskDictionary, normalize
+from src.masking.dictionary import (
+    MAX_MATCH_TOKENS,
+    MaskDictionary,
+    normalize,
+    normalize_cs,
+)
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
 from src.ner.engine import Analysis, ProgressCallback, sudachi_analyze_chunks
 
@@ -546,12 +551,19 @@ class MaskingEngine:
         selected = list(selected)
         if expand:
             # 表層ごとに代表カテゴリを 1 つに（出現ごとに割れた種別を実体単位へ統一）。
-            by_surface: dict[str, list[Candidate]] = {}
+            # 大小区別エントリ（case_sensitive）は case 保存キーで別集約し、展開も大小区別で行う
+            #   （``STS`` を ``Sts``/``sts`` に広げない）。それ以外は従来どおり大小無視で展開。
+            by_ci: dict[str, list[Candidate]] = {}
+            by_cs: dict[str, list[Candidate]] = {}
             for c in selected:
-                by_surface.setdefault(normalize(c.surface), []).append(c)
-            collected = {k: _representative(v).category for k, v in by_surface.items()}
+                if self.dictionary.is_case_sensitive(c.surface):
+                    by_cs.setdefault(normalize_cs(c.surface), []).append(c)
+                else:
+                    by_ci.setdefault(normalize(c.surface), []).append(c)
+            ci_collected = {k: _representative(v).category for k, v in by_ci.items()}
+            cs_collected = {k: _representative(v).category for k, v in by_cs.items()}
             spans = selected + _expand(
-                analysis.text, analysis.tokens, collected, selected
+                analysis.text, analysis.tokens, ci_collected, cs_collected, selected
             )
         else:
             spans = selected
@@ -1100,12 +1112,18 @@ def _expand(
     text: str,
     tokens: tuple[AnalyzedToken, ...],
     collected: dict[str, str],
+    cs_collected: dict[str, str],
     existing: list[Candidate],
 ) -> list[Candidate]:
-    """選んだ表層形を、文書内の全出現（トークン単位）に展開する。"""
-    if not collected:
+    """選んだ表層形を、文書内の全出現（トークン単位）に展開する。
+
+    ``collected``＝大小無視で照合する表層（normalize キー）。``cs_collected``＝大小区別で
+    照合する表層（normalize_cs キー。``STS`` は ``STS`` のみに展開し ``Sts``/``sts`` は広げない）。
+    """
+    if not collected and not cs_collected:
         return []
     norm = [normalize(t.surface) for t in tokens]
+    norm_cs = [normalize_cs(t.surface) for t in tokens] if cs_collected else None
     ranges = [(c.start, c.end) for c in existing]
     out: list[Candidate] = []
     i = 0
@@ -1117,6 +1135,11 @@ def _expand(
             if key in collected:
                 hit = (i, i + length, collected[key])
                 break
+            if norm_cs is not None:
+                key_cs = "".join(norm_cs[i : i + length])
+                if key_cs in cs_collected:
+                    hit = (i, i + length, cs_collected[key_cs])
+                    break
         if hit is not None:
             s, e_tok, category = hit
             start, end = tokens[s].start, tokens[e_tok - 1].end

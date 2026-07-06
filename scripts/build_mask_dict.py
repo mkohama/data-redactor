@@ -6,10 +6,11 @@
   Excel に落とし込んだあと、それを手作業で YAML に書き写すのは事故のもと。
   「用語・分類・部分一致 だけ埋めた Excel」→「そのまま読める辞書 YAML」に機械変換する。
 
-前提フォーマット（Excel。列は**列位置**で指定。既定 A/D/E）:
+前提フォーマット（Excel。列は**列位置**で指定。既定 A/D/E/F）:
     A 列: 用語        … 登録する表層（canonical になる）
     D 列: 種類        … Company / Trademark / Person（→ 社名 / 商標 / 人名）
     E 列: 部分一致    … 真偽値（○/TRUE/1/✓/はい 等が入っていれば 部分一致: true）
+    F 列: 大小区別    … 真偽値（略語向け。true なら STS は STS のみ・Sts/sts は拾わない）
   1 行目はヘッダとして読み飛ばす（--header-row で変更可）。
 
 「部分一致」とは（src/masking/dictionary.py と同義）:
@@ -35,7 +36,7 @@
 
     # 列位置・ヘッダ行・シートを変える
     uv run python scripts/build_mask_dict.py <辞書.xlsx> --term-col A --kind-col D \
-        --partial-col E --header-row 1 --sheet Sheet1
+        --partial-col E --case-col F --header-row 1 --sheet Sheet1
 """
 
 from __future__ import annotations
@@ -105,6 +106,7 @@ class RawRow:
     term: str
     kind: str | None
     partial_raw: str | None
+    case_raw: str | None
     row: int
 
 
@@ -129,6 +131,7 @@ def load_rows(
     term_col: str,
     kind_col: str,
     partial_col: str,
+    case_col: str,
 ) -> list[RawRow]:
     """Excel を読み、用語のある行を RawRow として返す。"""
     from openpyxl import load_workbook  # type: ignore[import-untyped]  # スタブ無し
@@ -143,10 +146,11 @@ def load_rows(
     else:
         ws = wb[wb.sheetnames[0]]
 
-    ti, ki, pi = (
+    ti, ki, pi, ci = (
         _col_to_index(term_col),
         _col_to_index(kind_col),
         _col_to_index(partial_col),
+        _col_to_index(case_col),
     )
 
     def pick(row: tuple, idx: int) -> str | None:
@@ -160,7 +164,13 @@ def load_rows(
         if term is None:
             continue
         rows.append(
-            RawRow(term=term, kind=pick(row, ki), partial_raw=pick(row, pi), row=n)
+            RawRow(
+                term=term,
+                kind=pick(row, ki),
+                partial_raw=pick(row, pi),
+                case_raw=pick(row, ci),
+                row=n,
+            )
         )
     return rows
 
@@ -177,11 +187,12 @@ class Entry:
     canonical: str
     section: str
     partial: bool
+    case_sensitive: bool
     row: int
 
 
-def parse_partial(raw: str | None) -> tuple[bool, bool]:
-    """部分一致 列の真偽解釈。返り値 (partial, unknown)。unknown=True なら未知値（False 扱い）。"""
+def parse_bool(raw: str | None) -> tuple[bool, bool]:
+    """真偽列の解釈。返り値 (value, unknown)。unknown=True なら未知値（False 扱い）。"""
     if raw is None:
         return False, False
     key = normalize(raw)
@@ -189,11 +200,11 @@ def parse_partial(raw: str | None) -> tuple[bool, bool]:
         return True, False
     if key in _FALSE_VALUES:
         return False, False
-    return False, True  # 未知値は安全側（部分一致 off）＋警告
+    return False, True  # 未知値は安全側（off）＋警告
 
 
 def to_entries(rows: list[RawRow]) -> tuple[list[Entry], list[str]]:
-    """RawRow 群を Entry 群へ。種類→セクション変換・部分一致解釈をし、警告を集める。"""
+    """RawRow 群を Entry 群へ。種類→セクション変換・部分一致/大小区別の解釈をし、警告を集める。"""
     entries: list[Entry] = []
     warnings: list[str] = []
     for r in rows:
@@ -205,13 +216,24 @@ def to_entries(rows: list[RawRow]) -> tuple[list[Entry], list[str]]:
                 f"行{r.row}: 種類 {r.kind!r} を解釈できず {_FALLBACK_SECTION} に退避 "
                 f"（{r.term!r}）。Company/Trademark/Person を入れてください。"
             )
-        partial, unknown = parse_partial(r.partial_raw)
-        if unknown:
+        partial, p_unknown = parse_bool(r.partial_raw)
+        if p_unknown:
             warnings.append(
                 f"行{r.row}: 部分一致 値 {r.partial_raw!r} を解釈できず false 扱い（{r.term!r}）。"
             )
+        case_sensitive, c_unknown = parse_bool(r.case_raw)
+        if c_unknown:
+            warnings.append(
+                f"行{r.row}: 大小区別 値 {r.case_raw!r} を解釈できず false 扱い（{r.term!r}）。"
+            )
         entries.append(
-            Entry(canonical=r.term, section=section, partial=partial, row=r.row)
+            Entry(
+                canonical=r.term,
+                section=section,
+                partial=partial,
+                case_sensitive=case_sensitive,
+                row=r.row,
+            )
         )
     return entries, warnings
 
@@ -288,8 +310,8 @@ _SECTION_ORDER = ("Company", "Trademark", "Person")
 def build_yaml_tree(entries: list[Entry]) -> dict[str, list]:
     """Entry 群を {英語セクション: [フルセット dict]} に畳む（各節を正規化キーでソート）。
 
-    dictionary.save_entries と同じ書式：各エントリは canonical/aliases/mask/partial の全キーを
-    持ち、未定義は null（partial は false）。このスクリプトは aliases/mask を持たないので常に null。
+    dictionary.save_entries と同じ書式：各エントリは canonical/aliases/mask/partial/case_sensitive
+    の全キーを持ち、未定義は null（真偽値は false）。このスクリプトは aliases/mask を持たないので常に null。
     """
     by_section: dict[str, list[tuple[str, dict]]] = defaultdict(list)
     for e in entries:
@@ -299,6 +321,7 @@ def build_yaml_tree(entries: list[Entry]) -> dict[str, list]:
             "aliases": None,
             "mask": None,
             "partial": e.partial,
+            "case_sensitive": e.case_sensitive,
         }
         by_section[section].append((normalize(e.canonical), obj))
 
@@ -343,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--term-col", default="A", help="用語の列（既定 A）")
     parser.add_argument("--kind-col", default="D", help="種類の列（既定 D）")
     parser.add_argument("--partial-col", default="E", help="部分一致の列（既定 E）")
+    parser.add_argument("--case-col", default="F", help="大小区別の列（既定 F）")
     parser.add_argument(
         "--out",
         type=Path,
@@ -360,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
         args.term_col,
         args.kind_col,
         args.partial_col,
+        args.case_col,
     )
     print(f"入力: {args.excel}（用語 {len(rows)} 件）")
 
@@ -393,19 +418,23 @@ def main(argv: list[str] | None = None) -> int:
         if len(broad) > _LIST_CAP:
             print(f"    … 他 {len(broad) - _LIST_CAP} 件")
 
-    # セクション別件数（除去後）。
+    # セクション別件数（除去後）。counts は内部カテゴリ（社名/商標/人名）でキーする。
     counts: dict[str, int] = defaultdict(int)
     partial_counts: dict[str, int] = defaultdict(int)
+    cs_counts: dict[str, int] = defaultdict(int)
     for e in result.kept:
         counts[e.section] += 1
         if e.partial:
             partial_counts[e.section] += 1
+        if e.case_sensitive:
+            cs_counts[e.section] += 1
+    _cat_order = ("社名", "商標", "人名")
     summary = " / ".join(
-        f"{s} {counts[s]}件(部分一致 {partial_counts[s]})"
-        for s in _SECTION_ORDER
+        f"{s} {counts[s]}件(部分一致 {partial_counts[s]}/大小区別 {cs_counts[s]})"
+        for s in _cat_order
         if counts[s]
     )
-    other = " / ".join(f"{s} {counts[s]}件" for s in counts if s not in _SECTION_ORDER)
+    other = " / ".join(f"{s} {counts[s]}件" for s in counts if s not in _cat_order)
     print(
         f"\n登録（除去後 {len(result.kept)} 件）: {summary}{(' / ' + other) if other else ''}"
     )
