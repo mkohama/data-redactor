@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -59,9 +60,12 @@ DEFAULT_MODEL = AVAILABLE_MODELS[0]
 # nlp.pipe を流すときの「1 ミニバッチあたりの累積文字数」上限。
 # spaCy/thinc は 1 ミニバッチのトークンを 1 つの配列 (Σtokens, width) に載せるため、全チャンクを
 # 1 バッチで流すと巨大配列になり OOM する（実測：大きな文書で (218861, 256)=214MiB の確保に失敗）。
-# 累積文字数でバッチを区切り、配列を小さく保つ（速度よりメモリ安定を優先。Doc は独立処理なので
-# 分割しても結果は不変）。値を上げると速いがメモリを食う。
-NLP_PIPE_BATCH_CHARS = 20000
+# 累積文字数でバッチを区切り、配列を小さく保つ（Doc は独立処理なので分割しても結果は不変）。
+#
+# **速度チューニング用に環境変数 NER_PIPE_BATCH_CHARS で可変**（既定 20000）。electra（transformer）は
+# 1 バッチが大きいほど速い（実測 +8〜29%）が、その分メモリを食う＝上げすぎると OOM。RAM に余裕のある
+# 実機で値を上げて計測するのが唯一の recall 不変な速度改善（ja_ginza には効かない・electra 向け）。
+NER_PIPE_BATCH_CHARS = int(os.getenv("NER_PIPE_BATCH_CHARS", "20000"))
 
 
 @dataclass(frozen=True)
@@ -349,12 +353,12 @@ class NerEngine:
 def _pipe_in_batches(
     nlp: spacy.language.Language,
     texts: list[str],
-    char_budget: int = NLP_PIPE_BATCH_CHARS,
+    char_budget: int = NER_PIPE_BATCH_CHARS,
 ) -> Iterator[Any]:
     """``nlp.pipe`` を累積文字数で小バッチに区切り、Doc を順序どおり yield する。
 
     全チャンクを 1 バッチで流すと thinc が巨大なトークン配列を確保して OOM する
-    （:data:`NLP_PIPE_BATCH_CHARS` 参照）。1 バッチの合計文字数を上限以下に抑えて配列を小さく保つ。
+    （:data:`NER_PIPE_BATCH_CHARS` 参照）。1 バッチの合計文字数を上限以下に抑えて配列を小さく保つ。
     Doc は独立に解析されるためバッチ分割で結果は変わらない（順序も保つ）。
     1 件で上限を超えるテキストはそれ単独で 1 バッチにする（さらに小さくはできない）。
     """
