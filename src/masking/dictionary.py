@@ -272,13 +272,21 @@ class MaskDictionary:
                 j += 1
         return out
 
-    def match(self, token_surfaces: Sequence[str]) -> list[DictMatch]:
+    def match(
+        self,
+        token_surfaces: Sequence[str],
+        spans: Sequence[tuple[int, int]] | None = None,
+    ) -> list[DictMatch]:
         """正規化トークン列に対し、各位置で最長一致の語を拾う（重なりなし・完全一致）。
 
         一致は**まるごとの語**に限る：一致区間の前後がラテン英数字・連結記号（``-`` ``_``）で
         連続していると、より長い識別子の断片なので採らない（``IF-`` を ``IF-X`` で拾わない）。
         CJK・空白・句読点・中黒は境界とみなす（``社A`` は ``社Aです`` で拾う＝従来どおり）。
         大小無視（`_map`）と大小区別（`_cs_map`＝`STS` は `STS` のみ・`Sts`/`sts` は不一致）を両方見る。
+
+        ``spans``（各トークンの全文オフセット）を渡すと、隣トークンと**空白で切れている**場合を
+        境界と認識する（``LB SONY`` の ``SONY`` を ``LB`` の末尾英字で誤って弾かない）。渡さない
+        場合は従来どおり隣接扱い（:func:`_whole_word_boundary` 参照）。
         """
         ci = [normalize(s) for s in token_surfaces]
         cs = [normalize_cs(s) for s in token_surfaces] if self._cs_map else None
@@ -288,7 +296,7 @@ class MaskDictionary:
         while i < n:
             hit: DictMatch | None = None
             for length in range(min(MAX_MATCH_TOKENS, n - i), 0, -1):
-                if not _whole_word_boundary(ci, i, i + length):
+                if not _whole_word_boundary(ci, i, i + length, spans):
                     continue
                 key_ci = "".join(ci[i : i + length])
                 if key_ci in self._map:  # 大小無視
@@ -309,20 +317,34 @@ class MaskDictionary:
         return matches
 
 
-def _whole_word_boundary(norm: list[str], start: int, end: int) -> bool:
+def _whole_word_boundary(
+    norm: list[str],
+    start: int,
+    end: int,
+    spans: Sequence[tuple[int, int]] | None = None,
+) -> bool:
     """トークン区間 [start, end) が「まるごとの語」境界に挟まれているか（完全一致のガード）。
 
     区間の直前トークンの末尾・直後トークンの先頭がラテン英数字/連結記号なら、より長い
     識別子の断片なので False（``IF-X`` の中の ``IF-``/``IF`` を弾く）。CJK・空白・句読点は
     連結記号でないので True（``社Aです`` の ``社A`` は従来どおり拾う）。
+
+    ``spans``（各トークンの全文オフセット (start, end)）を渡すと、**隣トークンと実際に隣接
+    している（間に空白等が無い）ときだけ**英字連続ガードを効かせる。トークナイズは空白を
+    捨てるため、``LB SONY`` は surface 列だと ``["LB","SONY"]`` と連続して見え、``LB`` の末尾
+    ``B`` を根拠に ``SONY`` を「識別子の途中」と誤判定して弾いていた（空白＝語境界なのに）。
+    オフセットの隙間で「空白で切れている＝境界」を判定し、この取りこぼしを防ぐ
+    （``spans`` 無しは従来どおり隣接扱い＝保守的）。
     """
     if start > 0:
         prev = norm[start - 1]
-        if prev and _LATIN_CONT_RE.match(prev[-1]):
+        adjacent = spans is None or spans[start - 1][1] == spans[start][0]
+        if adjacent and prev and _LATIN_CONT_RE.match(prev[-1]):
             return False
     if end < len(norm):
         nxt = norm[end]
-        if nxt and _LATIN_CONT_RE.match(nxt[0]):
+        adjacent = spans is None or spans[end - 1][1] == spans[end][0]
+        if adjacent and nxt and _LATIN_CONT_RE.match(nxt[0]):
             return False
     return True
 

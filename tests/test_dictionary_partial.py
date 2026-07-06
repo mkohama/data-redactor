@@ -68,6 +68,38 @@ def test_whole_match_cjk_boundary_unchanged() -> None:
     assert [m.canonical for m in ms] == ["社A"]
 
 
+def _surf_spans_ner(text: str) -> tuple[list[str], list[tuple[int, int]]]:
+    """NER（electra/ja_ginza）経路相当：空白トークンを落としたオフセット付き列。
+
+    本番 ``analyze`` は NER エンジンのトークンで辞書照合する。NER は空白トークンを保持しない
+    ため、``LB SONY`` は surface 列だと ``["LB","SONY"]`` と連続して見える（オフセットには
+    隙間が残る）＝この経路でこそ境界ガードの取りこぼしが起きる。
+    """
+    toks = [(s, st, e) for (s, st, e) in _toks(text) if s.strip()]
+    return [t[0] for t in toks], [(t[1], t[2]) for t in toks]
+
+
+def test_whole_match_space_separated_latin_neighbors() -> None:
+    """空白区切りの隣接ラテン語で取りこぼさない（`LB SONY EGA` の SONY を拾う）。
+
+    NER 経路は空白トークンを落とすため surface 列だと SONY の直前が `LB`（末尾英字）に見え、
+    境界ガードが `SONY` を「識別子の途中」と誤判定して弾いていた回帰。オフセットの隙間で
+    「空白＝境界」を判定して救う。
+    """
+    d = _whole({normalize("SONY"): ("SONY", "社名")})
+    surfaces, spans = _surf_spans_ner("LB SONY EGA Phase-L")
+    assert [m.canonical for m in d.match(surfaces, spans)] == ["SONY"]
+    # オフセット無し（従来経路）だと隣接扱いで弾かれる＝この回帰の再現も固定しておく。
+    assert d.match(surfaces) == []
+
+
+def test_whole_match_hyphen_prefix_still_rejected_with_spans() -> None:
+    """オフセットを渡しても IF-X 内の IF- は弾く（IF/-/X は空白無しで隣接＝識別子の途中）。"""
+    d = _whole({normalize("IF-"): ("IF-", "商標")})
+    surfaces, spans = _surf_spans_ner("IF-Xを使用")
+    assert d.match(surfaces, spans) == []
+
+
 # --------------------------------------------------------------------------- #
 # 部分一致（部分一致: true）＝他の語の中でも境界沿いに拾う。区切り／camelCase を統一。
 # --------------------------------------------------------------------------- #

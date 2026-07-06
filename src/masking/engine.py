@@ -729,7 +729,10 @@ def _dict_matches_raw(
 ) -> list[Candidate]:
     """辞書のトークン照合を ``channel`` 票（生候補）にする（dict→確定 / session→強 の根拠）。"""
     out: list[Candidate] = []
-    for m in dictionary.match(surfaces):
+    spans = [
+        (t.start, t.end) for t in tokens
+    ]  # 空白区切りを境界と認識させる（`LB SONY` 対策）
+    for m in dictionary.match(surfaces, spans):
         start = tokens[m.start_token].start
         end = tokens[m.end_token - 1].end
         out.append(
