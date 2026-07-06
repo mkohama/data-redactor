@@ -99,16 +99,16 @@ def test_non_llm_code_like_is_demoted() -> None:
 
 
 def test_ner_only_multichannel_is_chu_not_strong() -> None:
-    """NER 系統だけなら、2モデル＋Sudachi が同じ人名でも **中**（小坂のケース）。
+    """NER 系統だけなら、2モデル＋Sudachi が同じ人名でも **中**（佐伯のケース）。
 
     旧フラット集計では「2チャネル＝強」だったが、2系統合議では NER は何チャネル一致しても
     1 系統＝中。LLM が併走して初めて 2系統＝強になる（§13）。
     """
-    text = "小坂"
+    text = "佐伯"
     cands = [
-        Candidate(0, 2, "小坂", "人名", "", (("ja_ginza", "PERSON"),)),
-        Candidate(0, 2, "小坂", "人名", "", (("ja_ginza_electra", "PERSON"),)),
-        Candidate(0, 2, "小坂", "人名", "", (("sudachi", "名詞-固有名詞-人名-姓"),)),
+        Candidate(0, 2, "佐伯", "人名", "", (("ja_ginza", "PERSON"),)),
+        Candidate(0, 2, "佐伯", "人名", "", (("ja_ginza_electra", "PERSON"),)),
+        Candidate(0, 2, "佐伯", "人名", "", (("sudachi", "名詞-固有名詞-人名-姓"),)),
     ]
     [c] = _cluster(text, cands)
     assert c.category == "人名"
