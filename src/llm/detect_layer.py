@@ -169,7 +169,9 @@ def detect_document(
         try:
             entities = detect_fn(window, model=model)
             matches, nf = locate_fn(window, entities)
-        except Exception as exc:  # noqa: BLE001 - 一度ログしてから送出（無言で止めない）
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - 一度ログしてから送出（無言で止めない）
             dt = time.perf_counter() - t0
             _log(
                 f"窓 {i + 1}/{n} で {dt:.1f}s 後にエラー: {type(exc).__name__}: {exc}"
