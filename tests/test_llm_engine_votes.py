@@ -151,6 +151,29 @@ def test_llm_person_beats_ner_chimei_rescued_to_chu() -> None:
     assert c.confidence == "中"
 
 
+def test_partial_dict_does_not_leak_confirm_onto_overlapping_ner_span() -> None:
+    """部分一致の辞書確定が、部分的に重なるだけの広い NER スパンへ漏れない（実データ回帰）。
+
+    実バグ：``情報.D-CapCorrExecY`` で ja_ginza が ``情報.D``[0,4) を1エンティティ化し、辞書の
+    部分一致 ``D-Cap``[3,8) と [3,4) だけ重なる。旧実装は emit スパン ``情報.D`` に D-Cap の
+    dict 票を集めて **確定・商標** にし、一般語『情報』まで誤マスクしていた。
+    修正後：辞書票は「その一致が収まる」スパンにだけ効く＝``D-Cap`` は確定・商標、``情報.D`` は
+    NER 単独の 中・人名（幻の dict 票を持たない＝除外リストで外せる）。
+    """
+    text = "情報.D-CapCorrExecY"  # text[0:4]='情報.D' / text[3:8]='D-Cap'
+    cands = [
+        Candidate(0, 4, "情報.D", "人名", "", (("ja_ginza", "Person"),)),
+        Candidate(3, 8, "D-Cap", "商標", "", (("dict", "商標(辞書·部分)"),)),
+    ]
+    clusters = {(c.start, c.end): c for c in _cluster(text, cands)}
+    dcap = clusters[(3, 8)]
+    assert dcap.category == "商標" and dcap.confidence == "確定"
+    joho = clusters[(0, 4)]
+    assert joho.confidence == "中" and joho.category == "人名"
+    # 幻の dict 票を持たない＝_has_dict_vote が False＝除外リストで外せる
+    assert not any(ch == "dict" for ch, _ in joho.votes)
+
+
 def test_two_systems_different_special_is_strong() -> None:
     """2系統がともに特別（NER=社名 / LLM=人名）→ **強**。種別が違ってもよい（重い人名を採用）。"""
     text = "アクメ"

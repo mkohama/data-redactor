@@ -1084,7 +1084,21 @@ def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candida
     ② 確信度＝「特別（隠すべき）」と言った**系統数**：2系統=強／1系統=中（floor）／特別なし=弱。
        辞書=確定（最優先・名簿）／昇格(session)=強。NER の内部チャネル数は確信度に効かない。
     """
-    votes = tuple(dict.fromkeys(v for m in members for v in m.votes))
+
+    # 決定的チャネル（dict=確定 / session=昇格→強 / regex=連絡先）の票は、その一致が **この emit
+    # スパンに収まる** メンバー由来のときだけ採る。部分的に重なるだけの広い NER スパンへ確定/強が
+    # 漏れるのを防ぐ。例:「情報.D」(NER 1 スパン) が辞書の部分一致 D-Cap[3,8) と [3,4) だけ重なるとき、
+    # 一般語『情報』まで商標・確定で誤マスクされていた（辞書は「名簿が実際にその位置で一致した」ときだけ
+    # 砦になる。votes 自体から外すので _has_dict_vote＝除外リスト適用可否もこの emit では正しくなる）。
+    # 非決定（system: NER/Sudachi/LLM）票は重なる全メンバーから集める＝広い NER スパンの橋渡しは確信度に効かせる。
+    def _applies(m: Candidate, ch: str) -> bool:
+        return ch not in _DECISIVE_CHANNELS or (start <= m.start and m.end <= end)
+
+    votes = tuple(
+        dict.fromkeys(
+            (ch, label) for m in members for (ch, label) in m.votes if _applies(m, ch)
+        )
+    )
     surface = text[start:end]
     # 辞書票があれば辞書のカテゴリで確定（系統の票数によらず最優先＝名簿が砦）。
     dict_cats = [
