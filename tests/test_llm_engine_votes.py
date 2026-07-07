@@ -151,27 +151,39 @@ def test_llm_person_beats_ner_chimei_rescued_to_chu() -> None:
     assert c.confidence == "中"
 
 
-def test_partial_dict_does_not_leak_confirm_onto_overlapping_ner_span() -> None:
-    """部分一致の辞書確定が、部分的に重なるだけの広い NER スパンへ漏れない（実データ回帰）。
+def test_overlapping_ner_span_not_emitted_when_covered_by_confirmed_dict() -> None:
+    """確定（辞書）スパンと重なる非アンカー候補は候補として emit しない（実データ回帰）。
 
     実バグ：``情報.D-CapCorrExecY`` で ja_ginza が ``情報.D``[0,4) を1エンティティ化し、辞書の
     部分一致 ``D-Cap``[3,8) と [3,4) だけ重なる。旧実装は emit スパン ``情報.D`` に D-Cap の
-    dict 票を集めて **確定・商標** にし、一般語『情報』まで誤マスクしていた。
-    修正後：辞書票は「その一致が収まる」スパンにだけ効く＝``D-Cap`` は確定・商標、``情報.D`` は
-    NER 単独の 中・人名（幻の dict 票を持たない＝除外リストで外せる）。
+    dict 票を集めて **確定・商標** にし、一般語『情報』まで誤マスクしていた（表示も紛らわしい）。
+    修正後：足場（辞書/昇格）スパンと **少しでも重なる** 非足場候補は emit しない。よって
+    ``D-Cap`` は確定・商標として1件だけ出て、``情報.D``[0,4) は **候補にならない**。
+    確定アンカーが無い場所なら NER 単独の中候補として通常どおり出る（別テスト）。
     """
     text = "情報.D-CapCorrExecY"  # text[0:4]='情報.D' / text[3:8]='D-Cap'
     cands = [
         Candidate(0, 4, "情報.D", "人名", "", (("ja_ginza", "Person"),)),
         Candidate(3, 8, "D-Cap", "商標", "", (("dict", "商標(辞書·部分)"),)),
     ]
-    clusters = {(c.start, c.end): c for c in _cluster(text, cands)}
-    dcap = clusters[(3, 8)]
+    clusters = _cluster(text, cands)
+    spans = {(c.start, c.end) for c in clusters}
+    assert spans == {(3, 8)}  # D-Cap だけ。情報.D[0,4) は確定と重なるので出さない
+    [dcap] = clusters
     assert dcap.category == "商標" and dcap.confidence == "確定"
-    joho = clusters[(0, 4)]
-    assert joho.confidence == "中" and joho.category == "人名"
-    # 幻の dict 票を持たない＝_has_dict_vote が False＝除外リストで外せる
-    assert not any(ch == "dict" for ch, _ in joho.votes)
+
+
+def test_ner_span_emitted_when_no_confirmed_overlap() -> None:
+    """確定アンカーが無ければ、同じ NER 単独スパンは通常どおり中候補として出る（対の確認）。
+
+    上のテストの抑制が「情報.D 狙い撃ち」ではなく「確定と重なるから」であることを示す＝
+    辞書に D-Cap が無ければ ``情報.D`` は中・人名として登場する。
+    """
+    text = "情報.D-CapCorrExecY"
+    cands = [Candidate(0, 4, "情報.D", "人名", "", (("ja_ginza", "Person"),))]
+    [c] = _cluster(text, cands)
+    assert (c.start, c.end) == (0, 4)
+    assert c.category == "人名" and c.confidence == "中"
 
 
 def test_two_systems_different_special_is_strong() -> None:

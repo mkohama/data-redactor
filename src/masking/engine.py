@@ -1019,16 +1019,13 @@ def _promoted_dictionary(
     return MaskDictionary(additions) if additions else None
 
 
-def _within_any(s: int, e: int, spans: list[tuple[int, int]]) -> bool:
-    return any(ds <= s and e <= de for ds, de in spans)
+def _overlaps_any(s: int, e: int, spans: list[tuple[int, int]]) -> bool:
+    """[s, e) が spans のいずれかと **少しでも重なる** か（端が接するだけ＝境界一致は重なりでない）。
 
-
-def _spans_across(c: Candidate, dict_spans: list[tuple[int, int]]) -> bool:
-    """c が少なくとも 1 つの辞書スパンを「またぐ」（より広く覆う）＝橋渡し。"""
-    return any(
-        c.start <= ds and de <= c.end and (c.start, c.end) != (ds, de)
-        for ds, de in dict_spans
-    )
+    内包（`SONY` を覆う `SONYビル`）・またぎ（`SONY・Nikon・Canon` を覆う粗い NER）・部分重なり
+    （`情報.D` が確定 `D-Cap`[3,8) と [3,4) だけ重なる）を **すべて** 重なりとして扱う。
+    """
+    return any(s < de and ds < e for ds, de in spans)
 
 
 def _segment_spans(members: list[Candidate]) -> list[tuple[int, int]]:
@@ -1055,9 +1052,13 @@ def _resolve_cluster(
 
     足場（辞書 or 昇格＝session）が無ければ 1 件に統合。足場があれば：
     - 各足場スパンを独立候補に（粗い NER スパンに飲み込ませない。例 `SONY・Nikon・Canon`→3分割）。
-    - 足場スパンを「またがず・埋もれてもいない」その他メンバー（＝列挙に取り残された実体。例
-      `SONY|Nikon|Canon` の昇格後の Nikon）も区間にまとめて出す。普通名詞のみの隙間（例 `小浜出身`
-      の `出身`＝Sudachi 候補が無い）は出さない。
+    - 足場スパンと**重ならない**その他メンバー（＝列挙に取り残された実体。例 `SONY|Nikon|Canon` の
+      昇格後の Nikon）だけを区間にまとめて出す。普通名詞のみの隙間（例 `小浜出身` の `出身`＝Sudachi
+      候補が無い）は出さない。
+    - **足場スパンと少しでも重なる非足場メンバーは候補として出さない**（内包・またぎに加え、部分重なりも）。
+      確定/強で消える箇所に、それと重なる別スパン（例 `情報.D` が確定 `D-Cap`[3,8) と [3,4) だけ重なる）を
+      二重に候補提示しない＝表示・選択の混乱と、確定領域への確信度漏れを断つ。重なる票は下の overlap
+      収集で確信度（橋渡し）には効かせるので、広い NER 票が足場スパンの確信度に寄与する点は維持する。
     - 各 emit スパンには**重なる全メンバーの票**を集める＝橋渡しの広い NER 票も確信度に効かせる。
     """
     anchor_members = [m for m in members if _has_anchor_vote(m)]
@@ -1067,9 +1068,7 @@ def _resolve_cluster(
     leftover = [
         m
         for m in members
-        if not _has_anchor_vote(m)
-        and not _spans_across(m, anchor_spans)
-        and not _within_any(m.start, m.end, anchor_spans)
+        if not _has_anchor_vote(m) and not _overlaps_any(m.start, m.end, anchor_spans)
     ]
     emit = sorted(set(anchor_spans) | set(_segment_spans(leftover)))
     out: list[Candidate] = []
