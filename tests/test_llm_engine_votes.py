@@ -211,11 +211,14 @@ def test_looks_like_code_v2() -> None:
     # 不均衡な丸括弧＝NER スパンが括弧を巻き込んだ人工物（ASCII / 全角）。
     for s in ["LSMonito(", "(LSMonito", ")Monitor", "Monitor)", "東芝（"]:
         assert _looks_like_code(s), f"不均衡括弧は code-like のはず: {s}"
+    # 先頭/末尾に垂れたピリオド＝文末/フィールド区切りの `.` を NER が巻き込んだ人工物（`情報.`）。
+    for s in ["情報.", ".NET一部", "田中.", "．社名", "Sony."]:
+        assert _looks_like_code(s), f"端の裸ピリオドは code-like のはず: {s}"
     for s in ["田中", "ニコン", "IBM", "Sony", "Smith", "横浜市"]:
         assert not _looks_like_code(s), f"実在名なので code-like でない: {s}"
-    # 均衡した括弧つき社名は守る（ASCII / 全角）。
-    for s in ["Sony (Japan)", "会社（日本）"]:
-        assert not _looks_like_code(s), f"均衡括弧つき社名は守る: {s}"
+    # 均衡した括弧つき社名は守る（ASCII / 全角）。内部ピリオドの実在名も守る（端だけ見る）。
+    for s in ["Sony (Japan)", "会社（日本）", "Booking.com", "Yahoo.co.jp"]:
+        assert not _looks_like_code(s), f"守るべき表層: {s}"
 
 
 def test_stage1_codeish_company_not_strong() -> None:
