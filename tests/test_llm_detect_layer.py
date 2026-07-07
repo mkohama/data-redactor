@@ -169,7 +169,7 @@ def _rate_limit_error(retry_after: str | None = None) -> openai.RateLimitError:
 def test_call_with_retry_recovers_after_transient_429(monkeypatch) -> None:
     """数回 429 が続いても、規定回数内に成功すれば結果を返す（待機は入るが例外にしない）。"""
     monkeypatch.setattr(detect_layer.time, "sleep", lambda _s: None)  # 待機を潰す
-    monkeypatch.setattr(detect_layer, "LLM_MAX_RETRIES", 5)
+    monkeypatch.setattr(detect_layer, "LLM_DETECT_MAX_RETRIES", 5)
     calls = {"n": 0}
 
     def flaky():
@@ -185,7 +185,7 @@ def test_call_with_retry_recovers_after_transient_429(monkeypatch) -> None:
 def test_call_with_retry_raises_after_exhausting(monkeypatch) -> None:
     """規定回数を超えて 429 が続けば最後の RateLimitError を送出する。"""
     monkeypatch.setattr(detect_layer.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(detect_layer, "LLM_MAX_RETRIES", 2)
+    monkeypatch.setattr(detect_layer, "LLM_DETECT_MAX_RETRIES", 2)
     calls = {"n": 0}
 
     def always_429():

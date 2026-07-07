@@ -30,12 +30,16 @@ from src.llm.windows import DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, iter_win
 # 既定モデル（N 社制約: PII を含むデータは Azure OpenAI gpt-4.1-mini のみ）。
 DEFAULT_MODEL = "gpt-4.1-mini"
 
-# --- 止血: 一過性 429（Azure バックエンド混雑）を呼び出し側で吸収する ---------------------
-# pii-masker の get_client が max_retries を指定しておらず SDK 既定=2 では吸収しきれないため、
-# 実機の検出呼び出し（_default_detect）をリトライ＋バックオフで包み、窓間にスロットルを挟む。
-# 恒久対応（pii-masker 側で max_retries を増やす・1窓の呼び出し回数を減らす）は報告済み。
-# 429 が窓内 7〜8 発のどこで出ても窓ごと再試行する粗い単位（内部個別リクエスト単位では回せない）。
-LLM_MAX_RETRIES = int(os.getenv("LLM_DETECT_MAX_RETRIES", "5"))
+# --- 止血: 一過性 429（Azure バックエンド混雑）を「窓（複合呼び出し）単位」で吸収する --------
+# pii-masker ab2cd68 以降、get_client は SDK の max_retries=5（Retry-After 尊重の指数
+# バックオフ・env LLM_MAX_RETRIES）を設定済み＝個別リクエストの 429 は SDK 自身が吸収する。
+# ここはその上位の層で、detect（person/company/trademark 等 7〜8 リクエストの複合呼び出し）が
+# 丸ごと 429 で落ちたときに窓ごと再試行する（SDK は個別リクエスト単位なのでこの粒度は回せない）。
+# 注意: pii-masker 側は「アプリ層で二重のリトライループを重ねるな（重ねると最悪レイテンシが
+# 掛け算になるだけ）」を推奨し、持続 429 の恒久ノブは並列度 PII_MASKER_CONCURRENCY を下げること。
+# この窓層は複合呼び出しの丸ごと失敗に対する薄い保険として残す（recall 最優先＝検出全体を
+# 一過性 429 で落とさない）。既定 5、env LLM_DETECT_MAX_RETRIES で調整可（SDK 側とは別 env）。
+LLM_DETECT_MAX_RETRIES = int(os.getenv("LLM_DETECT_MAX_RETRIES", "5"))
 # 指数バックオフの基数（秒）。Retry-After ヘッダがあればそちらを優先。
 LLM_RETRY_BASE_WAIT = float(os.getenv("LLM_DETECT_RETRY_BASE_WAIT", "2.0"))
 # 窓ごとの検出前に挟む待機（秒）。連射のピークを均して 429 を引きにくくする。0 で無効。
@@ -72,27 +76,27 @@ def _retry_wait(exc: openai.RateLimitError, attempt: int) -> float:
 
 
 def _call_with_retry(fn: Callable[[], Sequence[Any]]) -> Sequence[Any]:
-    """``fn`` を呼び、一過性 429（RateLimitError）は待機して最大 LLM_MAX_RETRIES 回まで再試行。
+    """``fn`` を呼び、一過性 429（RateLimitError）は待機して最大 LLM_DETECT_MAX_RETRIES 回まで再試行。
 
     待機は従来**無言**だったので「進まない」と見えていた。各リトライの待機秒・回数と、
     上限到達（＝これ以上は再試行しない）を stderr にログして可視化する。
     """
     last: openai.RateLimitError | None = None
-    for attempt in range(LLM_MAX_RETRIES + 1):
+    for attempt in range(LLM_DETECT_MAX_RETRIES + 1):
         try:
             return fn()
         except openai.RateLimitError as e:  # 一過性。待って再試行。
             last = e
-            if attempt < LLM_MAX_RETRIES:
+            if attempt < LLM_DETECT_MAX_RETRIES:
                 wait = _retry_wait(e, attempt)
                 _log(
                     f"429 レート制限。{wait:.0f} 秒待機して再試行"
-                    f"（{attempt + 1}/{LLM_MAX_RETRIES}）"
+                    f"（{attempt + 1}/{LLM_DETECT_MAX_RETRIES}）"
                 )
                 time.sleep(wait)
             else:
                 _log(
-                    f"429 が {LLM_MAX_RETRIES} 回再試行しても解消せず＝この窓は失敗として送出"
+                    f"429 が {LLM_DETECT_MAX_RETRIES} 回再試行しても解消せず＝この窓は失敗として送出"
                     "（環境変数 LLM_DETECT_MAX_RETRIES / LLM_DETECT_RETRY_BASE_WAIT で調整可）"
                 )
     assert last is not None  # ループは最低1回回るので 429 経由なら必ず設定される
