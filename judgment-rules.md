@@ -162,7 +162,7 @@ data-redactor が「何を・どのくらいの確からしさで機密と見な
 |---|---|---|
 | 人名 | `PERSON` | `N_PERSON`（人数）は数値表現なので**含めない** |
 | **社名** | `COMPANY` / `COMPANY_GROUP` | **この2つだけ**。下記の組織系（CORPORATION_OTHER 含む）は含めない |
-| 地名 | `CITY` / `PROVINCE` / `COUNTRY` / `ADDRESS` / `POSTAL_ADDRESS` / `FACILITY_PART` / `STATION` / `AIRPORT` | 具体的な地名のみ。`_OTHER` 系は含めない |
+| 地名 | `CITY` / `PROVINCE` / `COUNTRY` | 粗い都市/県/国のみ。`_OTHER` 系および施設部位/駅/空港/住所系は含めない（下記） |
 
 - **社名から外した組織系ラベル**：`CORPORATION_OTHER`（企業その他）・`SHOW_ORGANIZATION`（興行団体）・
   `SPORTS_ORGANIZATION_OTHER`・`POLITICAL_ORGANIZATION_OTHER`・`POLITICAL_PARTY`・`GOVERNMENT`・
@@ -170,6 +170,12 @@ data-redactor が「何を・どのくらいの確からしさで機密と見な
   も粒度が粗く社名として怪しい）。**実在の組織は LLM(Company)＋辞書**で拾う。
 - **地名から外した `_OTHER` 系**：`GPE_OTHER` / `GEOLOGICAL_REGION_OTHER` / `LOCATION_OTHER` /
   `DOMESTIC_REGION_OTHER` / `CONTINENTAL_REGION_OTHER` / `FACILITY_OTHER`。粒度が粗く誤爆しやすい。
+- **地名からさらに外したラベル（2026-07-07）**：`FACILITY_PART`（「3階」「西口」等の施設部位＝ほぼ純
+  ノイズ）・`STATION` / `AIRPORT`（駅/空港）・`ADDRESS` / `POSTAL_ADDRESS`（住所/郵便番号）。業務文書で
+  候補一覧のノイズになるわりにレビュー価値が低い。**地名は元々 弱＝自動マスク外なので外してもマスク
+  漏れは起きない**（人名/社名/商標が言えばそちらで拾う）＝効果はノイズ削減のみ。落とした地名を
+  どうしてもマスクしたい場合は辞書登録で確定へ上げる。なお **LLM 側の `Address`/`Facility` は地名のまま据え置き**
+  （LLM 経路は未登録 type が「その他」に落ちてノイズが移るだけで消えないため。NER 経路だけ絞る）。
 - **連絡先は NER から取らない**（`@`・数字に過剰発火するため regex に委ねる）。`Product_Other` 系も
   ノイズ過多で除外。国籍・民族・一族（`Nationality`/`Ethnic_Group_Other`/`Family`）は会社でないので社名にしない。
 - 補足：NER 単独の社名/人名票は元々**中**（自動マスク外）。上の絞り込みの主効果は**レビュー一覧の

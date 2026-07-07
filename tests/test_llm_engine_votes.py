@@ -31,6 +31,25 @@ def test_vote_category_llm_branch() -> None:
     assert vote_category("llm", "Unknown_Type") is None
 
 
+def test_vote_category_ner_branch_place_labels_tightened() -> None:
+    """NER 分岐＝ラベル → 6 カテゴリ写像。粗い都市/県/国だけを地名として残す（2026-07-07）。
+
+    FACILITY_PART / STATION / AIRPORT / ADDRESS / POSTAL_ADDRESS は候補一覧のノイズなので
+    マップから外した＝NER 経路では **候補にならない（None）**。地名は元々 弱・自動マスク外
+    なので外してもマスク漏れは起きない（人名/社名/商標が言えばそちらで拾う）。
+    """
+    # 残す粗い地名
+    assert vote_category("ja_ginza_electra", "CITY") == "地名"
+    assert vote_category("ja_ginza_electra", "PROVINCE") == "地名"
+    assert vote_category("ja_ginza_electra", "COUNTRY") == "地名"
+    # 主要カテゴリは不変
+    assert vote_category("ja_ginza_electra", "PERSON") == "人名"
+    assert vote_category("ja_ginza_electra", "COMPANY") == "社名"
+    # 落としたラベルは NER 経路で候補にならない（None）
+    for dropped in ("FACILITY_PART", "STATION", "AIRPORT", "ADDRESS", "POSTAL_ADDRESS"):
+        assert vote_category("ja_ginza_electra", dropped) is None
+
+
 def test_llm_raw_makes_llm_votes() -> None:
     text = "田中商事に勤務"
     det = LlmDetection(

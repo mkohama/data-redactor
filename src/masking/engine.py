@@ -89,18 +89,18 @@ _NER_LABEL_CATEGORY: dict[str, str] = {
     "COMPANY": "社名",
     "COMPANY_GROUP": "社名",
     # Nationality(国籍)・Ethnic_Group_Other(民族)・Family(一族) は会社/組織ではないので含めない。
-    # 地名は **_OTHER 系を含めない**（GPE_OTHER/GEOLOGICAL_REGION_OTHER/LOCATION_OTHER/
-    # DOMESTIC_REGION_OTHER/CONTINENTAL_REGION_OTHER/FACILITY_OTHER）。粒度が粗く一般語の
-    # 誤爆になりやすい。具体的な地名（都市/県/国/住所/駅/空港/施設の部位）だけ残す。
-    # 地名は元々 弱（レビュー止まり・自動マスク外）なので主効果は一覧のノイズ削減。
+    # 地名は **粗い都市/県/国（CITY/PROVINCE/COUNTRY）だけに絞る**。_OTHER 系（GPE_OTHER/
+    # GEOLOGICAL_REGION_OTHER/LOCATION_OTHER/DOMESTIC_REGION_OTHER/CONTINENTAL_REGION_OTHER/
+    # FACILITY_OTHER）は従来どおり含めない（粒度が粗く一般語の誤爆）。
+    # 2026-07-07: さらに **FACILITY_PART / STATION / AIRPORT / ADDRESS / POSTAL_ADDRESS を外した**。
+    # FACILITY_PART は「3階」「西口」等の施設部位＝ほぼ純ノイズ、駅/空港/住所/郵便番号も業務文書では
+    # 候補一覧のノイズになるわりにレビュー価値が低い。**地名は元々 弱（レビュー止まり・自動マスク外）
+    # なので外してもマスク漏れは起きない**（人名/社名/商標が言えばそちらで拾う）＝効果はノイズ削減のみ。
+    # NER 経路は未登録ラベルを候補にしない（_ner_candidates で category is None なら continue）。
+    # 落とした地名をどうしてもマスクしたい場合は辞書登録で確定へ上げる。
     "CITY": "地名",
     "PROVINCE": "地名",
     "COUNTRY": "地名",
-    "ADDRESS": "地名",
-    "POSTAL_ADDRESS": "地名",
-    "FACILITY_PART": "地名",
-    "STATION": "地名",
-    "AIRPORT": "地名",
     # 連絡先（Phone_Number/Email/URL）は意図的に含めない（上のコメント参照。正規表現に委ねる）。
 }
 
