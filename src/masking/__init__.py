@@ -31,7 +31,10 @@ from src.masking.engine import (
     MaskResult,
     apply_allowlist,
     apply_allowlist_to_analysis,
+    mapping_from_json,
+    mapping_to_json,
     tally_votes,
+    unmask,
     vote_category,
 )
 
@@ -42,6 +45,9 @@ __all__ = [
     "Candidate",
     "CandidateGroup",
     "MaskEntry",
+    "unmask",
+    "mapping_to_json",
+    "mapping_from_json",
     "AUTO_MASK_CONFIDENCE",
     "MaskDictionary",
     "DictMatch",

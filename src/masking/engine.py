@@ -261,11 +261,19 @@ class CandidateGroup:
 
 @dataclass(frozen=True)
 class MaskEntry:
-    """プレースホルダ 1 件（復元用の対応表）。"""
+    """プレースホルダ 1 件（復元用の対応表）。
+
+    - ``canonical``：復元先の代表語（辞書 canonical があればそれ、無ければ代表表層）。
+      :func:`unmask` はここへ戻す。
+    - ``spans``：このプレースホルダが占める**原文座標**の出現位置（監査・再現用）。
+      復元自体はプレースホルダ文字列で行う（LLM 応答はオフセットが変わる）ため span は不要。
+    """
 
     placeholder: str
     category: str
     surfaces: tuple[str, ...]
+    canonical: str = ""
+    spans: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,6 +302,51 @@ class MaskResult:
     masked_text: str  # マスク済みテキスト
     masked: tuple[Candidate, ...]  # 実際にマスクしたスパン（選択＋文書内展開）
     mapping: tuple[MaskEntry, ...]  # プレースホルダ ↔ 原語
+
+
+def unmask(text: str, mapping: Iterable[MaskEntry]) -> str:
+    """マスク済み（＝LLM が返した）テキストを復元する。設計 §3-2。
+
+    - ``placeholder`` → ``canonical``（無ければ ``surfaces[0]``）へ置換。
+    - **長いプレースホルダ優先**（``[社1]`` が ``[社10]`` を巻き込まないように）。
+    - **mapping に無いプレースホルダは触らない**（LLM の捏造・改変は安全側で無変更）。
+    - span は使わない（LLM 応答はオフセットが変わるため、プレースホルダ文字列で照合）。
+    """
+    result = text
+    for m in sorted(mapping, key=lambda e: len(e.placeholder), reverse=True):
+        target = m.canonical or (m.surfaces[0] if m.surfaces else "")
+        if not m.placeholder or not target:
+            continue
+        result = result.replace(m.placeholder, target)
+    return result
+
+
+def mapping_to_json(mapping: Iterable[MaskEntry]) -> list[dict]:
+    """``MaskEntry`` 列を JSON 化可能な dict 列にする（対応表の永続化・API 送出用）。"""
+    return [
+        {
+            "placeholder": m.placeholder,
+            "category": m.category,
+            "surfaces": list(m.surfaces),
+            "canonical": m.canonical,
+            "spans": [[s, e] for s, e in m.spans],
+        }
+        for m in mapping
+    ]
+
+
+def mapping_from_json(data: Iterable[dict]) -> tuple[MaskEntry, ...]:
+    """:func:`mapping_to_json` の逆。``spans`` は省略可（unmask には不要）。"""
+    return tuple(
+        MaskEntry(
+            placeholder=d["placeholder"],
+            category=d.get("category", ""),
+            surfaces=tuple(d.get("surfaces", ())),
+            canonical=d.get("canonical", ""),
+            spans=tuple((int(s), int(e)) for s, e in d.get("spans", ())),
+        )
+        for d in data
+    )
 
 
 def _sudachi_category(tag: str) -> str | None:
@@ -1267,7 +1320,12 @@ def _assign_placeholders(
             prefix = _PLACEHOLDER_PREFIX.get(category, "語")
             placeholder = f"[{prefix}{counters[category]}]"
         surfaces = tuple(dict.fromkeys(sp.surface for sp in members))
-        mapping.append(MaskEntry(placeholder, category, surfaces))
+        # canonical: 辞書 canonical があればそれ、無ければ代表表層（unmask の復元先）。
+        entry_canonical = canonical or _representative(members).surface
+        entry_spans = tuple((sp.start, sp.end) for sp in members)
+        mapping.append(
+            MaskEntry(placeholder, category, surfaces, entry_canonical, entry_spans)
+        )
         for sp in members:
             span_placeholder[(sp.start, sp.end)] = placeholder
     return tuple(mapping), span_placeholder
