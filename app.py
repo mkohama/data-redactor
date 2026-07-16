@@ -996,6 +996,10 @@ def render_cache_view() -> None:
     ):
         for content_hash_, new_kind in kind_changes:
             cache.set_source_kind(content_hash_, new_kind)
+        # data_editor の編集状態を破棄してから再描画する。表の行が変わった後も古い編集
+        # （チェック行のインデックス）が残ると、行数の減った新しい表へ再適用される際に
+        # bool 列へ NaN が入り、pandas 3.x が TypeError を投げるため（静的キーの罠）。
+        st.session_state.pop("cache_view", None)
         st.success(f"種別を更新しました（{len(kind_changes)} 件）。")
         st.rerun()
 
@@ -1003,6 +1007,8 @@ def render_cache_view() -> None:
     if to_delete and st.button(f"🗑 選択した {len(to_delete)} 件のキャッシュを削除"):
         for d in to_delete:
             cache.delete(d.content_hash)
+        # 削除で行数が減る。古い編集状態を残すと次回描画で bool 列へ NaN が入り落ちるので破棄する。
+        st.session_state.pop("cache_view", None)
         st.success(f"{len(to_delete)} 件のキャッシュを削除しました。")
         st.rerun()
 
