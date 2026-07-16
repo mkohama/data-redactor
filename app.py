@@ -1108,7 +1108,7 @@ def analyze_masking(
 # ＝env で変えるだけで detector_version が変わりキャッシュ自動無効化（コード編集・手動バンプ不要）。
 # 旧 ene-vN（type-map 版）は廃止：_ENE_TO_CATEGORY は解析時に毎回当たる後段変換で、LLM 検出キャッシュ
 #   （生 ene_type のみ保存）に影響しない＝バンプ不要だったため。変更は次の解析で自動反映される。
-_DETECTOR_STATIC = "pii-masker@ab2cd68"
+_DETECTOR_STATIC = "pii-masker@7a0b0a8"
 
 
 def _env_int(name: str, default: int) -> int:
