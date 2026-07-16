@@ -686,6 +686,7 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
                 "マスク": n_sel == g.count,  # 全出現が選択済みのときだけ ON
                 "選択状況": status,
                 "除外": g.confidence == "除外",
+                "辞書登録": False,
                 "確信度": _confidence_label(g.confidence),
                 "カテゴリ": g.category,
                 "表層": g.surface,
@@ -707,21 +708,30 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
             table,
             hide_index=True,
             width="stretch",
-            disabled=[c for c in table.columns if c not in ("マスク", "除外")],
+            disabled=[
+                c for c in table.columns if c not in ("マスク", "除外", "辞書登録")
+            ],
             column_config={
                 "マスク": st.column_config.CheckboxColumn("マスク"),
                 "除外": st.column_config.CheckboxColumn(
                     "除外",
                     help="チェックして [🚫 選択を除外リストへ] を押すと候補外に。",
                 ),
+                "辞書登録": st.column_config.CheckboxColumn(
+                    "辞書登録",
+                    help="チェックして [📒 選択を辞書へ登録] を押すと、その語のカテゴリ"
+                    "（社名/商標/人名）で辞書に登録＝以後どの文書でも確定マスクになります。",
+                ),
             },
             key=f"mask_entity_{ver}",
         )
-        col_a, col_b = st.columns([1, 1])
+        col_a, col_b, col_c = st.columns([1, 1, 1])
         applied = col_a.form_submit_button("✅ マスクを反映", type="primary")
         excl = col_b.form_submit_button("🚫 選択を除外リストへ")
+        reg = col_c.form_submit_button("📒 選択を辞書へ登録")
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
+    registers = edited["辞書登録"].tolist()
     if applied:  # **変化したチェックだけ**反映（出現ごとの部分選択を壊さない）
         new_sel = set(sel)
         for g, on, ex in zip(groups, masks, excludes):
@@ -738,7 +748,8 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
         stored["mask_ver"] = ver + 1
         st.rerun()
     to_exclude = [g.surface for g, ex in zip(groups, excludes) if ex]
-    return to_exclude, excl
+    to_register = [(g.surface, g.category) for g, on in zip(groups, registers) if on]
+    return to_exclude, excl, to_register, reg
 
 
 def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
@@ -764,6 +775,7 @@ def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
             {
                 "マスク": (c.start, c.end) in sel,
                 "除外": c.confidence == "除外",
+                "辞書登録": False,
                 "確信度": _confidence_label(c.confidence),
                 "カテゴリ": c.category,
                 "表層": c.surface,
@@ -782,21 +794,30 @@ def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
             table,
             hide_index=True,
             width="stretch",
-            disabled=[c for c in table.columns if c not in ("マスク", "除外")],
+            disabled=[
+                c for c in table.columns if c not in ("マスク", "除外", "辞書登録")
+            ],
             column_config={
                 "マスク": st.column_config.CheckboxColumn("マスク"),
                 "除外": st.column_config.CheckboxColumn(
                     "除外",
                     help="チェックして [🚫 選択を除外リストへ] を押すと候補外に。",
                 ),
+                "辞書登録": st.column_config.CheckboxColumn(
+                    "辞書登録",
+                    help="チェックして [📒 選択を辞書へ登録] を押すと、その語のカテゴリ"
+                    "（社名/商標/人名）で辞書に登録＝以後どの文書でも確定マスクになります。",
+                ),
             },
             key=f"mask_occurrence_{ver}",
         )
-        col_a, col_b = st.columns([1, 1])
+        col_a, col_b, col_c = st.columns([1, 1, 1])
         applied = col_a.form_submit_button("✅ マスクを反映", type="primary")
         excl = col_b.form_submit_button("🚫 選択を除外リストへ")
+        reg = col_c.form_submit_button("📒 選択を辞書へ登録")
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
+    registers = edited["辞書登録"].tolist()
     if applied:  # 表示中の出現について sel を更新（ON=その span を追加／OFF=削除）
         new_sel = set(sel)
         for c, on, ex in zip(cands, masks, excludes):
@@ -809,7 +830,8 @@ def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
         stored["mask_ver"] = ver + 1
         st.rerun()
     to_exclude = [c.surface for c, ex in zip(cands, excludes) if ex]
-    return to_exclude, excl
+    to_register = [(c.surface, c.category) for c, on in zip(cands, registers) if on]
+    return to_exclude, excl, to_register, reg
 
 
 def render_dict_editor(dict_path: str) -> None:
@@ -1228,6 +1250,50 @@ def render_llm_result(body_text: str, detection: LlmDetection) -> None:
         )
 
 
+# 候補から辞書に登録できるカテゴリ（辞書は社名/商標/人名のみ）。
+# 地名/連絡先/その他はこの3種に当てはまらないので辞書登録の対象外（除外リスト側で扱う）。
+_DICT_REGISTRABLE_CATEGORIES = {"社名", "商標", "人名"}
+
+
+def _append_to_dictionary(
+    dict_path: str, items: list[tuple[str, str]]
+) -> tuple[int, list[str]]:
+    """候補 ``(表層, カテゴリ)`` を辞書 YAML に**完全一致・自動採番**で追記する。
+
+    辞書に入れられるのは 社名/商標/人名 のみ（``_DICT_REGISTRABLE_CATEGORIES``）。地名/連絡先/
+    その他は skip して呼び出し側に返す。既に代表表記として登録済みの語は重複追加しない。
+    UI から送る登録は除外リストと同じく完全一致（部分一致=False・大小無視）。細かい指定
+    （別名・置換・部分一致・大小区別）は 📒 マスク辞書 タブのエディタで行う。
+    戻り値は ``(追加件数, 登録できなかった語のリスト)``。
+    """
+    path = Path(dict_path)
+    entries = load_entries(path) if path.exists() else []
+    existing = {e["canonical"] for e in entries}
+    added: list[dict] = []
+    skipped: list[str] = []
+    seen_new: set[str] = set()
+    for surface, category in items:
+        if category not in _DICT_REGISTRABLE_CATEGORIES:
+            skipped.append(f"{surface}（{category}）")
+            continue
+        if surface in existing or surface in seen_new:
+            continue
+        seen_new.add(surface)
+        added.append(
+            {
+                "category": category,
+                "canonical": surface,
+                "aliases": [],
+                "mask": "",
+                "partial": False,
+                "case_sensitive": False,
+            }
+        )
+    if added:
+        save_entries(path, entries + added)
+    return len(added), skipped
+
+
 def render_masking_result(stored: dict) -> None:
     """マスキングの結果表示（保存済み結果から。候補選択・表示切替は再解析しない）。"""
     models = stored["models"]
@@ -1285,11 +1351,11 @@ def render_masking_result(stored: dict) -> None:
     ver = stored["mask_ver"]
 
     if by_entity:
-        to_exclude, excl_clicked = _render_by_entity(
+        to_exclude, excl_clicked, to_register, reg_clicked = _render_by_entity(
             engine, analysis, confidences, sel, ver, stored
         )
     else:
-        to_exclude, excl_clicked = _render_by_occurrence(
+        to_exclude, excl_clicked, to_register, reg_clicked = _render_by_occurrence(
             engine, analysis, confidences, sel, ver, stored
         )
 
@@ -1326,6 +1392,56 @@ def render_masking_result(stored: dict) -> None:
             f"除外リストに {added} 件追加し、再解析なしで反映しました（計 {len(merged)} 件）。"
         )
         st.rerun()
+
+    # 「辞書登録」チェックを辞書へ追記し、**その場で再マージ**して即反映する。GiNZA/LLM は
+    # キャッシュ参照のみ（再実行しない）＝軽い（マージ&確信度タブの再実行と同等）。辞書一致は
+    # 確定になり、その語の全出現が自動マスク対象になる（→ 選択に加える）。
+    if reg_clicked and to_register:
+        n_added, skipped = _append_to_dictionary(dict_path, to_register)
+        if n_added:
+            # LLM 検出を用意：セッション優先、無ければキャッシュから読む（ヒット＝Azure を呼ばない）。
+            used = stored.get("analysis_channels", {"ner": True, "llm": False})
+            det = (stored.get("llm") or {}).get("detection")
+            if det is None and used.get("llm"):
+                with st.spinner("LLM 検出をキャッシュから読み込み中 ..."):
+                    _, det = run_llm_detection(chunks, stored["flatten"], force=False)
+            with st.spinner("辞書を反映して再マージ中 ...（GiNZA/LLM はキャッシュ）"):
+                stored["analysis"] = analyze_masking(
+                    chunks,
+                    models,
+                    stored["flatten"],
+                    dict_path,
+                    allowlist_path,
+                    llm_detection=det,
+                    run_ner=used.get("ner", True),
+                )
+            # 新たに確定になった語（辞書一致）を共有選択に加える（他の手動選択は保持）。
+            # 辞書は get_masking_engine が毎回読み直すので、登録が反映された engine で auto を取る。
+            reloaded = get_masking_engine(tuple(models), dict_path)
+            stored["mask_sel"] = set(stored["mask_sel"]) | _auto_mask_spans(
+                reloaded, stored["analysis"]
+            )
+            stored["mask_ver"] = stored["mask_ver"] + 1
+            # 辞書 mtime が変わり settings_sig がズレる → 署名を更新して再読込バナーを出さない。
+            stored["settings_sig"] = _masking_settings_sig(
+                models, stored["flatten"], dict_path, allowlist_path
+            )
+            msg = f"辞書に {n_added} 件登録し、再マージして反映しました（確定＝自動マスク）。"
+            if skipped:
+                msg += (
+                    "　※辞書に登録できるカテゴリ（社名/商標/人名）でないため "
+                    f"{len(skipped)} 件を除外: {', '.join(skipped)}"
+                )
+            st.success(msg)
+            st.rerun()
+        elif skipped:
+            st.warning(
+                "選択した語は辞書に登録できるカテゴリ（社名/商標/人名）ではありません: "
+                + ", ".join(skipped)
+                + "。地名/連絡先/その他は 🚫 除外リスト で扱ってください。"
+            )
+        else:
+            st.info("選択した語はすでに辞書に登録済みです。")
 
     # 手動選択（auto からの差分）を文書単位で永続化（変化時のみ）。再起動/再解析で復元される。
     if stored.get("_draft_saved") != stored["mask_sel"]:
