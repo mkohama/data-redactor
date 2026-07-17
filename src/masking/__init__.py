@@ -23,6 +23,8 @@ from src.masking.dictionary import (
 from src.masking.dictionary import sort_key as dict_sort_key
 from src.masking.engine import (
     AUTO_MASK_CONFIDENCE,
+    BundleEntry,
+    BundleMaskResult,
     Candidate,
     CandidateGroup,
     MaskAnalysis,
@@ -42,6 +44,8 @@ __all__ = [
     "MaskingEngine",
     "MaskAnalysis",
     "MaskResult",
+    "BundleEntry",
+    "BundleMaskResult",
     "Candidate",
     "CandidateGroup",
     "MaskEntry",

@@ -304,6 +304,33 @@ class MaskResult:
     mapping: tuple[MaskEntry, ...]  # プレースホルダ ↔ 原語
 
 
+@dataclass(frozen=True)
+class BundleEntry:
+    """束（複数パート）で共有する対応表 1 件。設計 §3-1 の ``mapping[]``。
+
+    ``occurrences`` は ``(part_index, start, end)`` の列（各パートの**原文座標**）。同じ
+    プレースホルダが複数パート・複数箇所に出るため、どのパートのどこかを保持する（監査・再現用）。
+    ``confidence`` は内部（日本語）表現＝グループ代表の最良確信度（API 層で wire 変換）。
+    ``decided_by`` は決め手（``consensus``/``ner``/``llm``/``dict``/``session``/``regex``）。
+    """
+
+    placeholder: str
+    category: str
+    canonical: str
+    surfaces: tuple[str, ...]
+    confidence: str
+    decided_by: str
+    occurrences: tuple[tuple[int, int, int], ...]
+
+
+@dataclass(frozen=True)
+class BundleMaskResult:
+    """:meth:`MaskingEngine.mask_parts` の結果（各パートのマスク済み本文＋共有対応表）。"""
+
+    masked_texts: tuple[str, ...]  # 入力パートと同順のマスク済み本文
+    entries: tuple[BundleEntry, ...]  # 束で共有する対応表
+
+
 def unmask(text: str, mapping: Iterable[MaskEntry]) -> str:
     """マスク済み（＝LLM が返した）テキストを復元する。設計 §3-2。
 
@@ -608,6 +635,30 @@ class MaskingEngine:
         検出・展開は平坦化テキスト座標で行い、最後に :func:`_to_original_spans` で
         原文座標へ写してから原文を置換する（`|` 入りの原文を保ったままマスクする）。
         """
+        orig_spans = self.original_spans(analysis, selected, expand=expand)
+        original_text = analysis.original_text or analysis.text
+        mapping, span_placeholder = _assign_placeholders(orig_spans, self.dictionary)
+        masked_text = _apply_mask(original_text, orig_spans, span_placeholder)
+        return MaskResult(
+            text=original_text,
+            masked_text=masked_text,
+            masked=tuple(orig_spans),
+            mapping=mapping,
+        )
+
+    def original_spans(
+        self,
+        analysis: MaskAnalysis,
+        selected: Iterable[Candidate],
+        *,
+        expand: bool,
+    ) -> list[Candidate]:
+        """選択候補を（必要なら全出現に展開して）**原文座標**のスパン列にする。
+
+        :meth:`apply` の前半（展開＋座標写し）を切り出したもの。:meth:`mask_parts`（束の
+        共有プレースホルダ）や API 層の pending 位置算出でも同じ前処理を使うため共通化した
+        （採番だけを差し替える）。``expand=False`` なら渡した候補をそのまま原文座標へ写す。
+        """
         selected = list(selected)
         if expand:
             # 表層ごとに代表カテゴリを 1 つに（出現ごとに割れた種別を実体単位へ統一）。
@@ -630,16 +681,34 @@ class MaskingEngine:
 
         original_text = analysis.original_text or analysis.text
         offset_map = analysis.offset_map or tuple(range(len(analysis.text)))
-        orig_spans = _to_original_spans(spans, original_text, offset_map)
+        return _to_original_spans(spans, original_text, offset_map)
 
-        mapping, span_placeholder = _assign_placeholders(orig_spans, self.dictionary)
-        masked_text = _apply_mask(original_text, orig_spans, span_placeholder)
-        return MaskResult(
-            text=original_text,
-            masked_text=masked_text,
-            masked=tuple(orig_spans),
-            mapping=mapping,
+    def mask_parts(
+        self,
+        parts: Sequence[tuple[MaskAnalysis, Iterable[Candidate]]],
+        *,
+        expand: bool = True,
+    ) -> BundleMaskResult:
+        """複数パート（プロンプト＋複数ファイル等）を**束で共有する 1 つの対応表**でマスクする。
+
+        設計 §3-1 の ``POST /mask`` の核。各パートは独立に解析済み（``MaskAnalysis`` と選択候補）を
+        渡す。同じ canonical（表記ゆれ含む）は**全パートで同じプレースホルダ**（``[社1]`` は
+        どのパートでも ``[社1]``）に採番する＝LLM の誤解と unmask の曖昧を防ぐ。
+
+        戻り値は各パートの ``masked_text``（入力順）と、束で共有する ``entries``（プレースホルダ・
+        カテゴリ・canonical・確信度・decided_by・出現位置つき）。`/unmask` は entries だけで復元できる。
+        """
+        per_part_spans = [
+            self.original_spans(analysis, selected, expand=expand)
+            for analysis, selected in parts
+        ]
+        per_part_text = [(a.original_text or a.text) for a, _ in parts]
+        entries, per_part_ph = _assign_bundle_entries(per_part_spans, self.dictionary)
+        masked_texts = tuple(
+            _apply_mask(text, spans, ph)
+            for text, spans, ph in zip(per_part_text, per_part_spans, per_part_ph)
         )
+        return BundleMaskResult(masked_texts=masked_texts, entries=entries)
 
     def group_candidates(self, candidates: Iterable[Candidate]) -> list[CandidateGroup]:
         """候補を実体（**表層**）ごとにまとめる。
@@ -1329,6 +1398,89 @@ def _assign_placeholders(
         for sp in members:
             span_placeholder[(sp.start, sp.end)] = placeholder
     return tuple(mapping), span_placeholder
+
+
+# 系統（NER / LLM）に属さない決定的チャネル。decided_by 判定で「NER 系統の票があるか」を見るときに除く。
+_NON_SYSTEM_CHANNELS = frozenset({"dict", "session", "regex", "collected"})
+
+
+def _decided_by(votes: tuple[tuple[str, str], ...]) -> str:
+    """票集合から「決め手」を1語で返す（設計 §3-1 の ``mapping[].decided_by``）。
+
+    優先順：辞書（名簿）＞連絡先 regex ＞ NER∧LLM の合議（``consensus``）＞ LLM 単独 ＞ 昇格
+    （session）＞ NER 単独。``collected``（展開）票しか無い＝他所で確定した実体の全出現展開なので
+    NER 扱い（元の決め手は代表候補側が持つ）。
+    """
+    chans = {ch for ch, _ in votes}
+    if "dict" in chans:
+        return "dict"
+    if "regex" in chans:
+        return "regex"
+    has_ner = any(ch not in _NON_SYSTEM_CHANNELS and ch != "llm" for ch in chans)
+    has_llm = "llm" in chans
+    if has_ner and has_llm:
+        return "consensus"
+    if has_llm:
+        return "llm"
+    if "session" in chans:
+        return "session"
+    return "ner"
+
+
+def _assign_bundle_entries(
+    parts_spans: list[list[Candidate]],
+    dictionary: MaskDictionary,
+) -> tuple[tuple[BundleEntry, ...], list[dict[tuple[int, int], str]]]:
+    """束（複数パート）で **canonical ごとに共有プレースホルダ**を採番する。
+
+    :func:`_assign_placeholders`（単一パート）の束版。同じ canonical は全パートで同じ
+    プレースホルダになる（カテゴリ別の連番はパートをまたいで 1 本）。戻り値は共有 ``entries`` と、
+    パートごとの ``span→placeholder`` マップ（各パートの ``_apply_mask`` に渡す）。
+    """
+    groups: dict[str, list[tuple[int, Candidate]]] = {}
+    order: list[str] = []
+    group_canonical: dict[str, str | None] = {}
+    for part_index, spans in enumerate(parts_spans):
+        for sp in spans:
+            canonical = dictionary.canonical_of(sp.surface)
+            key = normalize(canonical) if canonical else normalize(sp.surface)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+                group_canonical[key] = canonical
+            groups[key].append((part_index, sp))
+
+    counters: dict[str, int] = {}
+    per_part_ph: list[dict[tuple[int, int], str]] = [{} for _ in parts_spans]
+    entries: list[BundleEntry] = []
+    for key in order:
+        members = [c for _, c in groups[key]]
+        rep = _representative(members)
+        category = rep.category
+        canonical = group_canonical[key]
+        custom = dictionary.custom_placeholder(canonical) if canonical else None
+        if custom:
+            placeholder = custom
+        else:
+            counters[category] = counters.get(category, 0) + 1
+            prefix = _PLACEHOLDER_PREFIX.get(category, "語")
+            placeholder = f"[{prefix}{counters[category]}]"
+        surfaces = tuple(dict.fromkeys(c.surface for _, c in groups[key]))
+        occurrences = tuple((pi, c.start, c.end) for pi, c in groups[key])
+        entries.append(
+            BundleEntry(
+                placeholder=placeholder,
+                category=category,
+                canonical=canonical or rep.surface,
+                surfaces=surfaces,
+                confidence=rep.confidence,
+                decided_by=_decided_by(rep.votes),
+                occurrences=occurrences,
+            )
+        )
+        for pi, c in groups[key]:
+            per_part_ph[pi][(c.start, c.end)] = placeholder
+    return tuple(entries), per_part_ph
 
 
 def _apply_mask(
