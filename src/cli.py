@@ -47,9 +47,10 @@ from src.sources import SAMPLE_TEXT, load_chunks_from_file
 _ROOT = Path(__file__).resolve().parent.parent
 # マスク辞書の既定パス
 _DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
-# pii-masker（submodule）追従に使う場所。detector_version は app.py に焼き込まれている。
+# pii-masker（submodule）追従に使う場所。detector_version の静的部分（pii-masker@<hash>）は
+#   src/detector.py（UI 非依存の共有モジュール）に焼き込まれている（旧 app.py から移設済み）。
 _SUBMODULE = _ROOT / "external" / "pii-masker"
-_APP_PY = _ROOT / "app.py"
+_DETECTOR_FILE = _ROOT / "src" / "detector.py"
 _DETECTOR_HASH_RE = re.compile(r"pii-masker@([0-9a-fA-F]+)")
 
 
@@ -585,11 +586,11 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
     """pii-masker（submodule）を更新し、detector_version の追従と検証をまとめて行う。
 
     機械的な手順を自動化する：① submodule のポインタ更新（REF 省略時は追跡ブランチの最新／
-    REF 指定でそのコミット・タグへ）→ ② 新 HEAD の短縮ハッシュ取得 → ③ app.py の
+    REF 指定でそのコミット・タグへ）→ ② 新 HEAD の短縮ハッシュ取得 → ③ src/detector.py の
     _DETECTOR_STATIC の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュを自動ミスさせる）
     → ④ ENE type ドリフト警告と submodule の変更点表示 → ⑤ ruff/mypy/pytest。
 
-    **コミットはしない**（submodule ポインタと app.py を stage するだけ）。インターフェース契約・
+    **コミットはしない**（submodule ポインタと src/detector.py を stage するだけ）。インターフェース契約・
     ENE マップ更新・実機 e2e（az login）は人手で確認してからコミットすること（ENE マップは版バンプ不要）。
     """
     from src.masking.engine import _ENE_TO_CATEGORY
@@ -600,8 +601,8 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
             "先に `git submodule update --init` を実行してください。"
         )
 
-    app_text = _APP_PY.read_text(encoding="utf-8")
-    m = _DETECTOR_HASH_RE.search(app_text)
+    detector_text = _DETECTOR_FILE.read_text(encoding="utf-8")
+    m = _DETECTOR_HASH_RE.search(detector_text)
     old_hash = m.group(1) if m else None
     click.echo(f"現在の detector_version ハッシュ: {old_hash or '（不明）'}")
 
@@ -631,14 +632,17 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
         click.echo("detector_version のハッシュは最新です（書き換え不要）。")
     elif old_hash is None:
         click.echo(
-            "⚠ app.py に pii-masker@<hash> が見つからず書き換えできませんでした。手動で確認してください。"
+            "⚠ src/detector.py に pii-masker@<hash> が見つからず書き換えできませんでした。"
+            "手動で確認してください。"
         )
     else:
-        app_text = _DETECTOR_HASH_RE.sub(f"pii-masker@{new_hash}", app_text, count=1)
-        _APP_PY.write_text(app_text, encoding="utf-8")
+        detector_text = _DETECTOR_HASH_RE.sub(
+            f"pii-masker@{new_hash}", detector_text, count=1
+        )
+        _DETECTOR_FILE.write_text(detector_text, encoding="utf-8")
         click.echo(
-            f"app.py の detector_version を pii-masker@{old_hash} → pii-masker@{new_hash} "
-            "に書き換えました（LLM キャッシュが自動ミス→再取得になります）。"
+            f"src/detector.py の detector_version を pii-masker@{old_hash} → "
+            f"pii-masker@{new_hash} に書き換えました（LLM キャッシュが自動ミス→再取得になります）。"
         )
 
     # ④-a submodule の変更点（契約 / プロンプトを目視するための手がかり）
@@ -681,9 +685,10 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
             )
 
     # ⑤ stage（コミットはしない）
-    subprocess.call(["git", "add", "external/pii-masker", "app.py"], cwd=_ROOT)
+    subprocess.call(["git", "add", "external/pii-masker", "src/detector.py"], cwd=_ROOT)
     click.echo(
-        "\nstage しました（external/pii-masker, app.py）。コミットは目視確認後に手動で。"
+        "\nstage しました（external/pii-masker, src/detector.py）。"
+        "コミットは目視確認後に手動で。"
     )
 
     # ⑥ 検証
