@@ -173,6 +173,40 @@ def ui(streamlit_args: tuple[str, ...]) -> None:
     raise SystemExit(code)
 
 
+@cli.command(
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True}
+)
+@click.option("--host", default="127.0.0.1", show_default=True, help="待受ホスト。")
+@click.option("--port", default=8000, show_default=True, type=int, help="待受ポート。")
+@click.option(
+    "--reload", "reload_", is_flag=True, help="コード変更でホットリロード（開発用）。"
+)
+@click.argument("uvicorn_args", nargs=-1, type=click.UNPROCESSED)
+def serve(host: str, port: int, reload_: bool, uvicorn_args: tuple[str, ...]) -> None:
+    """マスキング HTTP API を起動する（`uvicorn src.api.app:app` のラッパ）。
+
+    起動時に GiNZA モデルを 1 回ロードし、`data/cache.db` を単一所有する（設計 B）。
+    追加引数はそのまま uvicorn に渡す。例: `data-redactor serve --port 8001`
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "src.api.app:app",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        *(["--reload"] if reload_ else []),
+        *uvicorn_args,
+    ]
+    try:
+        code = subprocess.call(cmd)
+    except KeyboardInterrupt:
+        code = 0  # Ctrl+C はサーバ停止の通常手順。正常終了として扱う。
+    raise SystemExit(code)
+
+
 @cli.command()
 @click.argument(
     "file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path)
