@@ -319,6 +319,32 @@ uv run data-redactor check
 
 ---
 
+## マスキング HTTP API（`serve`）
+
+外部アプリ向けに、マスク（伏せ字化）と復元を HTTP で提供します
+（設計 [docs-dev/mask-http-api設計.md] の「B：1エンジン・多クライアント」。エンジン＝GiNZA モデルと
+`cache.db` の所有者を 1 プロセスに集約）。
+
+```powershell
+uv run data-redactor serve                 # 既定 http://127.0.0.1:8000
+uv run data-redactor serve --port 8001     # ポート変更
+```
+
+最小面のエンドポイント:
+
+| メソッド | パス | 役割 |
+| --- | --- | --- |
+| GET  | `/health` | 死活・モデルロード状態 |
+| GET  | `/config` | 既定モデル・`detector_version`・選択肢 |
+| POST | `/mask`   | parts（text / content_hash / 同梱ファイル）→ 束共有 mapping でマスク |
+| POST | `/unmask` | text＋mapping → 復元 |
+
+典型的な使い方は **`/mask` → LLM 呼び出し → `/unmask`**（LLM には伏せ字のまま渡す）。
+Python クライアント `MaskClient` と curl 例・実行できるデモを [examples/](examples/) に置いています
+（`uv run python examples/roundtrip_demo.py`）。
+
+---
+
 ## マスク辞書・除外リスト・キャッシュ（ローカル専用）
 
 機密のため、`data/*.yaml` と `data/cache.db` は **git 管理外**です。各マシンで用意します。
