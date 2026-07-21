@@ -24,9 +24,16 @@ from src.api.enums import (
     confidences_at_or_above,
 )
 from src.api.models import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    ApplyRequest,
+    ApplyResponse,
+    CandidateGroupEntry,
     DetectorInfo,
     DocumentDetail,
     DocumentInfo,
+    DraftBody,
+    GroupOccurrence,
     MappingEntry,
     MaskedPart,
     MaskRequest,
@@ -52,7 +59,7 @@ from src.masking import (
     vote_category,
 )
 from src.masking.cache import DocInfo
-from src.masking.engine import Candidate
+from src.masking.engine import BundleMaskResult, Candidate
 from src.sources.files import load_chunks_from_file
 
 # NER 系統に属さないチャネル（decided_by / 系統別 votes の判定で除外する）。
@@ -233,21 +240,55 @@ def _build_pending(
     return [merged[k] for k in order]
 
 
-def run_mask(
-    ctx: ApiContext, req: MaskRequest, files: dict[str, tuple[str, bytes]]
-) -> MaskResponse:
-    """``POST /mask`` の中身。parts をバンドル共有の対応表でマスクして返す（設計 §3-1）。"""
-    if req.detection not in DETECTION_MODES:
-        raise HTTPException(422, f"未知の detection です: {req.detection!r}")
-    if req.mask_level not in MASK_LEVELS:
-        raise HTTPException(422, f"未知の mask_level です: {req.mask_level!r}")
-    if req.models is not None and set(req.models) != set(ctx.model_names):
-        # M2 はサーバ起動時にロードした固定モデルのみ（部分指定は M5 で対応。黙って無視しない）。
+# --------------------------------------------------------------------------- #
+# 共通バリデーション・mapping 整形（/mask と /analyze・/apply で共有）。
+# --------------------------------------------------------------------------- #
+def _validate_detection(detection: str) -> None:
+    if detection not in DETECTION_MODES:
+        raise HTTPException(422, f"未知の detection です: {detection!r}")
+
+
+def _validate_mask_level(mask_level: str) -> None:
+    if mask_level not in MASK_LEVELS:
+        raise HTTPException(422, f"未知の mask_level です: {mask_level!r}")
+
+
+def _validate_models(ctx: ApiContext, models: list[str] | None) -> None:
+    if models is not None and set(models) != set(ctx.model_names):
+        # 起動時ロードの固定モデルのみ（部分指定は未対応。黙って無視しない）。
         raise HTTPException(
             422,
             "このビルドでは models の部分指定に未対応です"
             f"（利用可能: {list(ctx.model_names)}）。省略してください",
         )
+
+
+def _wire_mapping(bundle: BundleMaskResult, part_ids: list[str]) -> list[MappingEntry]:
+    """BundleMaskResult の entries を wire の MappingEntry に整形する（/mask・/apply 共通）。"""
+    return [
+        MappingEntry(
+            placeholder=e.placeholder,
+            category=e.category,
+            canonical=e.canonical,
+            surfaces=list(e.surfaces),
+            confidence=confidence_to_wire(e.confidence),
+            decided_by=e.decided_by,
+            occurrences=[
+                Occurrence(part=part_ids[pi], span=(s, en))
+                for pi, s, en in e.occurrences
+            ],
+        )
+        for e in bundle.entries
+    ]
+
+
+def run_mask(
+    ctx: ApiContext, req: MaskRequest, files: dict[str, tuple[str, bytes]]
+) -> MaskResponse:
+    """``POST /mask`` の中身。parts をバンドル共有の対応表でマスクして返す（設計 §3-1）。"""
+    _validate_detection(req.detection)
+    _validate_mask_level(req.mask_level)
+    _validate_models(ctx, req.models)
 
     parts = _normalize_parts(req)
     part_results = [
@@ -269,21 +310,7 @@ def run_mask(
         MaskedPart(id=p.id, masked_text=text)
         for p, text in zip(parts, bundle.masked_texts)
     ]
-    mapping = [
-        MappingEntry(
-            placeholder=e.placeholder,
-            category=e.category,
-            canonical=e.canonical,
-            surfaces=list(e.surfaces),
-            confidence=confidence_to_wire(e.confidence),
-            decided_by=e.decided_by,
-            occurrences=[
-                Occurrence(part=parts[pi].id, span=(s, en))
-                for pi, s, en in e.occurrences
-            ],
-        )
-        for e in bundle.entries
-    ]
+    mapping = _wire_mapping(bundle, [p.id for p in parts])
     pending = (
         _build_pending(ctx, part_results, parts, req.mask_level)
         if req.return_pending
@@ -413,3 +440,106 @@ def patch_document(ctx: ApiContext, chash: str, source_kind: str) -> DocumentInf
     updated = _find_doc(ctx, chash)
     assert updated is not None  # 直前に存在を確認済み
     return _doc_info(ctx, updated)
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/documents/{hash}/analyze・/apply・/draft（設計 §3-3〜§3-4）。
+# analyze/apply は取込済みチャンクを（NER キャッシュ越しに）解析し直す＝ステートレス。
+# span は解析（平坦化後）座標で、analyze の occurrences と apply の selection は同座標系。
+# --------------------------------------------------------------------------- #
+def _require_chunks(ctx: ApiContext, chash: str) -> list[str]:
+    chunks = ctx.cache.get_chunks(chash)
+    if chunks is None:
+        raise HTTPException(404, f"未取込の content_hash です: {chash}")
+    return chunks
+
+
+def _group_votes(group: CandidateGroup) -> dict[str, str]:
+    """実体グループの票を {channel: ラベル（重複は ' / ' 連結）} にまとめる（表示用）。"""
+    per_channel: dict[str, list[str]] = {}
+    for ch, label in group.votes:
+        labels = per_channel.setdefault(ch, [])
+        if label not in labels:
+            labels.append(label)
+    return {ch: " / ".join(labels) for ch, labels in per_channel.items()}
+
+
+def run_analyze(ctx: ApiContext, chash: str, req: AnalyzeRequest) -> AnalyzeResponse:
+    """``POST /documents/{hash}/analyze``＝候補一覧＋既定選択を返す（設計 §3-3）。"""
+    chunks = _require_chunks(ctx, chash)
+    _validate_detection(req.detection)
+    _validate_mask_level(req.mask_level)
+    _validate_models(ctx, req.models)
+    _analysis, selected, groups = _analyze_part(
+        ctx,
+        chunks,
+        detection=req.detection,
+        flatten=req.flatten_tables,
+        mask_level=req.mask_level,
+        refresh=req.refresh,
+    )
+    group_entries = [
+        CandidateGroupEntry(
+            surface=g.surface,
+            category=g.category,
+            confidence=confidence_to_wire(g.confidence),
+            count=g.count,
+            votes=_group_votes(g),
+            occurrences=[
+                GroupOccurrence(
+                    span=(m.start, m.end),
+                    confidence=confidence_to_wire(m.confidence),
+                )
+                for m in g.members
+            ],
+        )
+        for g in groups
+    ]
+    auto = list(dict.fromkeys((c.start, c.end) for c in selected))
+    return AnalyzeResponse(groups=group_entries, auto_selection=auto)
+
+
+def run_apply(ctx: ApiContext, chash: str, req: ApplyRequest) -> ApplyResponse:
+    """``POST /documents/{hash}/apply``＝選択 span からマスク結果を作る（設計 §3-4）。
+
+    analyze と同じ検出条件で解析し直し（NER はキャッシュ命中で一瞬）、選択に一致する候補だけを
+    出現ごと（expand=False）でマスクする。mapping は /mask と同じ形＝そのまま /unmask に渡せる。
+    """
+    chunks = _require_chunks(ctx, chash)
+    _validate_detection(req.detection)
+    _validate_models(ctx, req.models)
+    analysis, _selected, _groups = _analyze_part(
+        ctx,
+        chunks,
+        detection=req.detection,
+        flatten=req.flatten_tables,
+        mask_level="strong",  # apply は selection を使うので閾値は無関係（既定でよい）
+    )
+    sel = {(s, e) for s, e in req.selection}
+    selected = [c for c in analysis.candidates if (c.start, c.end) in sel]
+    bundle = ctx.engine.mask_parts([(analysis, selected)], expand=False)
+    return ApplyResponse(
+        masked_text=bundle.masked_texts[0],
+        mapping=_wire_mapping(bundle, ["_"]),
+    )
+
+
+def get_document_draft(ctx: ApiContext, chash: str) -> DraftBody:
+    """``GET /documents/{hash}/draft``＝手動選択差分を返す（無ければ空）。未取込は 404。"""
+    _require_chunks(ctx, chash)
+    draft = ctx.cache.get_draft(chash)
+    if draft is None:
+        return DraftBody()
+    added, removed = draft
+    return DraftBody(added=sorted(added), removed=sorted(removed))
+
+
+def save_document_draft(ctx: ApiContext, chash: str, body: DraftBody) -> DraftBody:
+    """``PUT /documents/{hash}/draft``＝手動選択差分を保存する。未取込は 404。"""
+    _require_chunks(ctx, chash)
+    ctx.cache.save_draft(
+        chash,
+        {(s, e) for s, e in body.added},
+        {(s, e) for s, e in body.removed},
+    )
+    return get_document_draft(ctx, chash)

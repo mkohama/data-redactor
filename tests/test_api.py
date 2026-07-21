@@ -409,3 +409,73 @@ def test_documents_patch_source_kind(client: TestClient) -> None:
     h = client.post("/documents", json={"text": "SONYの話。"}).json()["content_hash"]
     r = client.patch(f"/documents/{h}", json={"source_kind": "kb"})
     assert r.status_code == 200 and r.json()["source_kind"] == "kb"
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/analyze・/apply・/draft（M5b）
+# --------------------------------------------------------------------------- #
+def _ingest(client: TestClient, text: str) -> str:
+    return client.post("/documents", json={"text": text}).json()["content_hash"]
+
+
+def test_analyze_groups_shape(client: TestClient) -> None:
+    """analyze は実体グループ（surface/category/confidence/count/votes/occurrences）を返す。"""
+    h = _ingest(client, "SONYとSONYの再掲。Canonも。")
+    body = client.post(
+        f"/documents/{h}/analyze", json={"detection": "ner", "mask_level": "medium"}
+    ).json()
+    sony = next(g for g in body["groups"] if g["surface"] == "SONY")
+    assert sony["category"] == "社名" and sony["confidence"] == "certain"
+    assert sony["count"] >= 2 and len(sony["occurrences"]) >= 2
+    assert sony["votes"].get("dict")  # 辞書一致の票
+    # auto_selection は解析座標の span 集合（辞書一致は既定選択に入る）。
+    assert body["auto_selection"]
+
+
+def test_analyze_apply_unmask_roundtrip(client: TestClient) -> None:
+    """analyze の auto_selection をそのまま apply → masked_text、mapping で unmask 復元。"""
+    h = _ingest(client, "SONYとCanonの比較。")
+    a = client.post(
+        f"/documents/{h}/analyze", json={"detection": "ner", "mask_level": "medium"}
+    ).json()
+    ap = client.post(
+        f"/documents/{h}/apply",
+        json={"selection": a["auto_selection"], "detection": "ner"},
+    )
+    assert ap.status_code == 200
+    masked = ap.json()["masked_text"]
+    assert "SONY" not in masked and "Canon" not in masked
+
+    u = client.post("/unmask", json={"text": masked, "mapping": ap.json()["mapping"]})
+    assert u.json()["restored_text"] == "SONYとCanonの比較。"
+
+
+def test_apply_empty_selection_masks_nothing(client: TestClient) -> None:
+    h = _ingest(client, "SONYの話。")
+    ap = client.post(
+        f"/documents/{h}/apply", json={"selection": [], "detection": "ner"}
+    ).json()
+    assert ap["masked_text"] == "SONYの話。" and ap["mapping"] == []
+
+
+def test_analyze_404_unknown_hash(client: TestClient) -> None:
+    r = client.post("/documents/deadbeef/analyze", json={"detection": "ner"})
+    assert r.status_code == 404
+
+
+def test_analyze_422_bad_detection(client: TestClient) -> None:
+    h = _ingest(client, "a")
+    r = client.post(f"/documents/{h}/analyze", json={"detection": "bogus"})
+    assert r.status_code == 422
+
+
+def test_draft_get_empty_then_save_roundtrip(client: TestClient) -> None:
+    h = _ingest(client, "SONYの話。")
+    assert client.get(f"/documents/{h}/draft").json() == {"added": [], "removed": []}
+    client.put(f"/documents/{h}/draft", json={"added": [[0, 3]], "removed": [[5, 7]]})
+    d = client.get(f"/documents/{h}/draft").json()
+    assert [0, 3] in d["added"] and [5, 7] in d["removed"]
+
+
+def test_draft_404_unknown_hash(client: TestClient) -> None:
+    assert client.get("/documents/deadbeef/draft").status_code == 404

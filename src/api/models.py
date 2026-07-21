@@ -148,3 +148,73 @@ class DocumentPatch(BaseModel):
     """``PATCH /documents/{hash}``＝メタ更新（現状は source_kind のみ。D3）。"""
 
     source_kind: str
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/documents/{hash}/analyze・/apply・/draft（設計 §3-3〜§3-4・レビュー UI 用）。
+# span は「解析（平坦化後）座標」＝候補のオフセット。analyze の occurrences/auto_selection と
+# apply の selection は同じ座標系で、選択の部分集合をそのまま渡せる（案2）。
+# --------------------------------------------------------------------------- #
+class AnalyzeRequest(BaseModel):
+    """``POST /documents/{hash}/analyze`` のリクエスト（設計 §3-3）。"""
+
+    detection: str = DEFAULT_DETECTION
+    mask_level: str = DEFAULT_MASK_LEVEL
+    flatten_tables: bool = True
+    models: list[str] | None = None
+    refresh: bool = False  # True でキャッシュ無視の強制再解析（D2）
+
+
+class GroupOccurrence(BaseModel):
+    """実体グループの 1 出現（解析座標の span と、その出現の確信度）。"""
+
+    span: tuple[int, int]
+    confidence: str  # wire（ASCII）
+
+
+class CandidateGroupEntry(BaseModel):
+    """マスク候補の実体グループ 1 件（設計 §3-3 の ``groups[]``）。"""
+
+    surface: str
+    category: str
+    confidence: str  # wire（ASCII）＝出現中の最良
+    count: int
+    votes: dict[
+        str, str
+    ]  # {channel: ラベル}（例 {"ja_ginza": "Company", "llm": "Company"}）
+    occurrences: list[GroupOccurrence]
+
+
+class AnalyzeResponse(BaseModel):
+    """``POST /documents/{hash}/analyze`` のレスポンス（設計 §3-3）。"""
+
+    groups: list[CandidateGroupEntry]
+    # mask_level に基づく既定選択（実体単位・案2）。解析座標の span 集合。
+    auto_selection: list[tuple[int, int]]
+
+
+class ApplyRequest(BaseModel):
+    """``POST /documents/{hash}/apply`` のリクエスト（設計 §3-4）。
+
+    ``selection`` は人が編集した最終選択（解析座標の span 集合）。analyze と同じ検出条件で
+    再解析して座標を一致させるため、``detection`` / ``flatten_tables`` / ``models`` も受ける。
+    """
+
+    selection: list[tuple[int, int]]
+    detection: str = DEFAULT_DETECTION
+    flatten_tables: bool = True
+    models: list[str] | None = None
+
+
+class ApplyResponse(BaseModel):
+    """``POST /documents/{hash}/apply`` のレスポンス（masked_text＋復元用 mapping）。"""
+
+    masked_text: str
+    mapping: list[MappingEntry]  # /mask と同じ形＝そのまま /unmask に渡せる
+
+
+class DraftBody(BaseModel):
+    """手動選択差分（auto からの add/remove）。GET/PUT /documents/{hash}/draft で共有。"""
+
+    added: list[tuple[int, int]] = Field(default_factory=list)
+    removed: list[tuple[int, int]] = Field(default_factory=list)

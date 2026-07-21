@@ -40,10 +40,15 @@ from src.api.enums import (
     MASK_LEVELS,
 )
 from src.api.models import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    ApplyRequest,
+    ApplyResponse,
     DocumentDetail,
     DocumentIngestRequest,
     DocumentInfo,
     DocumentPatch,
+    DraftBody,
     MaskRequest,
     MaskResponse,
     UnmaskRequest,
@@ -54,12 +59,16 @@ from src.api.service import (
     ApiContext,
     delete_document,
     get_document,
+    get_document_draft,
     ingest_file,
     ingest_text,
     list_documents,
     patch_document,
+    run_analyze,
+    run_apply,
     run_mask,
     run_unmask,
+    save_document_draft,
 )
 from src.detector import LLM_MODEL, detector_version
 from src.masking import MaskAllowlist, MaskDictionary, MaskingEngine, NerCache
@@ -224,6 +233,22 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
     @app.patch("/documents/{content_hash}", response_model=DocumentInfo)
     def documents_patch(content_hash: str, patch: DocumentPatch) -> DocumentInfo:
         return patch_document(app.state.ctx, content_hash, patch.source_kind)
+
+    @app.post("/documents/{content_hash}/analyze", response_model=AnalyzeResponse)
+    def documents_analyze(content_hash: str, req: AnalyzeRequest) -> AnalyzeResponse:
+        return run_analyze(app.state.ctx, content_hash, req)
+
+    @app.post("/documents/{content_hash}/apply", response_model=ApplyResponse)
+    def documents_apply(content_hash: str, req: ApplyRequest) -> ApplyResponse:
+        return run_apply(app.state.ctx, content_hash, req)
+
+    @app.get("/documents/{content_hash}/draft", response_model=DraftBody)
+    def documents_get_draft(content_hash: str) -> DraftBody:
+        return get_document_draft(app.state.ctx, content_hash)
+
+    @app.put("/documents/{content_hash}/draft", response_model=DraftBody)
+    def documents_put_draft(content_hash: str, body: DraftBody) -> DraftBody:
+        return save_document_draft(app.state.ctx, content_hash, body)
 
     return app
 
