@@ -883,23 +883,31 @@ def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
     return to_exclude, excl, to_register, reg
 
 
-def render_dict_editor(dict_path: str) -> None:
+def render_dict_editor() -> None:
     """マスク辞書の確認・追加・編集・保存 UI（独立タブ）。
 
-    行を編集/追加/削除して保存すると `data/mask_dict.yaml`（dict_path）へ書き出す。
+    辞書ファイルはサーバが所有する（設計 B）。読み書きは API 経由で行い、
+    行を編集/追加/削除して保存すると PUT /dictionary でサーバへ書き出す。
     「置換」列に値を入れると、その実体のマスク後の伏せ字を固定できる（空なら自動採番）。
     """
     st.caption(
         "カテゴリ / 代表表記 / 別名（カンマ区切り）/ 置換（任意。空なら `[社1]` 等を自動採番）。"
-        "**保存先はローカルの辞書ファイル**（機密・git 管理外）。"
+        "**保存先はサーバ側の辞書ファイル**（機密・git 管理外）。"
     )
     st.caption(
         "📝 **追加**＝一番下の空行に入力。"
         "🗑 **削除**＝左端のチェックを ON → キーボードの **Delete / Backspace** キー"
-        "（または表右上のゴミ箱）。いずれも **[💾 辞書を保存] を押すまでファイルには反映されません**。"
+        "（または表右上のゴミ箱）。いずれも **[💾 辞書を保存] を押すまでサーバには反映されません**。"
     )
-    path = Path(dict_path)
-    entries = load_entries(path) if path.exists() else []
+    client = _mask_client(MASK_API_URL)
+    try:
+        entries = client.get_dictionary()["entries"]
+    except (MaskApiError, httpx.HTTPError) as e:
+        st.error(
+            "マスク辞書を取得できません（API 未接続）。サイドバー上部の接続状態を確認してください。"
+        )
+        st.caption(f"詳細: {e}")
+        return
     # 既定でセクション順（社名→商標→人名→その他）＋各内を代表表記の辞書順に表示（保存も同順）。
     _section_rank = {"社名": 0, "商標": 1, "人名": 2}
     entries = sorted(
@@ -973,8 +981,15 @@ def render_dict_editor(dict_path: str) -> None:
             for _, r in edited.iterrows()
         ]
         kept = [e for e in new_entries if e["canonical"]]
-        save_entries(path, kept)
-        st.success(f"保存しました: {path}（{len(kept)} 件）")
+        try:
+            client.put_dictionary(kept)
+        except (MaskApiError, httpx.HTTPError) as e:
+            st.error("マスク辞書を保存できませんでした（API 未接続）。")
+            st.caption(f"詳細: {e}")
+        else:
+            st.success(
+                f"サーバに保存しました（{len(kept)} 件）。以降の解析に即反映されます。"
+            )
 
 
 def render_cache_view() -> None:
@@ -1062,20 +1077,28 @@ def render_cache_view() -> None:
         st.rerun()
 
 
-def render_allowlist_editor(allowlist_path: str) -> None:
+def render_allowlist_editor() -> None:
     """除外リストの確認・追加・編集・保存 UI（独立タブ）。
 
-    マスク辞書と同様、行を編集/追加/削除して保存すると `data/mask_allowlist.yaml` へ書き出す。
+    除外リストファイルはサーバが所有する（設計 B）。読み書きは API 経由で行い、
+    行を編集/追加/削除して保存すると PUT /allowlist でサーバへ書き出す。
     1 列（除外語）だけのフラットなリスト。
     """
     st.caption(
         "📝 **追加**＝一番下の空行に語を入力。"
         "🗑 **削除**＝左端のチェックを ON → **Delete / Backspace**（または表右上のゴミ箱）。"
-        "いずれも **[💾 除外リストを保存] を押すまでファイルには反映されません**。"
-        "**保存先はローカルファイル**（機密・git 管理外）。"
+        "いずれも **[💾 除外リストを保存] を押すまでサーバには反映されません**。"
+        "**保存先はサーバ側のファイル**（機密・git 管理外）。"
     )
-    path = Path(allowlist_path)
-    entries = load_allowlist_entries(path) if path.exists() else []
+    client = _mask_client(MASK_API_URL)
+    try:
+        entries = client.get_allowlist()["entries"]
+    except (MaskApiError, httpx.HTTPError) as e:
+        st.error(
+            "除外リストを取得できません（API 未接続）。サイドバー上部の接続状態を確認してください。"
+        )
+        st.caption(f"詳細: {e}")
+        return
     entries = sorted(
         entries, key=lambda e: allowlist_sort_key(e["surface"])
     )  # 既定で辞書順表示（保存も同順）
@@ -1123,8 +1146,15 @@ def render_allowlist_editor(allowlist_path: str) -> None:
             )
             if not pd.isna(s) and str(s).strip()
         ]
-        save_allowlist_entries(path, kept)
-        st.success(f"保存しました: {path}（{len(kept)} 件）")
+        try:
+            client.put_allowlist(kept)
+        except (MaskApiError, httpx.HTTPError) as e:
+            st.error("除外リストを保存できませんでした（API 未接続）。")
+            st.caption(f"詳細: {e}")
+        else:
+            st.success(
+                f"サーバに保存しました（{len(kept)} 件）。以降の解析に即反映されます。"
+            )
 
 
 def analyze_masking(
@@ -1857,32 +1887,30 @@ def main() -> None:
             render_cache_view()
             return
         # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
+        # 辞書ファイルはサーバ所有（設計 B）＝パスはクライアントで指定しない。
         if dict_mode:
             with st.sidebar:
                 st.header("⚙️ 設定")
-                dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
             st.title("📒 マスク辞書")
             st.caption(
                 "マスキングで確定マスクする社名・商標・社員名の名簿。"
                 "確認・追加・編集・保存ができます。"
             )
-            render_dict_editor(dict_path)
+            render_dict_editor()
             return
 
         # --- 除外リストモード（文書入力なし。除外語の確認・編集・保存だけ） ---
+        # 除外リストファイルもサーバ所有（設計 B）＝パスはクライアントで指定しない。
         if allowlist_mode:
             with st.sidebar:
                 st.header("⚙️ 設定")
-                allowlist_path = st.text_input(
-                    "除外リスト (YAML)", value=str(_DEFAULT_ALLOWLIST)
-                )
             st.title("🚫 除外リスト")
             st.caption(
                 "マスク**しない**語の名簿。NER の誤検出（社内コード・変数名・汎用語・誤検出メール"
                 "など）をここに入れると、以後どの文書でも候補が「除外」へ落ちます。"
                 "**辞書（名簿）は上書きしません**（recall 安全。連絡先 regex の誤検出は除外可）。"
             )
-            render_allowlist_editor(allowlist_path)
+            render_allowlist_editor()
             return
 
     # --- サイドバー（モード別の設定） ---
