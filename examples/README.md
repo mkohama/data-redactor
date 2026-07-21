@@ -2,8 +2,9 @@
 
 `data-redactor serve` で立てたマスキング HTTP API を外部アプリから使うための最小サンプル。
 
-- [mask_client.py](mask_client.py) … Python クライアント `MaskClient`（依存は `httpx` だけ・`src` 非依存）。
-  そのままコピーして自分のアプリに組み込める。
+- クライアント本体は [../src/client/mask_client.py](../src/client/mask_client.py) の `MaskClient`
+  （UI＝app.py も外部アプリもこれを使う。依存は `httpx` だけ・`src` 非依存）。
+  リポジトリ内では `from src.client import MaskClient`。外部アプリはこの 1 ファイルをコピーすれば使える。
 - [roundtrip_demo.py](roundtrip_demo.py) … 一連の流れ **`/mask` → LLM 呼び出し（モック）→ `/unmask`** の実演。
 
 設計の正本は [../docs-dev/mask-http-api設計.md](../docs-dev/mask-http-api設計.md) §3-1（/mask）・§3-2（/unmask）。
@@ -140,7 +141,7 @@ curl -X POST http://127.0.0.1:8000/unmask \
 ### 最小（単一テキスト）
 
 ```python
-from mask_client import MaskClient   # examples/ 内。自分のアプリでは相対 import を調整
+from src.client import MaskClient   # 外部アプリは src/client/mask_client.py をコピーして import 調整
 
 with MaskClient("http://127.0.0.1:8000") as client:
     res = client.mask(text="担当は佐藤。SONYと比較。", detection="ner", mask_level="medium")

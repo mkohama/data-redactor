@@ -340,7 +340,8 @@ uv run data-redactor serve --port 8001     # ポート変更
 | POST | `/unmask` | text＋mapping → 復元 |
 
 典型的な使い方は **`/mask` → LLM 呼び出し → `/unmask`**（LLM には伏せ字のまま渡す）。
-Python クライアント `MaskClient` と curl 例・実行できるデモを [examples/](examples/) に置いています
+Python クライアント `MaskClient` は [src/client/](src/client/)（`from src.client import MaskClient`。
+UI も外部アプリもこれを使う）。curl 例・実行できるデモは [examples/](examples/)
 （`uv run python examples/roundtrip_demo.py`）。
 
 ---

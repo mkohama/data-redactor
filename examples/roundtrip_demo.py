@@ -41,9 +41,9 @@ from pathlib import Path
 
 import httpx
 
-# python examples/roundtrip_demo.py で実行すると examples/ が sys.path[0] になる
-# （同ディレクトリの mask_client を直接 import できる）。
-from mask_client import MaskApiError, MaskClient, Mapping
+# クライアントは src/client（＝サーバ src/api に対するクライアント）。uv 環境では
+# src はインストール済みパッケージなので、examples から実行しても import できる。
+from src.client import MaskApiError, MaskClient, Mapping
 
 # マスク済みテキストに現れるプレースホルダ（[社1] / [人物1] …）を拾う。
 _PLACEHOLDER = re.compile(r"\[[^\[\]]+?\d+\]")
