@@ -130,8 +130,12 @@ def _analyze_part(
     detection: str,
     flatten: bool,
     mask_level: str,
+    refresh: bool = False,
 ) -> tuple[MaskAnalysis, list[Candidate], list[CandidateGroup]]:
-    """1 part を解析し、(解析結果, 自動選択候補, 実体グループ) を返す。"""
+    """1 part を解析し、(解析結果, 自動選択候補, 実体グループ) を返す。
+
+    ``refresh=True`` はキャッシュを無視して NER/LLM とも強制再解析する（結果で上書き）。
+    """
     run_ner = detection in ("ner", "both")
     use_llm = detection in ("llm", "both")
     if run_ner and not ctx.models_ready:
@@ -142,7 +146,9 @@ def _analyze_part(
     llm_detection = None
     if use_llm:
         try:
-            _, llm_detection = run_llm_detection(ctx.cache, chunks, flatten)
+            _, llm_detection = run_llm_detection(
+                ctx.cache, chunks, flatten, force=refresh
+            )
         except (openai.OpenAIError, ImportError) as e:
             raise HTTPException(
                 502, f"LLM 検出に失敗しました（資格情報・接続を確認）: {e}"
@@ -153,6 +159,7 @@ def _analyze_part(
         flatten_tables=flatten,
         allowlist=ctx.allowlist,
         ner_cache=ctx.cache,
+        refresh_cache=refresh,
         llm_detection=llm_detection,
         run_ner=run_ner,
     )
@@ -246,6 +253,7 @@ def run_mask(
             detection=req.detection,
             flatten=req.flatten_tables,
             mask_level=req.mask_level,
+            refresh=req.refresh,
         )
         for p in parts
     ]

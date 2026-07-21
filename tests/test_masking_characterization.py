@@ -12,6 +12,7 @@ import pytest
 
 from src.llm.schema import LlmDetection, LlmSpan
 from src.masking.allowlist import MaskAllowlist
+from src.masking.cache import NerCache
 from src.masking.dictionary import MaskDictionary, normalize
 from src.masking.engine import MaskingEngine, _looks_like_code
 from src.ner.preprocess import build_body
@@ -138,3 +139,42 @@ def test_llm_only_path_runs_without_ginza() -> None:
         for ch, _ in c.votes
     )
     assert a.timings == ()  # モデルを回していない
+
+
+class _SpyCache(NerCache):
+    """get/put の呼び出し回数を数える NerCache（refresh_cache の検証用）。"""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.gets = 0
+        self.puts = 0
+
+    def get(self, *a: object, **k: object):  # type: ignore[no-untyped-def]
+        self.gets += 1
+        return super().get(*a, **k)  # type: ignore[arg-type]
+
+    def put(self, *a: object, **k: object) -> None:  # type: ignore[no-untyped-def]
+        self.puts += 1
+        super().put(*a, **k)  # type: ignore[arg-type]
+
+
+def test_refresh_cache_bypasses_and_overwrites_ner_cache(engine, tmp_path) -> None:
+    """refresh_cache=True は NER キャッシュ読みを飛ばして再解析し、結果で上書きする。
+
+    - 1 回目（ミス）: get を引き・put で保存。
+    - 2 回目（通常）: get がヒット・put は呼ばない。
+    - 3 回目（refresh）: get を飛ばし・put で上書きする。
+    """
+    cache = _SpyCache(str(tmp_path / "cache.db"))
+    chunks = ["佐藤さんが会議に出席した。"]
+
+    engine.analyze(chunks, ner_cache=cache)
+    assert cache.gets > 0 and cache.puts > 0
+
+    cache.gets = cache.puts = 0
+    engine.analyze(chunks, ner_cache=cache)
+    assert cache.gets > 0 and cache.puts == 0  # ヒット＝再解析なし
+
+    cache.gets = cache.puts = 0
+    engine.analyze(chunks, ner_cache=cache, refresh_cache=True)
+    assert cache.gets == 0 and cache.puts > 0  # 読み飛ばし＝再解析して上書き

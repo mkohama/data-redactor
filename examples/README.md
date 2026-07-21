@@ -36,6 +36,7 @@ uv run python examples/roundtrip_demo.py --files
 uv run python examples/roundtrip_demo.py --files path/to/a.xlsx path/to/b.pdf
 uv run python examples/roundtrip_demo.py --base-url http://127.0.0.1:8001
 uv run python examples/roundtrip_demo.py --detection both    # ← Azure 資格情報が必要
+uv run python examples/roundtrip_demo.py --files --refresh   # ← キャッシュ無視で強制再解析
 ```
 
 `--files` を付けると **file part**（サーバがテキスト化）を含むバンドルを送り、ファイルの
@@ -94,14 +95,15 @@ curl -X POST http://127.0.0.1:8000/mask \
       }'
 ```
 
-### 取込済み文書を content_hash で参照
+### キャッシュを無視して強制再解析（refresh）
 
-先に取り込んだ文書（`content_hash`）を指定する。未取込なら 404。
+`refresh: true` を付けると解析キャッシュ（NER/LLM）を無視して再解析し、結果でキャッシュを
+上書きする。既定は `false`（同じ内容なら再利用＝速い）。
 
 ```bash
 curl -X POST http://127.0.0.1:8000/mask \
   -H 'Content-Type: application/json' \
-  -d '{"parts": [{"id": "fileA", "content_hash": "ab12cd…"}], "detection": "ner"}'
+  -d '{"text": "担当は佐藤。SONYと比較。", "detection": "ner", "mask_level": "medium", "refresh": true}'
 ```
 
 ### 同梱ファイルをワンショットでマスク（multipart/form-data）
@@ -131,7 +133,7 @@ curl -X POST http://127.0.0.1:8000/unmask \
 ## 4. Python から使う
 
 呼ぶ側は **`parts`（入力の一覧）だけ**を組み立てる。各 part は
-`{"kind": "text"|"file"|"content_hash", "content": ...}`。
+`{"kind": "text"|"file", "content": ...}`。
 **JSON か multipart かはクライアントが内部で振り分ける**ので、curl 例のような
 「manifest とファイル本体を分けて送る」作業は不要（file の本体も `content` に入れるだけ）。
 
@@ -158,7 +160,6 @@ res = client.mask(parts=[
     {"kind": "text", "content": "この3ファイルを要約して。担当は佐藤。"},
     {"kind": "file", "content": "見積.xlsx"},                 # パス
     {"kind": "file", "content": ("議事録.docx", raw_bytes)},  # or (名前, バイト列)
-    {"kind": "content_hash", "content": "ab12…"},            # 取込済み文書を参照
 ])
 
 for mp in res["masked_parts"]:      # 入力と同じ順・同じ id で返る
@@ -183,5 +184,8 @@ restored_parts = [
 
 `id` は任意（省略時 `p0`,`p1`…）。結果を対応づけたいときは `"id": "見積"` のように付ける。
 
+解析結果は内容ハッシュでキャッシュされ、同じ内容の 2 回目以降は速い。キャッシュを無視して
+やり直したいときは `client.mask(..., refresh=True)`（結果でキャッシュを上書きする）。
+
 エラーは `MaskApiError`（`.status_code` / `.detail`）で受け取れる。
-主なステータス: 404（未取込 hash）/ 422（不正入力・未対応拡張子）/ 502（LLM 資格情報）/ 503（モデル未ロード）。
+主なステータス: 422（不正入力・未対応拡張子）/ 502（LLM 資格情報）/ 503（モデル未ロード）。

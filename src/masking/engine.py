@@ -496,6 +496,7 @@ class MaskingEngine:
         extra_terms: Iterable[tuple[str, str]] = (),
         allowlist: MaskAllowlist | None = None,
         ner_cache: NerCache | None = None,
+        refresh_cache: bool = False,
         progress: ProgressCallback | None = None,
         llm_detection: LlmDetection | None = None,
         run_ner: bool = True,
@@ -511,6 +512,8 @@ class MaskingEngine:
         ``progress`` はステージコールバック：各段階の開始時に (段階index, 全段階数, ラベル) を受ける。
         段階＝各モデルの解析（重い・モデルごと）＋ 候補の集約。1 モデルの解析中はサブ進捗を出さない
         （最速の既定バッチで処理するため。小バッチ化は本末転倒）。「どの段階か」を示すのが目的。
+        ``refresh_cache=True`` は NER キャッシュの読みを飛ばして強制再解析し、結果でキャッシュを
+        上書きする（LLM 層の強制再検出は run_llm_detection(force=True) が別途担う）。
         """
         chunks = list(chunks)
         per_model: list[tuple[str, Analysis]] = []
@@ -524,9 +527,10 @@ class MaskingEngine:
             n_stages = n_models + 1  # 各モデル ＋ 候補集約
             chash = content_hash(chunks) if ner_cache is not None else ""
             for idx, e in enumerate(self.engines):
+                # refresh_cache＝True はキャッシュ読みをスキップして再解析（結果は下で put＝上書き）。
                 cached = (
                     ner_cache.get(chash, e.model_name, flatten_tables)
-                    if ner_cache is not None
+                    if ner_cache is not None and not refresh_cache
                     else None
                 )
                 if (

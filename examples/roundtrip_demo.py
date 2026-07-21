@@ -157,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
         default=600.0,
         help="1 リクエストの秒数。detection=both で複数ファイルは遅いので長め。0 で無制限。",
     )
+    ap.add_argument(
+        "--refresh",
+        action="store_true",
+        help="キャッシュを無視して強制再解析する（結果でキャッシュを上書き）。",
+    )
     args = ap.parse_args(argv)
 
     parts = _build_parts(args.files)
@@ -188,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
                 parts=parts,
                 detection=args.detection,
                 mask_level=args.mask_level,
+                refresh=args.refresh,
             )
 
             print("\n-- マスク済みテキスト（これを LLM に渡す。原文は渡さない）--")

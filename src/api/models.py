@@ -40,6 +40,8 @@ class MaskRequest(BaseModel):
     flatten_tables: bool = True
     models: list[str] | None = None
     return_pending: bool = True
+    # True でキャッシュを無視して強制再解析（NER/LLM とも）。結果でキャッシュを上書きする。
+    refresh: bool = False
 
 
 class MaskedPart(BaseModel):
