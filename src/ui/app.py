@@ -9,16 +9,19 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
 import openai
 import pandas as pd
 import streamlit as st
 
+from src.client import MaskApiError, MaskClient
 from src.core.document.document_loader import DocumentLoader
 from src.masking import (
     AUTO_MASK_CONFIDENCE,
@@ -68,6 +71,51 @@ MODEL_DESCRIPTIONS = {
     "ja_ginza_electra": "高精度・低速 (ELECTRA / Transformer ベース)",
     "ja_ginza": "軽量・高速 (CNN/Sudachi ベース)",
 }
+
+
+# マスキング API（サーバ）の接続先。UI は純クライアント（設計 B）＝エンジンを内包せず、
+# この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve（既定 localhost:8000）、
+# Docker は MASK_API_URL=http://api:8000 を環境変数で渡す。
+MASK_API_URL = os.environ.get("MASK_API_URL", "http://127.0.0.1:8000")
+
+
+@st.cache_resource(show_spinner=False)
+def _mask_client(base_url: str) -> MaskClient:
+    """マスキング API のクライアントを生成・共有する。
+
+    内部で httpx 接続を 1 本持つので、プロセス内で使い回す（cache_resource）。
+    base_url を引数（キャッシュ鍵）にしているので、接続先を変えれば作り直される。
+    """
+    return MaskClient(base_url)
+
+
+def _render_connection_status() -> bool:
+    """サイドバー上部に API サーバの接続状態を表示し、接続できているかを返す。
+
+    ✅ 接続 OK（NER モデルのロード状態も併記）／❌ 未接続（起動方法を明示）。
+    未接続でも UI は落とさず、各操作側でエラーを握ってメッセージを出す前提。
+    """
+    client = _mask_client(MASK_API_URL)
+    try:
+        health = client.health()
+    except (MaskApiError, httpx.HTTPError) as e:
+        st.error(
+            f"マスキング API に接続できません（{MASK_API_URL}）。\n\n"
+            "別ターミナルで `data-redactor serve` を起動するか、環境変数 "
+            "`MASK_API_URL` で接続先を指定してください。"
+        )
+        st.caption(f"詳細: {e}")
+        return False
+    if health.get("models_ready"):
+        loaded = ", ".join(_short_models(tuple(health.get("models_loaded", []))))
+        st.success(f"✅ API 接続 OK（{MASK_API_URL}）")
+        st.caption(f"モデル: {loaded or '—'}")
+    else:
+        st.warning(
+            f"⚠ API に接続できましたが、NER モデルがまだロード中です（{MASK_API_URL}）。"
+            "しばらく待つか、サーバのログを確認してください。"
+        )
+    return True
 
 
 @st.cache_resource(show_spinner="GiNZA モデルを読み込み中 ...")
@@ -1774,6 +1822,8 @@ def main() -> None:
     # サイドバーのトグルで開く。トグルを**先に**読み、ON のときは上部の「モード」行を出さない
     # （NER に専念＝無関係なモード選択を見せない）。
     with st.sidebar:
+        _render_connection_status()
+        st.divider()
         ner_tool = st.toggle(
             "🔍 NER ビューア（参考）",
             value=False,
