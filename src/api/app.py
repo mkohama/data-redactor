@@ -9,14 +9,20 @@
       POST /mask             parts（text / content_hash 参照 / 同梱ファイル）→ 共有対応表でマスク
       POST /unmask           text＋mapping → 復元テキスト
     全体面（M5・Streamlit クライアント用。stateful）:
-      POST   /documents      入力取込 → content_hash 発行（JSON=text / multipart=file）
-      GET    /documents      取込済み一覧
-      GET    /documents/{h}  メタ＋チャンク
-      DELETE /documents/{h}  削除（?layer=ner で NER 層のみ）
-      PATCH  /documents/{h}  メタ更新（source_kind）
+      POST   /documents              入力取込 → content_hash 発行（JSON=text/kb / multipart=file）
+      GET    /documents              取込済み一覧
+      GET    /documents/{h}          メタ＋チャンク
+      DELETE /documents/{h}          削除（?layer=ner で NER 層のみ）
+      PATCH  /documents/{h}          メタ更新（source_kind）
+      POST   /documents/{h}/analyze  候補一覧＋既定選択
+      POST   /documents/{h}/apply    選択 span → masked_text＋mapping
+      GET/PUT /documents/{h}/draft   手動選択差分
+      GET/PUT /allowlist             除外リスト（エディタ・保存後は即反映）
+      GET/PUT /dictionary            マスク辞書（エディタ・保存後は即反映）
+      GET     /kb/documents          kb-mcp 文書一覧（入力元選択）
 
-起動時にモデルを 1 回ロードする（lifespan、エンジン singleton）。残りの全体面（/analyze・
-/apply・/draft・/allowlist・/dictionary・/kb）と Streamlit のクライアント化は M5b 以降で足す。
+起動時にモデルを 1 回ロードする（lifespan、エンジン singleton）。残るは M5e（Streamlit を
+このAPIのクライアントへ移行・data-redactor dev 合体コマンド）。
 
 起動：``uv run data-redactor serve``（uvicorn ラッパ）。テストは ``create_app(ctx=...)`` に
 軽量な :class:`~src.api.service.ApiContext` を注入して GiNZA の実ロードを避ける。
@@ -51,6 +57,7 @@ from src.api.models import (
     DocumentInfo,
     DocumentPatch,
     DraftBody,
+    KbListResponse,
     MaskRequest,
     MaskResponse,
     UnmaskRequest,
@@ -65,8 +72,10 @@ from src.api.service import (
     get_document,
     get_document_draft,
     ingest_file,
+    ingest_kb,
     ingest_text,
     list_documents,
+    list_kb_documents,
     patch_document,
     put_allowlist,
     put_dictionary,
@@ -223,6 +232,14 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
             req = DocumentIngestRequest.model_validate(await request.json())
         except ValidationError as e:
             raise HTTPException(422, e.errors()) from e
+        # JSON は text か kb_doc_id のどちらか一方（黙って無視しない）。
+        if (req.text is None) == (req.kb_doc_id is None):
+            raise HTTPException(
+                422, "`text` か `kb_doc_id` のどちらか一方を指定してください"
+            )
+        if req.kb_doc_id is not None:
+            return ingest_kb(app.state.ctx, req.kb_doc_id, req.kb_url, req.source_name)
+        assert req.text is not None  # 上の排他チェック済み
         return ingest_text(app.state.ctx, req.text, req.source_name)
 
     @app.get("/documents", response_model=list[DocumentInfo])
@@ -276,6 +293,13 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
     @app.put("/dictionary", response_model=DictionaryBody)
     def dictionary_put(body: DictionaryBody) -> DictionaryBody:
         return put_dictionary(app.state.ctx, body)
+
+    # ----------------------------------------------------------------- #
+    # 全体面：/kb/documents（設計 §2-B・入力元選択）。取込は POST /documents（kb_doc_id）。
+    # ----------------------------------------------------------------- #
+    @app.get("/kb/documents", response_model=KbListResponse)
+    def kb_documents(url: str | None = None) -> KbListResponse:
+        return list_kb_documents(url)
 
     return app
 

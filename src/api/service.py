@@ -38,6 +38,7 @@ from src.api.models import (
     DocumentInfo,
     DraftBody,
     GroupOccurrence,
+    KbListResponse,
     MappingEntry,
     MaskedPart,
     MaskRequest,
@@ -68,6 +69,12 @@ from src.masking.cache import DocInfo
 from src.masking.dictionary import load_entries, save_entries
 from src.masking.engine import BundleMaskResult, Candidate
 from src.sources.files import load_chunks_from_file
+from src.sources.kb_mcp import (
+    DEFAULT_KB_MCP_URL,
+    KbMcpConnectionError,
+    get_document_chunks_sync,
+    list_documents_sync,
+)
 
 # NER 系統に属さないチャネル（decided_by / 系統別 votes の判定で除外する）。
 _NON_NER_CHANNELS = frozenset({"dict", "session", "regex", "collected", "llm"})
@@ -415,6 +422,27 @@ def ingest_file(ctx: ApiContext, filename: str, data: bytes) -> DocumentInfo:
         tmp.write_bytes(data)
         chunks = load_chunks_from_file(tmp)
     return _ingest_chunks(ctx, chunks, "file", filename)
+
+
+def ingest_kb(
+    ctx: ApiContext, doc_id: str, url: str | None, source_name: str
+) -> DocumentInfo:
+    """kb-mcp の文書（doc_id）をチャンクのまま取り込む。接続失敗は 502。"""
+    try:
+        chunks = get_document_chunks_sync(doc_id, url or DEFAULT_KB_MCP_URL)
+    except KbMcpConnectionError as e:
+        raise HTTPException(502, f"kb-mcp に接続できません: {e}") from e
+    name = source_name if source_name != "text" else doc_id
+    return _ingest_chunks(ctx, chunks, "kb", name)
+
+
+def list_kb_documents(url: str | None) -> KbListResponse:
+    """kb-mcp の文書一覧を返す（GET /kb/documents）。接続失敗は 502。"""
+    try:
+        docs = list_documents_sync(url or DEFAULT_KB_MCP_URL)
+    except KbMcpConnectionError as e:
+        raise HTTPException(502, f"kb-mcp に接続できません: {e}") from e
+    return KbListResponse(documents=docs)
 
 
 def list_documents(ctx: ApiContext) -> list[DocumentInfo]:
