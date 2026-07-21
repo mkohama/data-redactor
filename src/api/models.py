@@ -218,3 +218,38 @@ class DraftBody(BaseModel):
 
     added: list[tuple[int, int]] = Field(default_factory=list)
     removed: list[tuple[int, int]] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/allowlist・/dictionary（設計 §3-5・エディタ）。GET/PUT で同じ形を往復する。
+# 中身は load/save_*entries の構造そのまま（round-trip 用）。
+# --------------------------------------------------------------------------- #
+class AllowlistEntry(BaseModel):
+    """除外リスト 1 件（load_allowlist_entries の 1 要素）。"""
+
+    surface: str
+    partial: bool = False
+    case_sensitive: bool = False
+
+
+class AllowlistBody(BaseModel):
+    """``GET/PUT /allowlist`` の本体。"""
+
+    entries: list[AllowlistEntry] = Field(default_factory=list)
+
+
+class DictionaryEntry(BaseModel):
+    """マスク辞書 1 件（load_entries の 1 要素）。"""
+
+    category: str
+    canonical: str
+    aliases: list[str] = Field(default_factory=list)
+    mask: str = ""
+    partial: bool = False
+    case_sensitive: bool = False
+
+
+class DictionaryBody(BaseModel):
+    """``GET/PUT /dictionary`` の本体。"""
+
+    entries: list[DictionaryEntry] = Field(default_factory=list)

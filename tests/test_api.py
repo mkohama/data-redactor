@@ -48,6 +48,8 @@ def client(_engine: MaskingEngine, tmp_path: Path) -> TestClient:
         allowlist=MaskAllowlist.empty(),
         model_names=("ja_ginza",),
         models_ready=True,
+        dict_path=str(tmp_path / "mask_dict.yaml"),
+        allowlist_path=str(tmp_path / "mask_allowlist.yaml"),
     )
     return TestClient(create_app(ctx))
 
@@ -479,3 +481,60 @@ def test_draft_get_empty_then_save_roundtrip(client: TestClient) -> None:
 
 def test_draft_404_unknown_hash(client: TestClient) -> None:
     assert client.get("/documents/deadbeef/draft").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/allowlist・/dictionary エディタ（M5c）
+# --------------------------------------------------------------------------- #
+def test_allowlist_get_empty_then_put_roundtrip(client: TestClient) -> None:
+    assert client.get("/allowlist").json() == {"entries": []}
+    body = {"entries": [{"surface": "Em_NoYes"}]}
+    assert client.put("/allowlist", json=body).status_code == 200
+    got = client.get("/allowlist").json()["entries"]
+    assert any(e["surface"] == "Em_NoYes" for e in got)
+
+
+def test_allowlist_put_reloads_and_excludes(client: TestClient) -> None:
+    """PUT /allowlist は ctx.allowlist を再ロードし、以降のマスクに即反映（佐藤を除外）。"""
+    base = client.post(
+        "/mask",
+        json={
+            "text": "佐藤さんが会議に出席。",
+            "detection": "ner",
+            "mask_level": "medium",
+        },
+    ).json()
+    assert any(m["canonical"] == "佐藤" for m in base["mapping"])  # 除外前はマスク対象
+
+    client.put("/allowlist", json={"entries": [{"surface": "佐藤"}]})
+    after = client.post(
+        "/mask",
+        json={
+            "text": "佐藤さんが会議に出席。",
+            "detection": "ner",
+            "mask_level": "medium",
+        },
+    ).json()
+    assert not any(m["canonical"] == "佐藤" for m in after["mapping"])  # 除外後は対象外
+
+
+def test_dictionary_editor_roundtrip_and_reload(client: TestClient) -> None:
+    """PUT /dictionary は保存＋engine.dictionary 再ロード。共有エンジンは後で戻す。"""
+    eng = client.app.state.ctx.engine
+    original = eng.dictionary
+    try:
+        assert client.get("/dictionary").json() == {"entries": []}
+        entries = [{"category": "社名", "canonical": "ニコン", "aliases": ["Nikon"]}]
+        assert client.put("/dictionary", json={"entries": entries}).status_code == 200
+        got = client.get("/dictionary").json()["entries"]
+        assert any(e["canonical"] == "ニコン" for e in got)
+        # 再ロード反映：ニコンが辞書一致（certain）でマスクされる。
+        m = client.post(
+            "/mask", json={"text": "ニコンの製品。", "detection": "ner"}
+        ).json()
+        assert any(
+            e["canonical"] == "ニコン" and e["confidence"] == "certain"
+            for e in m["mapping"]
+        )
+    finally:
+        eng.dictionary = original  # 共有エンジンを元に戻す（他テストへの影響を防ぐ）

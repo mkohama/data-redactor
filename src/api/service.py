@@ -24,12 +24,16 @@ from src.api.enums import (
     confidences_at_or_above,
 )
 from src.api.models import (
+    AllowlistBody,
+    AllowlistEntry,
     AnalyzeRequest,
     AnalyzeResponse,
     ApplyRequest,
     ApplyResponse,
     CandidateGroupEntry,
     DetectorInfo,
+    DictionaryBody,
+    DictionaryEntry,
     DocumentDetail,
     DocumentInfo,
     DraftBody,
@@ -50,6 +54,7 @@ from src.masking import (
     CandidateGroup,
     MaskAllowlist,
     MaskAnalysis,
+    MaskDictionary,
     MaskingEngine,
     NerCache,
     content_hash,
@@ -58,7 +63,9 @@ from src.masking import (
     unmask,
     vote_category,
 )
+from src.masking.allowlist import load_allowlist_entries, save_allowlist_entries
 from src.masking.cache import DocInfo
+from src.masking.dictionary import load_entries, save_entries
 from src.masking.engine import BundleMaskResult, Candidate
 from src.sources.files import load_chunks_from_file
 
@@ -78,6 +85,10 @@ class ApiContext:
     allowlist: MaskAllowlist
     model_names: tuple[str, ...]
     models_ready: bool
+    # 辞書・除外リストの YAML パス（エディタ /dictionary・/allowlist の読み書き先）。
+    #   None ならエディタは未設定（GET は空・PUT は 409）。書き込みは api のみ（設計 B）。
+    dict_path: str | None = None
+    allowlist_path: str | None = None
 
 
 def _normalize_parts(req: MaskRequest) -> list[Part]:
@@ -543,3 +554,48 @@ def save_document_draft(ctx: ApiContext, chash: str, body: DraftBody) -> DraftBo
         {(s, e) for s, e in body.removed},
     )
     return get_document_draft(ctx, chash)
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/allowlist・/dictionary（設計 §3-5・エディタ）。load/save_*entries を配線する。
+# PUT 後は ctx の allowlist / engine.dictionary を再ロードし、以降の analyze/mask に即反映。
+# 書き込みは api のみ（設計 B）。パス未設定なら GET は空・PUT は 409。
+# --------------------------------------------------------------------------- #
+def _require_path(path: str | None, what: str) -> str:
+    if path is None:
+        raise HTTPException(409, f"{what} の保存先が未設定です（サーバ構成を確認）")
+    return path
+
+
+def get_allowlist(ctx: ApiContext) -> AllowlistBody:
+    """``GET /allowlist``＝除外リストを構造のまま返す（ファイル未作成なら空）。"""
+    path = _require_path(ctx.allowlist_path, "除外リスト")
+    if not Path(path).exists():
+        return AllowlistBody()
+    return AllowlistBody(
+        entries=[AllowlistEntry(**e) for e in load_allowlist_entries(path)]
+    )
+
+
+def put_allowlist(ctx: ApiContext, body: AllowlistBody) -> AllowlistBody:
+    """``PUT /allowlist``＝除外リストを保存し、ctx.allowlist を再ロードする。"""
+    path = _require_path(ctx.allowlist_path, "除外リスト")
+    save_allowlist_entries(path, [e.model_dump() for e in body.entries])
+    ctx.allowlist = MaskAllowlist.load(path)  # 以降の analyze/mask に即反映
+    return get_allowlist(ctx)
+
+
+def get_dictionary(ctx: ApiContext) -> DictionaryBody:
+    """``GET /dictionary``＝マスク辞書を構造のまま返す（ファイル未作成なら空）。"""
+    path = _require_path(ctx.dict_path, "マスク辞書")
+    if not Path(path).exists():
+        return DictionaryBody()
+    return DictionaryBody(entries=[DictionaryEntry(**e) for e in load_entries(path)])
+
+
+def put_dictionary(ctx: ApiContext, body: DictionaryBody) -> DictionaryBody:
+    """``PUT /dictionary``＝マスク辞書を保存し、engine.dictionary を再ロードする。"""
+    path = _require_path(ctx.dict_path, "マスク辞書")
+    save_entries(path, [e.model_dump() for e in body.entries])
+    ctx.engine.dictionary = MaskDictionary.load(path)  # 以降の analyze/mask に即反映
+    return get_dictionary(ctx)

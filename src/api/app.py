@@ -40,10 +40,12 @@ from src.api.enums import (
     MASK_LEVELS,
 )
 from src.api.models import (
+    AllowlistBody,
     AnalyzeRequest,
     AnalyzeResponse,
     ApplyRequest,
     ApplyResponse,
+    DictionaryBody,
     DocumentDetail,
     DocumentIngestRequest,
     DocumentInfo,
@@ -58,12 +60,16 @@ from src.api.service import (
     SUPPORTED_EXTENSIONS,
     ApiContext,
     delete_document,
+    get_allowlist,
+    get_dictionary,
     get_document,
     get_document_draft,
     ingest_file,
     ingest_text,
     list_documents,
     patch_document,
+    put_allowlist,
+    put_dictionary,
     run_analyze,
     run_apply,
     run_mask,
@@ -119,6 +125,8 @@ def _load_context() -> ApiContext:
         allowlist=allowlist,
         model_names=model_names,
         models_ready=models_ready,
+        dict_path=_DEFAULT_DICT,
+        allowlist_path=_DEFAULT_ALLOWLIST,
     )
 
 
@@ -249,6 +257,25 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
     @app.put("/documents/{content_hash}/draft", response_model=DraftBody)
     def documents_put_draft(content_hash: str, body: DraftBody) -> DraftBody:
         return save_document_draft(app.state.ctx, content_hash, body)
+
+    # ----------------------------------------------------------------- #
+    # 全体面：/allowlist・/dictionary（設計 §3-5・エディタ）。書き込みは api のみ。
+    # ----------------------------------------------------------------- #
+    @app.get("/allowlist", response_model=AllowlistBody)
+    def allowlist_get() -> AllowlistBody:
+        return get_allowlist(app.state.ctx)
+
+    @app.put("/allowlist", response_model=AllowlistBody)
+    def allowlist_put(body: AllowlistBody) -> AllowlistBody:
+        return put_allowlist(app.state.ctx, body)
+
+    @app.get("/dictionary", response_model=DictionaryBody)
+    def dictionary_get() -> DictionaryBody:
+        return get_dictionary(app.state.ctx)
+
+    @app.put("/dictionary", response_model=DictionaryBody)
+    def dictionary_put(body: DictionaryBody) -> DictionaryBody:
+        return put_dictionary(app.state.ctx, body)
 
     return app
 
