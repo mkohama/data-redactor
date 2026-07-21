@@ -1,26 +1,59 @@
 """マスキング HTTP API の Python クライアント（httpx・依存は httpx だけ）。
 
 `data-redactor serve` で起動したサーバ（既定 ``http://127.0.0.1:8000``）に対して
-``/health`` / ``/config`` / ``/mask`` / ``/unmask`` を呼ぶ薄いラッパ。**外部アプリが
-そのままコピーして使える**よう、このプロジェクトの ``src`` には一切依存しない
-（返り値は API の JSON をそのまま dict で返す）。
+``/health`` / ``/config`` / ``/mask`` / ``/unmask`` を呼ぶ薄いラッパ。
+
+**外部アプリがそのままコピーして使える**よう、このプロジェクトの ``src`` には
+一切依存しない（返り値は API の JSON をそのまま dict で返す）。
 
 想定する使い方（設計 [docs-dev/mask-http-api設計.md] §3-1/§3-2）:
 
     with MaskClient() as client:
         res = client.mask(text="担当は佐藤。SONYと比較。")
-        masked = res["masked_parts"][0]["masked_text"]   # LLM に食わせる形
-        answer = call_llm(masked)                         # ← ここは各アプリの LLM 呼び出し
+
+        # res["masked_parts"] は「入力 part ごとの結果」のリスト。
+        # text= のときは part が 1 個なので [0]（1 番目）を取る。
+        #
+        # masked_text は機密を伏せ字にした本文＝LLM に送ってよい版。
+        #   元:     担当は佐藤。SONYと比較。
+        #   伏せ字: 担当は[人物1]。[社1]と比較。
+        masked = res["masked_parts"][0]["masked_text"]
+
+        # 各アプリの LLM 呼び出し（伏せ字のまま渡す）。
+        answer = call_llm(masked)
+
+        # 応答に残ったプレースホルダ（[社1] 等）を元の語に戻す。
         restored = client.unmask(answer, res["mapping"])["restored_text"]
 
-part は 3 種のいずれか（設計 §3-1）:
-    - インライン text     : ``{"id": "prompt", "text": "……"}``
-    - 取込済み参照        : ``{"id": "fileA", "content_hash": "ab12…"}``
-    - 同梱ファイル        : ``{"id": "fileB", "file": {"filename": "見積.xlsx"}}``
-                            ＋ ``files={"fileB": <path or (filename, bytes)>}``
+part（＝LLM に渡す入力 1 個）は 3 種。**クライアントでの渡し方**を種別ごとに示す:
 
-同梱ファイルを 1 つでも渡すと multipart/form-data（JSON マニフェスト＋本体）に、
-それ以外は application/json に自動で切り替える。
+    # ① text ― すでに手元にある文字列（プロンプト・コピペ本文）。
+    #    単一なら text= の省略記法が使える。
+    client.mask(text="担当は佐藤。SONYと比較。")
+
+    #    複数をまとめるなら parts= に id つきで並べる。
+    client.mask(
+        parts=[
+            {"id": "prompt", "text": "2 社を比較して。担当は佐藤。"},
+            {"id": "memo", "text": "SONYの評価は高い。"},
+        ]
+    )
+
+    # ② content_hash ― 事前にサーバへ取り込み済みのファイルを指す（再送不要・速い）。
+    client.mask(parts=[{"id": "fileA", "content_hash": "ab12…"}])
+
+    # ③ file ― 手元のファイル（xlsx/pdf/docx…）をその場で送る（サーバがテキスト化）。
+    #    part に filename を書き、files= に本体（パス or (名前, bytes)）を渡す。
+    client.mask(
+        parts=[{"id": "fileB", "file": {"filename": "見積.xlsx"}}],
+        files={"fileB": "見積.xlsx"},
+    )
+
+複数 part を 1 回で渡すと（＝バンドル）、同じ実体は全 part で同じプレースホルダに揃う
+（SONY はどの part でも [社1]）。masked_parts は入力と同じ順・同じ id で返る。
+
+file を 1 つでも渡すと multipart/form-data（JSON マニフェスト＋本体）、
+それ以外は application/json で送る（自動判定）。
 """
 
 from __future__ import annotations
