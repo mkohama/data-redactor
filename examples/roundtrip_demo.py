@@ -11,7 +11,7 @@
 
 事前に別ターミナルでサーバを起動しておく:
 
-    uv run data-redactor serve            # 既定 http://127.0.0.1:8000
+    uv run data-redactor serve            # 既定 http://127.0.0.1:8509
 
 実行:
 
@@ -132,7 +132,7 @@ def _print_mapping(mapping: Mapping, limit: int = 15) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--base-url", default="http://127.0.0.1:8000")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8509")
     ap.add_argument(
         "--files",
         nargs="*",

@@ -177,7 +177,7 @@ def ui(streamlit_args: tuple[str, ...]) -> None:
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True}
 )
 @click.option("--host", default="127.0.0.1", show_default=True, help="待受ホスト。")
-@click.option("--port", default=8000, show_default=True, type=int, help="待受ポート。")
+@click.option("--port", default=8509, show_default=True, type=int, help="待受ポート。")
 @click.option(
     "--reload", "reload_", is_flag=True, help="コード変更でホットリロード（開発用）。"
 )
@@ -186,7 +186,9 @@ def serve(host: str, port: int, reload_: bool, uvicorn_args: tuple[str, ...]) ->
     """マスキング HTTP API を起動する（`uvicorn src.api.app:app` のラッパ）。
 
     起動時に GiNZA モデルを 1 回ロードし、`data/cache.db` を単一所有する（設計 B）。
-    追加引数はそのまま uvicorn に渡す。例: `data-redactor serve --port 8001`
+    既定ポートは 8509（kb-mcp の既定 8000 と衝突させないため。UI の MASK_API_URL 既定も 8509・
+    Docker では compose の api サービスも 8509、UI は 8508）。
+    追加引数はそのまま uvicorn に渡す。例: `data-redactor serve --port 8510`
     """
     cmd = [
         sys.executable,

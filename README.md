@@ -326,8 +326,8 @@ uv run data-redactor check
 `cache.db` の所有者を 1 プロセスに集約）。
 
 ```powershell
-uv run data-redactor serve                 # 既定 http://127.0.0.1:8000
-uv run data-redactor serve --port 8001     # ポート変更
+uv run data-redactor serve                 # 既定 http://127.0.0.1:8509
+uv run data-redactor serve --port 8510     # ポート変更
 ```
 
 最小面のエンドポイント:

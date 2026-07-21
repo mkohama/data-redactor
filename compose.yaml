@@ -43,9 +43,10 @@ services:
   #   container_name: data-redactor-api
   #   restart: unless-stopped
   #   ports:
-  #     - "8000:8000"
+  #     - "8509:8509"
   #   env_file: .env
   #   user: "${UID:-1000}:${GID:-1000}"
   #   volumes:
   #     - ./data:/app/data
-  #   command: ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+  #   command: ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8509"]
+  # UI 側は MASK_API_URL=http://data-redactor-api:8509 を .env で指定してこの API に接続する。
