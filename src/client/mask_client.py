@@ -266,10 +266,11 @@ class MaskClient:
     ) -> dict[str, Any]:
         """候補一覧と既定選択を得る（POST /documents/{hash}/analyze）。
 
-        戻り値: {"groups": [...], "auto_selection": [[start, end], ...]}。
+        戻り値: {"groups": [...], "auto_selection": [[start, end], ...], "text": "..."}。
         groups は実体ごと（surface / category / confidence / count / votes / occurrences）。
         span は解析座標で、occurrences と auto_selection と apply_selection の selection は
         同じ座標系（auto_selection をそのまま、または増減させて apply に渡せる）。
+        text は平坦化後（解析座標）のテキストで、色付き表示・原文プレビューに使える。
         """
         payload: dict[str, Any] = {
             "detection": detection,

@@ -432,6 +432,10 @@ def test_analyze_groups_shape(client: TestClient) -> None:
     assert sony["votes"].get("dict")  # 辞書一致の票
     # auto_selection は解析座標の span 集合（辞書一致は既定選択に入る）。
     assert body["auto_selection"]
+    # text は解析（平坦化後）座標のテキスト。occurrences の span でその語が切り出せる。
+    text = body["text"]
+    s, e = sony["occurrences"][0]["span"]
+    assert text[s:e] == "SONY"
 
 
 def test_analyze_apply_unmask_roundtrip(client: TestClient) -> None:

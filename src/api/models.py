@@ -192,6 +192,9 @@ class AnalyzeResponse(BaseModel):
     groups: list[CandidateGroupEntry]
     # mask_level に基づく既定選択（実体単位・案2）。解析座標の span 集合。
     auto_selection: list[tuple[int, int]]
+    # 平坦化後（解析座標）のテキスト。occurrences / auto_selection の span はこの座標系。
+    # クライアントの色付き表示（displaCy）・原文プレビューに使う（設計 §2 の描画用テキスト）。
+    text: str
 
 
 class ApplyRequest(BaseModel):

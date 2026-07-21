@@ -514,7 +514,9 @@ def run_analyze(ctx: ApiContext, chash: str, req: AnalyzeRequest) -> AnalyzeResp
         for g in groups
     ]
     auto = list(dict.fromkeys((c.start, c.end) for c in selected))
-    return AnalyzeResponse(groups=group_entries, auto_selection=auto)
+    return AnalyzeResponse(
+        groups=group_entries, auto_selection=auto, text=_analysis.text
+    )
 
 
 def run_apply(ctx: ApiContext, chash: str, req: ApplyRequest) -> ApplyResponse:
