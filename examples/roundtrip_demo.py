@@ -2,12 +2,12 @@
 
 外部アプリの典型的な使い方をなぞる:
 
-    1. 機密を含む入力（プロンプト＋複数パート）を ``/mask`` でマスクする。
-    2. **マスク済みテキスト**を LLM に渡す（ここではオフラインで動くモック LLM）。
-    3. LLM の応答を ``/unmask`` で復元する（プレースホルダ→元の語）。
+    1. 機密を含む入力（プロンプト＋複数パート）を /mask でマスクする。
+    2. マスク済みテキストを LLM に渡す（ここではオフラインで動くモック LLM）。
+    3. LLM の応答を /unmask で復元する（プレースホルダ→元の語）。
 
-要点は「LLM は伏せ字のまま処理し、バンドル全体で同じ実体は同じプレースホルダ」（設計 §3-1）。
-実際の LLM 呼び出し（Azure/OpenAI 等）は :func:`mock_llm` を差し替えるだけ。
+要点は「LLM は伏せ字のまま処理し、バンドル全体で同じ実体は同じプレースホルダ」（設計 3-1）。
+実際の LLM 呼び出し（Azure/OpenAI 等）は mock_llm を差し替えるだけ。
 
 事前に別ターミナルでサーバを起動しておく:
 
@@ -26,9 +26,9 @@
 
     uv run python examples/roundtrip_demo.py --detection both   # ← LLM 検出は Azure 必要
 
-``--files`` を付けると **file part**（サーバがテキスト化）を含むバンドルを送り、ファイルの
-受け渡し・マスク・復元まで確認できる。値を省くと ``examples/sample_data`` の中身を使う。
-``--detection both``/``llm`` は検出に LLM（Azure）を使うため資格情報が要る（既定 ``ner`` は
+--files を付けると file part（サーバがテキスト化）を含むバンドルを送り、ファイルの
+受け渡し・マスク・復元まで確認できる。値を省くと examples/sample_data の中身を使う。
+--detection both / llm は検出に LLM（Azure）を使うため資格情報が要る（既定 ner は
 辞書＋正規表現＋GiNZA だけでオフライン完結）。
 """
 
@@ -41,7 +41,7 @@ from pathlib import Path
 
 import httpx
 
-# `python examples/roundtrip_demo.py` で実行すると examples/ が sys.path[0] になる
+# python examples/roundtrip_demo.py で実行すると examples/ が sys.path[0] になる
 # （同ディレクトリの mask_client を直接 import できる）。
 from mask_client import MaskApiError, MaskClient, Mapping
 
@@ -53,7 +53,7 @@ _SAMPLE_EXTS = {".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".pptx"}
 
 
 def mock_llm(masked_prompt: str) -> str:
-    """マスク済みプロンプトを受け取り、応答を返す**ダミーの LLM**。
+    """マスク済みプロンプトを受け取り、応答を返すダミーの LLM。
 
     実運用ではこの関数を実 LLM 呼び出しに差し替える。本サンプルでは「登場した
     プレースホルダを引用して要約文を組み立てる」ことで、伏せ字のまま処理できることと
@@ -71,7 +71,7 @@ def mock_llm(masked_prompt: str) -> str:
 
 
 def _default_sample_files() -> list[str]:
-    """``examples/sample_data`` 内の対応拡張子ファイルをソートして返す。"""
+    """examples/sample_data 内の対応拡張子ファイルをソートして返す。"""
     files = sorted(
         str(p) for p in _SAMPLE_DIR.glob("*") if p.suffix.lower() in _SAMPLE_EXTS
     )
@@ -81,7 +81,7 @@ def _default_sample_files() -> list[str]:
 
 
 def _build_parts(files: list[str] | None) -> list[dict]:
-    """バンドル（parts）を組み立てる。``files`` 指定時はプロンプト＋各ファイル。"""
+    """バンドル（parts）を組み立てる。files 指定時はプロンプト＋各ファイル。"""
     prompt = {
         "kind": "text",
         "id": "prompt",

@@ -1,51 +1,81 @@
-"""マスキング HTTP API の Python クライアント（httpx・依存は httpx だけ）。
+"""マスキング HTTP API の Python クライアント（依存は httpx だけ）。
 
-`data-redactor serve` で起動したサーバ（既定 ``http://127.0.0.1:8000``）に対して
-``/health`` / ``/config`` / ``/mask`` / ``/unmask`` を呼ぶ薄いラッパ。
+data-redactor serve で起動したサーバ（既定 http://127.0.0.1:8000）の
+/health /config /mask /unmask を呼ぶための薄いラッパ。外部アプリがそのまま
+コピーして使えるよう、このプロジェクトの src には一切依存しない。返り値は
+サーバの JSON をそのまま dict で返す。
 
-**外部アプリがそのままコピーして使える**よう、このプロジェクトの ``src`` には
-一切依存しない（返り値は API の JSON をそのまま dict で返す）。
 
-使い方（設計 [docs-dev/mask-http-api設計.md] §3-1/§3-2）:
+呼べるメソッド（詳しい引数と戻り値は各メソッドの説明を参照）:
+
+    MaskClient(base_url="http://127.0.0.1:8000", timeout=120.0)
+        クライアントを作る。with 文で使うと抜けるときに自動でクローズする。
+
+    health() -> dict
+        サーバの死活と、NER モデルのロード状態を返す。
+
+    config() -> dict
+        既定モデル・detector_version・指定できる選択肢の一覧を返す。
+
+    mask(parts=..., text=..., detection=..., mask_level=...,
+         flatten_tables=..., models=..., return_pending=...) -> dict
+        入力（parts）をマスクする。戻り値に masked_parts と mapping が入る。
+
+    unmask(text, mapping) -> dict
+        mask で得た mapping を使って、伏せ字を元の語に戻す。
+
+
+入力 parts の書き方:
+
+    part は「マスクしたい入力 1 個」。各 part は kind（中身の取得元）と content で書く。
+    kind は次の 3 種:
+
+        text          content は文字列そのもの（プロンプトやコピペ本文）
+        file          content はファイルのパス、または (ファイル名, バイト列)
+        content_hash  content は取込済み文書のハッシュ（先に取り込んだ文書を指す）
+
+    id は任意（省略すると p0, p1, ... と自動採番）。結果の masked_parts と対応づけ
+    たいときに付ける。テキスト 1 本だけなら text="..." が省略記法（part 1 個と同じ）。
+
+
+使い方の例:
 
     with MaskClient() as client:
-        # 入力は parts の一覧。各 part は kind（中身の取得元）と content だけ。
         res = client.mask(parts=[
             {"kind": "text",         "content": "この3ファイルを要約して。担当は佐藤。"},
-            {"kind": "file",         "content": "見積.xlsx"},               # パス
-            {"kind": "file",         "content": ("議事録.docx", raw_bytes)},# or (名前, バイト列)
-            {"kind": "content_hash", "content": "ab12…"},                  # 取込済み参照
+            {"kind": "file",         "content": "見積.xlsx"},
+            {"kind": "file",         "content": ("議事録.docx", raw_bytes)},
+            {"kind": "content_hash", "content": "ab12..."},
         ])
 
-        # masked_parts は入力と同じ順・同じ id の結果。
-        # masked_text＝機密を伏せ字にした本文
-        #（例 "SONY"→"[社1]"）＝LLM に送ってよい版（原文は渡さない）。
+        # masked_parts は入力と同じ順・同じ id。masked_text は機密を伏せ字にした本文
+        # （例: SONY を [社1] に置換）。これを LLM に渡す（原文は渡さない）。
         for mp in res["masked_parts"]:
             print(mp["id"], mp["masked_text"])
 
-        answer = call_llm(res["masked_parts"])   # 各アプリの LLM 呼び出し（伏せ字のまま）
+        answer = call_llm(res["masked_parts"])   # 各アプリの LLM 呼び出し
 
-        # (A) LLM の応答を戻す。応答に混ざった全 part 由来のプレースホルダを
-        #     共有 mapping でまとめて復元する（unmask は 1 回でよい）。
+        # (A) LLM の応答を戻す。応答に混ざった全 part 由来のプレースホルダを、
+        #     共有 mapping で一度に戻せる（unmask は 1 回でよい）。
         restored = client.unmask(answer, res["mapping"])["restored_text"]
 
         # (B) 渡した文書側を戻したいときも、同じ mapping で戻せる（part ごとに 1 回）。
-        #     mapping は 1 個でバンドル全体を覆うので、戻すテキストの数だけ呼ぶだけ。
         restored_parts = [
             client.unmask(mp["masked_text"], res["mapping"])["restored_text"]
             for mp in res["masked_parts"]
         ]
 
-- ``mapping`` はバンドル共有の 1 個。**戻したいテキストの数だけ ``unmask`` を呼ぶ**
-  （LLM 応答＝(A) は 1 回、各 part を戻す＝(B) は part の数だけ）。同じ mapping を使い回す。
-- mapping に無いプレースホルダは無変更（LLM の捏造・改変への安全側）。
-- ``kind`` … ``"text"`` / ``"file"`` / ``"content_hash"``。``content`` は順に、
-  文字列 / ファイルのパス（or ``(名前, バイト列)``）/ 取込済み文書のハッシュ。
-- 単一テキストは ``client.mask(text="…")`` の省略記法（part 1 個）。
-- 複数 part を 1 回で渡すと（＝バンドル）、同じ実体は全 part で同じプレースホルダに揃う
-  （SONY はどの part でも ``[社1]``）。unmask も共有の対応表 1 つで戻せる。
-- ``id`` は任意（省略時 ``p0``,``p1``…）。結果 ``masked_parts`` と対応づけたいとき付ける。
-- HTTP の送り方（JSON か multipart か）はクライアントが内部で振り分ける（呼ぶ側は気にしない）。
+
+復元（unmask）の考え方:
+
+    mapping はバンドル全体で 1 個。戻したいテキストの数だけ unmask を呼ぶだけ
+    （LLM 応答なら 1 回、各 part を戻すなら part の数だけ）。同じ mapping を使い回す。
+    mapping に無いプレースホルダは触らない（LLM が勝手に作った・変えた語への安全側）。
+
+    file を含むかどうかで JSON か multipart かはクライアントが内部で選ぶので、
+    呼ぶ側は HTTP の送り方を意識しなくてよい。
+
+設計の詳細は docs-dev/mask-http-api設計.md の 3-1（/mask）・3-2（/unmask）。
 """
 
 from __future__ import annotations
@@ -56,14 +86,19 @@ from typing import Any
 
 import httpx
 
-# バンドル全体で共有する対応表（/mask の mapping[]、/unmask にそのまま渡せる形）。
+# mask の戻り値 mapping（そのまま unmask に渡せる形）。
 Mapping = list[dict[str, Any]]
-# 同梱ファイル本体の指定：パス、または (ファイル名, バイト列)。
+# file part の content に指定できる型：ファイルのパス、または (ファイル名, バイト列)。
 FileBody = str | Path | tuple[str, bytes]
 
 
 class MaskApiError(RuntimeError):
-    """API が 2xx 以外を返したときの例外（ステータスとサーバの detail を持つ）。"""
+    """API が 2xx 以外を返したときに送出する例外。
+
+    status_code  HTTP ステータス（404 未取込 hash / 422 不正入力 / 502 LLM 資格情報 /
+                 503 モデル未ロード など）。
+    detail       サーバが返したエラー内容（JSON の detail、無ければ本文テキスト）。
+    """
 
     def __init__(self, status_code: int, detail: Any) -> None:
         self.status_code = status_code
@@ -72,7 +107,10 @@ class MaskApiError(RuntimeError):
 
 
 class MaskClient:
-    """マスキング API の同期クライアント（httpx.Client を内包）。"""
+    """マスキング API の同期クライアント。内部で 1 本の httpx 接続を持つ。
+
+    with 文（コンテキストマネージャ）で使うと、抜けるときに自動でクローズする。
+    """
 
     def __init__(
         self,
@@ -80,11 +118,16 @@ class MaskClient:
         *,
         timeout: float = 120.0,
     ) -> None:
-        # NER/LLM は重い（初回は特に）ため、既定タイムアウトは長めに取る。
+        """接続先とタイムアウトを決める。
+
+        base_url  サーバの URL（末尾の / は自動で除く）。既定 http://127.0.0.1:8000。
+        timeout   1 リクエストの秒数。NER/LLM は重く初回は特に遅いので長め（既定 120 秒）。
+        """
         self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout)
 
     # -- ライフサイクル ---------------------------------------------------- #
     def close(self) -> None:
+        """内部の httpx 接続を閉じる（with 文なら自動で呼ばれる）。"""
         self._client.close()
 
     def __enter__(self) -> MaskClient:
@@ -95,11 +138,26 @@ class MaskClient:
 
     # -- 読み取り系 -------------------------------------------------------- #
     def health(self) -> dict[str, Any]:
-        """死活・モデルロード状態（``GET /health``）。"""
+        """サーバの死活と、NER モデルのロード状態を返す（GET /health）。
+
+        戻り値: {"status": "ok", "models_ready": bool, "models_loaded": [モデル名, ...]}
+        models_ready が false の間は、NER を要求すると mask が 503 になる。
+        """
         return self._get("/health")
 
     def config(self) -> dict[str, Any]:
-        """既定モデル・detector_version・選択肢（``GET /config``）。"""
+        """既定値と、指定できる選択肢の一覧を返す（GET /config）。
+
+        戻り値の主なキー:
+            models / default_models   ロード済みモデル名。
+            llm_model                 LLM 検出に使うモデル名。
+            detector_version          検出器の版（キャッシュ鍵に使う識別子）。
+            detection_modes           detection に指定できる値 ["ner", "llm", "both"]。
+            default_detection         detection の既定。
+            mask_levels               mask_level に指定できる値
+                                      ["certain", "strong", "medium", "weak", "faint"]。
+            default_mask_level        mask_level の既定。
+        """
         return self._get("/config")
 
     # -- マスク / 復元 ----------------------------------------------------- #
@@ -114,11 +172,35 @@ class MaskClient:
         models: list[str] | None = None,
         return_pending: bool = True,
     ) -> dict[str, Any]:
-        """parts をマスクし、バンドル全体で共有する対応表を得る（``POST /mask``。設計 §3-1）。
+        """入力（parts）をマスクして、バンドル共有の対応表を得る（POST /mask）。
 
-        ``parts`` は ``{"kind": "text"|"file"|"content_hash", "content": ..., "id": 任意}``
-        の並び。``text="…"`` は単一 text part の省略記法。file を含むかどうかで JSON /
-        multipart を**内部で振り分ける**（呼ぶ側は HTTP の送り方を意識しない）。
+        引数（すべてキーワード指定）:
+            parts           入力の一覧。各要素は {"kind": ..., "content": ..., "id": 任意}。
+                            kind は "text" / "file" / "content_hash"（書き方はモジュール
+                            冒頭の説明を参照）。
+            text            テキスト 1 本の省略記法。parts=[{"kind":"text","content":text}]
+                            と同じ。parts とは同時に指定できない。
+            detection       検出の系統。"ner" / "llm" / "both"。既定 "both"。
+                            "llm" と "both" はサーバ側で Azure 資格情報が要る（無いと 502）。
+            mask_level      自動マスクする下限。"certain" / "strong" / "medium" / "weak" /
+                            "faint"。既定 "strong"。下限以上の確からしさの実体だけを伏せ字に
+                            する（下限未満は pending に回る）。
+            flatten_tables  表を平文化して検出するか。既定 True。
+            models          使うモデルの明示指定（任意）。省略でサーバの既定（両モデル）。
+            return_pending  下限未満のレビュー候補（pending）を返すか。既定 True。
+
+        戻り値（dict）:
+            status         当面 "unconfirmed" 固定。
+            masked_parts   入力と同じ順・同じ id のリスト。各要素 {"id", "masked_text"}。
+                           masked_text が伏せ字済みの本文（LLM に渡すのはこれ）。
+            mapping        バンドル共有の対応表。各要素は placeholder / category /
+                           canonical / surfaces / confidence / decided_by / occurrences。
+                           unmask にそのまま渡す。
+            pending        下限未満のレビュー候補（return_pending=True のとき）。
+            detector       使った検出器の構成（detection / models / detector_version /
+                           mask_level）。
+
+        file を含むかどうかで JSON か multipart かは内部で振り分ける（呼ぶ側は気にしない）。
         """
         if text is not None and parts is not None:
             raise ValueError(
@@ -147,10 +229,16 @@ class MaskClient:
         return self._post_multipart("/mask", manifest, uploads)
 
     def unmask(self, text: str, mapping: Mapping) -> dict[str, Any]:
-        """LLM 応答テキストを mapping で復元する（``POST /unmask``。設計 §3-2）。
+        """mapping を使って、伏せ字を元の語に戻す（POST /unmask）。
 
-        mapping は ``mask()`` の戻り値の ``["mapping"]`` をそのまま渡せる。
-        mapping に無いプレースホルダはサーバ側で無変更（LLM の捏造への安全側）。
+        引数:
+            text     復元したいテキスト（LLM の応答や、各 part の masked_text）。
+            mapping  mask の戻り値の ["mapping"] をそのまま渡す。
+
+        戻り値: {"restored_text": 復元後のテキスト}
+
+        mapping に無いプレースホルダは変更しない（LLM が作った・変えた語への安全側）。
+        戻したいテキストが複数あるときは、同じ mapping で必要な回数だけ呼ぶ。
         """
         return self._post_json("/unmask", {"text": text, "mapping": mapping})
 
@@ -167,7 +255,7 @@ class MaskClient:
         manifest: dict[str, Any],
         upload: dict[str, tuple[str, bytes, str]],
     ) -> dict[str, Any]:
-        # サーバは form の "manifest"（JSON 文字列）＋各 part id をキーにした本体を読む。
+        # サーバは form の manifest（JSON 文字列）と、各 part id をキーにした本体を読む。
         return self._unwrap(
             self._client.post(
                 path,
@@ -190,10 +278,11 @@ class MaskClient:
 def _build_parts(
     parts: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, tuple[str, bytes, str]]]:
-    """呼ぶ側の ``{"kind", "content", "id"?}`` 列をサーバの wire 形式に組み直す。
+    """呼ぶ側の {"kind","content","id"?} 列を、サーバが受け取る形に組み直す。
 
-    戻り値は ``(manifest の parts, 送るファイル本体 {id: (name, bytes, content_type)})``。
-    ファイル本体があるときだけ multipart になる（判定は :meth:`MaskClient.mask`）。
+    戻り値は (parts, uploads)。parts はサーバへ送る JSON 用、uploads は multipart で
+    送るファイル本体 {id: (ファイル名, バイト列, MIME)}。uploads が空でなければ
+    mask() は multipart で送る。
     """
     wire: list[dict[str, Any]] = []
     uploads: dict[str, tuple[str, bytes, str]] = {}
@@ -220,7 +309,7 @@ def _build_parts(
 
 
 def _as_upload(body: FileBody) -> tuple[str, bytes, str]:
-    """file part の content（パス or (名前, バイト列)）を (名前, バイト列, MIME) にする。"""
+    """file part の content（パス、または (名前, バイト列)）を (名前, バイト列, MIME) にする。"""
     if isinstance(body, (str, Path)):
         p = Path(body)
         return (p.name, p.read_bytes(), "application/octet-stream")
