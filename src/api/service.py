@@ -1,7 +1,7 @@
 """``/mask`` / ``/unmask`` のオーケストレーション（HTTP 非依存の中身）。
 
 part の解決（text / content_hash 参照 / 同梱ファイル）→ 各 part を解析（NER/LLM）→
-:meth:`MaskingEngine.mask_parts` で**束共有の対応表**を作る、までを行う。エラーは
+:meth:`MaskingEngine.mask_parts` で**バンドルで共有する対応表**を作る、までを行う。エラーは
 :class:`fastapi.HTTPException` で表現する（設計 §7 のエラー契約：404/422/502/503）。
 
 FastAPI のルーティング（:mod:`src.api.app`）はこの層を呼ぶだけ＝薄い。テストは
@@ -188,7 +188,7 @@ def _build_pending(
     parts: list[Part],
     mask_level: str,
 ) -> list[PendingEntry]:
-    """自動マスク閾値未満のレビュー候補を束（全パート）で集約する。
+    """自動マスク閾値未満のレビュー候補をバンドル（全パート）で集約する。
 
     対象＝マスク可能だが ``mask_level`` 未満、かつ ``微弱``（既定非表示）・``除外`` を除いたもの。
     同じ canonical は全パートでまとめ、出現位置は**原文座標**（masked_text と同じ座標系）にする。
@@ -225,7 +225,7 @@ def _build_pending(
 def run_mask(
     ctx: ApiContext, req: MaskRequest, files: dict[str, tuple[str, bytes]]
 ) -> MaskResponse:
-    """``POST /mask`` の中身。parts を束で共有 mapping にマスクして返す（設計 §3-1）。"""
+    """``POST /mask`` の中身。parts をバンドル共有の対応表でマスクして返す（設計 §3-1）。"""
     if req.detection not in DETECTION_MODES:
         raise HTTPException(422, f"未知の detection です: {req.detection!r}")
     if req.mask_level not in MASK_LEVELS:

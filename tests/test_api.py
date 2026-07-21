@@ -5,7 +5,7 @@ GiNZA の実ロードを避けるため、軽量な :class:`~src.api.service.Api
 （detection=``ner`` で完結させる）。網羅する観点：
 
 - エンドポイント（/health・/config・/mask・/unmask）と確信度の wire(ASCII) 変換。
-- **parts 束の共有 mapping**（同じ実体は全パートで同じプレースホルダ）。
+- **parts バンドルの共有対応表**（同じ実体は全パートで同じプレースホルダ）。
 - **unmask の安全性**（mapping に無いプレースホルダは無変更＝LLM 捏造への安全側）。
 - エラー契約（404 未取込 hash / 422 不正入力・未対応拡張子 / 503 モデル未ロード）。
 - content_hash 参照・multipart 同梱ファイル・pending（閾値未満のレビュー候補）。
@@ -80,7 +80,7 @@ def test_config(client: TestClient) -> None:
 # /mask 本体
 # --------------------------------------------------------------------------- #
 def test_mask_shared_mapping_across_parts(client: TestClient) -> None:
-    """同じ実体は**全パートで同じプレースホルダ**（束共有 mapping）。"""
+    """同じ実体は**全パートで同じプレースホルダ**（バンドル共有の対応表）。"""
     r = client.post(
         "/mask",
         json={
@@ -95,7 +95,7 @@ def test_mask_shared_mapping_across_parts(client: TestClient) -> None:
     body = r.json()
     assert body["status"] == "unconfirmed"
 
-    # canonical → placeholder の対応が 1 対 1 で束全体に効く。
+    # canonical → placeholder の対応が 1 対 1 でバンドル全体に効く。
     ph = {m["canonical"]: m["placeholder"] for m in body["mapping"]}
     assert ph["SONY"] != ph["Canon"]
     for part in body["masked_parts"]:

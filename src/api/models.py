@@ -57,7 +57,7 @@ class Occurrence(BaseModel):
 
 
 class MappingEntry(BaseModel):
-    """束で共有する対応表 1 件（設計 §3-1 の ``mapping[]``）。"""
+    """バンドルで共有する対応表 1 件（設計 §3-1 の ``mapping[]``）。"""
 
     placeholder: str
     category: str

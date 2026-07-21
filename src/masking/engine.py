@@ -306,7 +306,7 @@ class MaskResult:
 
 @dataclass(frozen=True)
 class BundleEntry:
-    """束（複数パート）で共有する対応表 1 件。設計 §3-1 の ``mapping[]``。
+    """バンドル（複数パート）で共有する対応表 1 件。設計 §3-1 の ``mapping[]``。
 
     ``occurrences`` は ``(part_index, start, end)`` の列（各パートの**原文座標**）。同じ
     プレースホルダが複数パート・複数箇所に出るため、どのパートのどこかを保持する（監査・再現用）。
@@ -328,7 +328,7 @@ class BundleMaskResult:
     """:meth:`MaskingEngine.mask_parts` の結果（各パートのマスク済み本文＋共有対応表）。"""
 
     masked_texts: tuple[str, ...]  # 入力パートと同順のマスク済み本文
-    entries: tuple[BundleEntry, ...]  # 束で共有する対応表
+    entries: tuple[BundleEntry, ...]  # バンドルで共有する対応表
 
 
 def unmask(text: str, mapping: Iterable[MaskEntry]) -> str:
@@ -655,7 +655,7 @@ class MaskingEngine:
     ) -> list[Candidate]:
         """選択候補を（必要なら全出現に展開して）**原文座標**のスパン列にする。
 
-        :meth:`apply` の前半（展開＋座標写し）を切り出したもの。:meth:`mask_parts`（束の
+        :meth:`apply` の前半（展開＋座標写し）を切り出したもの。:meth:`mask_parts`（バンドルの
         共有プレースホルダ）や API 層の pending 位置算出でも同じ前処理を使うため共通化した
         （採番だけを差し替える）。``expand=False`` なら渡した候補をそのまま原文座標へ写す。
         """
@@ -689,13 +689,13 @@ class MaskingEngine:
         *,
         expand: bool = True,
     ) -> BundleMaskResult:
-        """複数パート（プロンプト＋複数ファイル等）を**束で共有する 1 つの対応表**でマスクする。
+        """複数パート（プロンプト＋複数ファイル等）を**バンドルで共有する 1 つの対応表**でマスクする。
 
         設計 §3-1 の ``POST /mask`` の核。各パートは独立に解析済み（``MaskAnalysis`` と選択候補）を
         渡す。同じ canonical（表記ゆれ含む）は**全パートで同じプレースホルダ**（``[社1]`` は
         どのパートでも ``[社1]``）に採番する＝LLM の誤解と unmask の曖昧を防ぐ。
 
-        戻り値は各パートの ``masked_text``（入力順）と、束で共有する ``entries``（プレースホルダ・
+        戻り値は各パートの ``masked_text``（入力順）と、バンドルで共有する ``entries``（プレースホルダ・
         カテゴリ・canonical・確信度・decided_by・出現位置つき）。`/unmask` は entries だけで復元できる。
         """
         per_part_spans = [
@@ -1431,9 +1431,9 @@ def _assign_bundle_entries(
     parts_spans: list[list[Candidate]],
     dictionary: MaskDictionary,
 ) -> tuple[tuple[BundleEntry, ...], list[dict[tuple[int, int], str]]]:
-    """束（複数パート）で **canonical ごとに共有プレースホルダ**を採番する。
+    """バンドル（複数パート）で **canonical ごとに共有プレースホルダ**を採番する。
 
-    :func:`_assign_placeholders`（単一パート）の束版。同じ canonical は全パートで同じ
+    :func:`_assign_placeholders`（単一パート）のバンドル版。同じ canonical は全パートで同じ
     プレースホルダになる（カテゴリ別の連番はパートをまたいで 1 本）。戻り値は共有 ``entries`` と、
     パートごとの ``span→placeholder`` マップ（各パートの ``_apply_mask`` に渡す）。
     """

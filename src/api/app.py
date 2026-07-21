@@ -5,7 +5,7 @@
 
     GET  /health   死活・モデルロード状態
     GET  /config   既定モデル・detector_version・選択肢
-    POST /mask     parts（text / content_hash 参照 / 同梱ファイル）→ 束共有 mapping でマスク
+    POST /mask     parts（text / content_hash 参照 / 同梱ファイル）→ バンドル共有の対応表でマスク
     POST /unmask   text＋mapping → 復元テキスト
 
 起動時にモデルを 1 回ロードする（lifespan、エンジン singleton）。全体面（/documents・
