@@ -38,7 +38,6 @@ from src.api.models import (
     DocumentInfo,
     DraftBody,
     GroupOccurrence,
-    KbListResponse,
     MappingEntry,
     MaskedPart,
     MaskRequest,
@@ -69,12 +68,6 @@ from src.masking.cache import DocInfo
 from src.masking.dictionary import load_entries, save_entries
 from src.masking.engine import BundleMaskResult, Candidate
 from src.sources.files import load_chunks_from_file
-from src.sources.kb_mcp import (
-    DEFAULT_KB_MCP_URL,
-    KbMcpConnectionError,
-    get_document_chunks_sync,
-    list_documents_sync,
-)
 
 # NER 系統に属さないチャネル（decided_by / 系統別 votes の判定で除外する）。
 _NON_NER_CHANNELS = frozenset({"dict", "session", "regex", "collected", "llm"})
@@ -412,8 +405,15 @@ def ingest_text(ctx: ApiContext, text: str, source_name: str) -> DocumentInfo:
     return _ingest_chunks(ctx, [text], "text", source_name)
 
 
-def ingest_file(ctx: ApiContext, filename: str, data: bytes) -> DocumentInfo:
-    """アップロードされたファイルを DocumentLoader でテキスト化・チャンク化して取り込む。"""
+def ingest_file(
+    ctx: ApiContext, filename: str, data: bytes, source_name: str | None = None
+) -> DocumentInfo:
+    """アップロードされたファイルを DocumentLoader でテキスト化・チャンク化して取り込む。
+
+    source_kind は "file" 固定（サーバはソース非依存＝どこから来たファイルかは問わない）。
+    source_name は一覧表示用の任意メタで、省略時はアップロード名（filename）を使う
+    （kb-mcp から取得した元ファイルなどは、クライアントが文書名を source_name で渡せる）。
+    """
     ext = Path(filename).suffix.lower()
     if ext not in DocumentLoader.SUPPORTED_EXTENSIONS:
         raise HTTPException(422, f"未対応の拡張子です: {ext or '（なし）'}")
@@ -421,28 +421,7 @@ def ingest_file(ctx: ApiContext, filename: str, data: bytes) -> DocumentInfo:
         tmp = Path(td) / f"upload{ext}"
         tmp.write_bytes(data)
         chunks = load_chunks_from_file(tmp)
-    return _ingest_chunks(ctx, chunks, "file", filename)
-
-
-def ingest_kb(
-    ctx: ApiContext, doc_id: str, url: str | None, source_name: str
-) -> DocumentInfo:
-    """kb-mcp の文書（doc_id）をチャンクのまま取り込む。接続失敗は 502。"""
-    try:
-        chunks = get_document_chunks_sync(doc_id, url or DEFAULT_KB_MCP_URL)
-    except KbMcpConnectionError as e:
-        raise HTTPException(502, f"kb-mcp に接続できません: {e}") from e
-    name = source_name if source_name != "text" else doc_id
-    return _ingest_chunks(ctx, chunks, "kb", name)
-
-
-def list_kb_documents(url: str | None) -> KbListResponse:
-    """kb-mcp の文書一覧を返す（GET /kb/documents）。接続失敗は 502。"""
-    try:
-        docs = list_documents_sync(url or DEFAULT_KB_MCP_URL)
-    except KbMcpConnectionError as e:
-        raise HTTPException(502, f"kb-mcp に接続できません: {e}") from e
-    return KbListResponse(documents=docs)
+    return _ingest_chunks(ctx, chunks, "file", source_name or filename)
 
 
 def list_documents(ctx: ApiContext) -> list[DocumentInfo]:

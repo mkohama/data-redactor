@@ -541,56 +541,21 @@ def test_dictionary_editor_roundtrip_and_reload(client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 全体面：/kb/documents（M5d。kb-mcp はモックする）
+# 取込のソース非依存（2026-07-21 の設計見直し）：サーバは text か file を受け取るだけ。
+# kb-mcp 等からの取得はクライアント（UI）の責務＝元ファイルを取得して multipart/file で送る。
 # --------------------------------------------------------------------------- #
-def test_kb_list(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "src.api.service.list_documents_sync",
-        lambda url: [{"id": "d1", "title": "doc1"}, {"id": "d2", "title": "doc2"}],
+def test_documents_ingest_requires_text(client: TestClient) -> None:
+    """JSON 取込は text 必須（空ボディは 422）。バイナリは multipart で送る。"""
+    assert client.post("/documents", json={}).status_code == 422
+
+
+def test_documents_ingest_file_source_name_override(client: TestClient) -> None:
+    """multipart の source_name フォーム値で一覧表示名を上書きできる（kb 文書名の保持用）。"""
+    r = client.post(
+        "/documents",
+        data={"source_name": "見積書（kb）"},
+        files={"file": ("upload.txt", "SONYの比較メモ。".encode(), "text/plain")},
     )
-    r = client.get("/kb/documents")
-    assert r.status_code == 200
-    docs = r.json()["documents"]
-    assert [d["id"] for d in docs] == ["d1", "d2"]
-
-
-def test_kb_list_502_on_connection_error(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from src.sources.kb_mcp import KbMcpConnectionError
-
-    def boom(url: str) -> list:
-        raise KbMcpConnectionError("no route to kb-mcp")
-
-    monkeypatch.setattr("src.api.service.list_documents_sync", boom)
-    assert client.get("/kb/documents").status_code == 502
-
-
-def test_kb_ingest_then_reference(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "src.api.service.get_document_chunks_sync",
-        lambda doc_id, url: ["SONYの社内文書。"],
-    )
-    r = client.post("/documents", json={"kb_doc_id": "d1"})
     assert r.status_code == 200
     doc = r.json()
-    assert doc["source_kind"] == "kb" and doc["source_name"] == "d1"
-    # 取り込んだ kb 文書を content_hash で参照してマスクできる。
-    m = client.post(
-        "/mask",
-        json={
-            "parts": [{"id": "x", "content_hash": doc["content_hash"]}],
-            "detection": "ner",
-        },
-    ).json()
-    assert "SONY" not in m["masked_parts"][0]["masked_text"]
-
-
-def test_documents_ingest_requires_text_or_kb(client: TestClient) -> None:
-    assert client.post("/documents", json={}).status_code == 422
-    assert (
-        client.post("/documents", json={"text": "a", "kb_doc_id": "d1"}).status_code
-        == 422
-    )
+    assert doc["source_kind"] == "file" and doc["source_name"] == "見積書（kb）"
