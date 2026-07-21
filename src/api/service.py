@@ -25,6 +25,8 @@ from src.api.enums import (
 )
 from src.api.models import (
     DetectorInfo,
+    DocumentDetail,
+    DocumentInfo,
     MappingEntry,
     MaskedPart,
     MaskRequest,
@@ -43,11 +45,13 @@ from src.masking import (
     MaskAnalysis,
     MaskingEngine,
     NerCache,
+    content_hash,
     mapping_from_json,
     normalize,
     unmask,
     vote_category,
 )
+from src.masking.cache import DocInfo
 from src.masking.engine import Candidate
 from src.sources.files import load_chunks_from_file
 
@@ -313,3 +317,99 @@ def run_unmask(req: UnmaskRequest) -> UnmaskResponse:
         ]
     )
     return UnmaskResponse(restored_text=unmask(req.text, entries))
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/documents 系（設計 §2-B）。既存の NerCache/DocumentLoader を配線するだけ。
+# content_hash はサーバが発行して返す（D1）。取込済み文書は /mask の content_hash で参照できる。
+# --------------------------------------------------------------------------- #
+SUPPORTED_EXTENSIONS: tuple[str, ...] = tuple(
+    sorted(DocumentLoader.SUPPORTED_EXTENSIONS)
+)
+
+
+def _doc_info(ctx: ApiContext, d: DocInfo) -> DocumentInfo:
+    """cache の DocInfo → wire の DocumentInfo（llm_versions を補って返す）。"""
+    return DocumentInfo(
+        content_hash=d.content_hash,
+        source_kind=d.source_kind,
+        source_name=d.source_name,
+        char_count=d.char_count,
+        chunk_count=d.chunk_count,
+        created_at=d.created_at,
+        ner_models=list(d.models),
+        llm_versions=sorted(ctx.cache.llm_versions(d.content_hash)),
+    )
+
+
+def _find_doc(ctx: ApiContext, chash: str) -> DocInfo | None:
+    return next(
+        (d for d in ctx.cache.list_documents() if d.content_hash == chash), None
+    )
+
+
+def _ingest_chunks(
+    ctx: ApiContext, chunks: list[str], source_kind: str, source_name: str
+) -> DocumentInfo:
+    """チャンク列を記録し DocumentInfo を返す。content_hash はサーバが発行（D1）。"""
+    if not chunks or not any(c.strip() for c in chunks):
+        raise HTTPException(422, "取り込むテキストが空です")
+    chash = content_hash(chunks)
+    ctx.cache.record_document(chash, source_kind, source_name, chunks)
+    info = _find_doc(ctx, chash)
+    if info is None:  # 記録直後に見つからないのは異常（保険）。
+        raise HTTPException(500, "取り込み後に文書が見つかりませんでした")
+    return _doc_info(ctx, info)
+
+
+def ingest_text(ctx: ApiContext, text: str, source_name: str) -> DocumentInfo:
+    """テキストを 1 チャンクとして取り込む（/mask の text 経路と同じ単位）。"""
+    return _ingest_chunks(ctx, [text], "text", source_name)
+
+
+def ingest_file(ctx: ApiContext, filename: str, data: bytes) -> DocumentInfo:
+    """アップロードされたファイルを DocumentLoader でテキスト化・チャンク化して取り込む。"""
+    ext = Path(filename).suffix.lower()
+    if ext not in DocumentLoader.SUPPORTED_EXTENSIONS:
+        raise HTTPException(422, f"未対応の拡張子です: {ext or '（なし）'}")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / f"upload{ext}"
+        tmp.write_bytes(data)
+        chunks = load_chunks_from_file(tmp)
+    return _ingest_chunks(ctx, chunks, "file", filename)
+
+
+def list_documents(ctx: ApiContext) -> list[DocumentInfo]:
+    """キャッシュ済み文書の一覧（新しい順は cache の実装に従う）。"""
+    return [_doc_info(ctx, d) for d in ctx.cache.list_documents()]
+
+
+def get_document(ctx: ApiContext, chash: str) -> DocumentDetail:
+    """1 文書のメタ＋チャンク本文。未取込は 404。"""
+    chunks = ctx.cache.get_chunks(chash)
+    info = _find_doc(ctx, chash)
+    if chunks is None or info is None:
+        raise HTTPException(404, f"未取込の content_hash です: {chash}")
+    base = _doc_info(ctx, info)
+    return DocumentDetail(**base.model_dump(), chunks=chunks)
+
+
+def delete_document(ctx: ApiContext, chash: str, layer: str | None) -> None:
+    """文書を削除。``layer="ner"`` は NER キャッシュのみ破棄（本文・LLM・draft は残す。D2/D4）。"""
+    if layer is None:
+        ctx.cache.delete(chash)
+    elif layer == "ner":
+        ctx.cache.delete_ner(chash)
+    else:
+        raise HTTPException(422, f"未知の layer です: {layer!r}（ner または省略）")
+
+
+def patch_document(ctx: ApiContext, chash: str, source_kind: str) -> DocumentInfo:
+    """文書メタを更新（現状 source_kind のみ。D3）。未取込は 404。"""
+    info = _find_doc(ctx, chash)
+    if info is None:
+        raise HTTPException(404, f"未取込の content_hash です: {chash}")
+    ctx.cache.set_source_kind(chash, source_kind)
+    updated = _find_doc(ctx, chash)
+    assert updated is not None  # 直前に存在を確認済み
+    return _doc_info(ctx, updated)

@@ -110,3 +110,41 @@ class UnmaskResponse(BaseModel):
     """``POST /unmask`` のレスポンス。"""
 
     restored_text: str
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/documents 系（設計 §2-B）。Streamlit クライアントのレビュー UI 用。
+# --------------------------------------------------------------------------- #
+class DocumentIngestRequest(BaseModel):
+    """``POST /documents``（application/json）＝テキストを取り込む。
+
+    バイナリ（xlsx/pdf/docx…）は multipart で ``file`` を送る（このモデルは使わない）。
+    """
+
+    text: str
+    source_name: str = "text"
+
+
+class DocumentInfo(BaseModel):
+    """キャッシュ済み文書 1 件のメタ＋キャッシュ状態（一覧・詳細で共有）。設計 §2-B・D4。"""
+
+    content_hash: str
+    source_kind: str  # text / file / kb
+    source_name: str
+    char_count: int
+    chunk_count: int
+    created_at: str
+    ner_models: list[str]  # NER キャッシュ済みのモデル
+    llm_versions: list[str]  # LLM 検出キャッシュ済みの detector_version
+
+
+class DocumentDetail(DocumentInfo):
+    """``GET /documents/{hash}`` の詳細（メタ＋チャンク本文）。"""
+
+    chunks: list[str]
+
+
+class DocumentPatch(BaseModel):
+    """``PATCH /documents/{hash}``＝メタ更新（現状は source_kind のみ。D3）。"""
+
+    source_kind: str

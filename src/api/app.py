@@ -1,15 +1,22 @@
 """マスキング HTTP API（FastAPI）。設計 [docs-dev/mask-http-api設計.md] の B 案・最小面。
 
 エンジン（GiNZA モデル）と ``data/cache.db`` の**所有者をこの 1 プロセスに集約**する
-（設計 B：Streamlit も外部アプリも HTTP クライアント）。M2 の実装範囲は最小面：
+（設計 B：Streamlit も外部アプリも HTTP クライアント）。エンドポイント：
 
-    GET  /health   死活・モデルロード状態
-    GET  /config   既定モデル・detector_version・選択肢
-    POST /mask     parts（text / content_hash 参照 / 同梱ファイル）→ バンドル共有の対応表でマスク
-    POST /unmask   text＋mapping → 復元テキスト
+    最小面（M2）:
+      GET  /health           死活・モデルロード状態
+      GET  /config           既定モデル・detector_version・選択肢・対応拡張子
+      POST /mask             parts（text / content_hash 参照 / 同梱ファイル）→ 共有対応表でマスク
+      POST /unmask           text＋mapping → 復元テキスト
+    全体面（M5・Streamlit クライアント用。stateful）:
+      POST   /documents      入力取込 → content_hash 発行（JSON=text / multipart=file）
+      GET    /documents      取込済み一覧
+      GET    /documents/{h}  メタ＋チャンク
+      DELETE /documents/{h}  削除（?layer=ner で NER 層のみ）
+      PATCH  /documents/{h}  メタ更新（source_kind）
 
-起動時にモデルを 1 回ロードする（lifespan、エンジン singleton）。全体面（/documents・
-/analyze・/apply 等）と Streamlit のクライアント化は M5 で足す。
+起動時にモデルを 1 回ロードする（lifespan、エンジン singleton）。残りの全体面（/analyze・
+/apply・/draft・/allowlist・/dictionary・/kb）と Streamlit のクライアント化は M5b 以降で足す。
 
 起動：``uv run data-redactor serve``（uvicorn ラッパ）。テストは ``create_app(ctx=...)`` に
 軽量な :class:`~src.api.service.ApiContext` を注入して GiNZA の実ロードを避ける。
@@ -32,8 +39,28 @@ from src.api.enums import (
     DETECTION_MODES,
     MASK_LEVELS,
 )
-from src.api.models import MaskRequest, MaskResponse, UnmaskRequest, UnmaskResponse
-from src.api.service import ApiContext, run_mask, run_unmask
+from src.api.models import (
+    DocumentDetail,
+    DocumentIngestRequest,
+    DocumentInfo,
+    DocumentPatch,
+    MaskRequest,
+    MaskResponse,
+    UnmaskRequest,
+    UnmaskResponse,
+)
+from src.api.service import (
+    SUPPORTED_EXTENSIONS,
+    ApiContext,
+    delete_document,
+    get_document,
+    ingest_file,
+    ingest_text,
+    list_documents,
+    patch_document,
+    run_mask,
+    run_unmask,
+)
 from src.detector import LLM_MODEL, detector_version
 from src.masking import MaskAllowlist, MaskDictionary, MaskingEngine, NerCache
 from src.ner import AVAILABLE_MODELS
@@ -121,6 +148,7 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
             "default_detection": DEFAULT_DETECTION,
             "mask_levels": list(MASK_LEVELS),
             "default_mask_level": DEFAULT_MASK_LEVEL,
+            "supported_extensions": list(SUPPORTED_EXTENSIONS),
         }
 
     @app.post("/mask", response_model=MaskResponse)
@@ -151,6 +179,51 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
     @app.post("/unmask", response_model=UnmaskResponse)
     def unmask_endpoint(req: UnmaskRequest) -> UnmaskResponse:
         return run_unmask(req)
+
+    # ----------------------------------------------------------------- #
+    # 全体面：/documents 系（設計 §2-B）。取込→content_hash 発行（D1）。
+    # ----------------------------------------------------------------- #
+    @app.post("/documents", response_model=DocumentInfo)
+    async def documents_ingest(request: Request) -> DocumentInfo:
+        """入力を取り込み content_hash を発行する。
+
+        JSON（application/json）＝テキスト取込、multipart/form-data＝ファイル取込
+        （``file`` にファイル本体、任意で ``source_name``）を content-type で分岐する。
+        """
+        ctype = request.headers.get("content-type", "")
+        try:
+            if ctype.startswith("multipart/form-data"):
+                form = await request.form()
+                upload = form.get("file")
+                if not isinstance(upload, UploadFile):
+                    raise HTTPException(
+                        422,
+                        "multipart には `file` フィールド（ファイル本体）が必要です",
+                    )
+                data = await upload.read()
+                name = upload.filename or "upload"
+                return ingest_file(app.state.ctx, name, data)
+            req = DocumentIngestRequest.model_validate(await request.json())
+        except ValidationError as e:
+            raise HTTPException(422, e.errors()) from e
+        return ingest_text(app.state.ctx, req.text, req.source_name)
+
+    @app.get("/documents", response_model=list[DocumentInfo])
+    def documents_list() -> list[DocumentInfo]:
+        return list_documents(app.state.ctx)
+
+    @app.get("/documents/{content_hash}", response_model=DocumentDetail)
+    def documents_get(content_hash: str) -> DocumentDetail:
+        return get_document(app.state.ctx, content_hash)
+
+    @app.delete("/documents/{content_hash}", status_code=204)
+    def documents_delete(content_hash: str, layer: str | None = None) -> None:
+        """文書を削除。``?layer=ner`` で NER キャッシュだけ破棄（本文・LLM・draft は残す）。"""
+        delete_document(app.state.ctx, content_hash, layer)
+
+    @app.patch("/documents/{content_hash}", response_model=DocumentInfo)
+    def documents_patch(content_hash: str, patch: DocumentPatch) -> DocumentInfo:
+        return patch_document(app.state.ctx, content_hash, patch.source_kind)
 
     return app
 

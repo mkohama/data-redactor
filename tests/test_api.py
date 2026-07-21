@@ -315,3 +315,97 @@ def test_mask_503_when_models_not_ready(_engine: MaskingEngine, tmp_path: Path) 
     c = TestClient(create_app(ctx))
     r = c.post("/mask", json={"text": "a", "detection": "ner"})
     assert r.status_code == 503
+
+
+# --------------------------------------------------------------------------- #
+# 全体面：/documents 系（M5a）
+# --------------------------------------------------------------------------- #
+def test_config_supported_extensions(client: TestClient) -> None:
+    exts = client.get("/config").json()["supported_extensions"]
+    assert ".txt" in exts  # DocumentLoader が対応する拡張子が載る
+
+
+def test_documents_ingest_text_then_reference(client: TestClient) -> None:
+    """テキスト取込→content_hash 発行→その hash を /mask で参照できる（D1）。"""
+    r = client.post(
+        "/documents", json={"text": "SONYとCanonの比較。", "source_name": "memo"}
+    )
+    assert r.status_code == 200
+    doc = r.json()
+    assert doc["content_hash"] and doc["source_kind"] == "text"
+    assert doc["source_name"] == "memo" and doc["chunk_count"] == 1
+
+    m = client.post(
+        "/mask",
+        json={
+            "parts": [{"id": "d", "content_hash": doc["content_hash"]}],
+            "detection": "ner",
+        },
+    )
+    assert m.status_code == 200
+    masked = m.json()["masked_parts"][0]["masked_text"]
+    assert "SONY" not in masked and "Canon" not in masked
+
+
+def test_documents_ingest_file(client: TestClient) -> None:
+    r = client.post(
+        "/documents",
+        files={"file": ("memo.txt", "SONYの比較メモ。".encode(), "text/plain")},
+    )
+    assert r.status_code == 200
+    doc = r.json()
+    assert doc["source_kind"] == "file" and doc["source_name"] == "memo.txt"
+
+
+def test_documents_ingest_unsupported_extension_422(client: TestClient) -> None:
+    r = client.post(
+        "/documents",
+        files={"file": ("a.exe", b"\x00\x01", "application/octet-stream")},
+    )
+    assert r.status_code == 422
+
+
+def test_documents_list_and_get_detail(client: TestClient) -> None:
+    h = client.post("/documents", json={"text": "SONYの話。"}).json()["content_hash"]
+    docs = client.get("/documents").json()
+    assert any(d["content_hash"] == h for d in docs)
+    assert all("ner_models" in d and "llm_versions" in d for d in docs)
+
+    detail = client.get(f"/documents/{h}").json()
+    assert detail["chunks"] == ["SONYの話。"]
+
+
+def test_documents_get_404(client: TestClient) -> None:
+    assert client.get("/documents/deadbeef").status_code == 404
+
+
+def test_documents_delete(client: TestClient) -> None:
+    h = client.post("/documents", json={"text": "SONYの話。"}).json()["content_hash"]
+    assert client.delete(f"/documents/{h}").status_code == 204
+    assert client.get(f"/documents/{h}").status_code == 404
+
+
+def test_documents_delete_ner_keeps_document(client: TestClient) -> None:
+    """?layer=ner は NER キャッシュだけ破棄し、文書本体は残す。"""
+    h = client.post("/documents", json={"text": "佐藤さんが出席した。"}).json()[
+        "content_hash"
+    ]
+    # NER 解析でキャッシュを埋める（content_hash 参照）。
+    client.post(
+        "/mask",
+        json={
+            "parts": [{"id": "d", "content_hash": h}],
+            "detection": "ner",
+            "mask_level": "medium",
+        },
+    )
+    assert client.get(f"/documents/{h}").json()["ner_models"]  # NER 済み
+    assert client.delete(f"/documents/{h}?layer=ner").status_code == 204
+    after = client.get(f"/documents/{h}").json()
+    assert after["ner_models"] == []  # NER は破棄・文書は残る
+
+
+def test_documents_patch_source_kind(client: TestClient) -> None:
+    h = client.post("/documents", json={"text": "SONYの話。"}).json()["content_hash"]
+    r = client.patch(f"/documents/{h}", json={"source_kind": "kb"})
+    assert r.status_code == 200 and r.json()["source_kind"] == "kb"
