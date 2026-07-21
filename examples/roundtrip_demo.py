@@ -96,10 +96,23 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     # バンドル＝1 回の LLM 呼び出しにまとめる複数パート。同じ実体は全パートで同じ番号。
+    # ここでは全て text だが、file / content_hash を混ぜても同じ 1 本の parts で書ける。
     parts = [
-        {"id": "prompt", "text": "次の 2 社の比較資料を要約して。担当は佐藤。"},
-        {"id": "docA", "text": "SONYの新型センサはCanonを上回る感度を示した。"},
-        {"id": "docB", "text": "一方でCanonのレンズ設計はSONYより堅実との評価。"},
+        {
+            "kind": "text",
+            "id": "prompt",
+            "content": "次の 2 社の比較資料を要約して。担当は佐藤。",
+        },
+        {
+            "kind": "text",
+            "id": "docA",
+            "content": "SONYの新型センサはCanonを上回る感度を示した。",
+        },
+        {
+            "kind": "text",
+            "id": "docB",
+            "content": "一方でCanonのレンズ設計はSONYより堅実との評価。",
+        },
     ]
 
     try:

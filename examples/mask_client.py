@@ -6,54 +6,46 @@
 **外部アプリがそのままコピーして使える**よう、このプロジェクトの ``src`` には
 一切依存しない（返り値は API の JSON をそのまま dict で返す）。
 
-想定する使い方（設計 [docs-dev/mask-http-api設計.md] §3-1/§3-2）:
+使い方（設計 [docs-dev/mask-http-api設計.md] §3-1/§3-2）:
 
     with MaskClient() as client:
-        res = client.mask(text="担当は佐藤。SONYと比較。")
+        # 入力は parts の一覧。各 part は kind（中身の取得元）と content だけ。
+        res = client.mask(parts=[
+            {"kind": "text",         "content": "この3ファイルを要約して。担当は佐藤。"},
+            {"kind": "file",         "content": "見積.xlsx"},               # パス
+            {"kind": "file",         "content": ("議事録.docx", raw_bytes)},# or (名前, バイト列)
+            {"kind": "content_hash", "content": "ab12…"},                  # 取込済み参照
+        ])
 
-        # res["masked_parts"] は「入力 part ごとの結果」のリスト。
-        # text= のときは part が 1 個なので [0]（1 番目）を取る。
-        #
-        # masked_text は機密を伏せ字にした本文＝LLM に送ってよい版。
-        #   元:     担当は佐藤。SONYと比較。
-        #   伏せ字: 担当は[人物1]。[社1]と比較。
-        masked = res["masked_parts"][0]["masked_text"]
+        # masked_parts は入力と同じ順・同じ id の結果。
+        # masked_text＝機密を伏せ字にした本文
+        #（例 "SONY"→"[社1]"）＝LLM に送ってよい版（原文は渡さない）。
+        for mp in res["masked_parts"]:
+            print(mp["id"], mp["masked_text"])
 
-        # 各アプリの LLM 呼び出し（伏せ字のまま渡す）。
-        answer = call_llm(masked)
+        answer = call_llm(res["masked_parts"])   # 各アプリの LLM 呼び出し（伏せ字のまま）
 
-        # 応答に残ったプレースホルダ（[社1] 等）を元の語に戻す。
+        # (A) LLM の応答を戻す。応答に混ざった全 part 由来のプレースホルダを
+        #     共有 mapping でまとめて復元する（unmask は 1 回でよい）。
         restored = client.unmask(answer, res["mapping"])["restored_text"]
 
-part（＝LLM に渡す入力 1 個）は 3 種。**クライアントでの渡し方**を種別ごとに示す:
-
-    # ① text ― すでに手元にある文字列（プロンプト・コピペ本文）。
-    #    単一なら text= の省略記法が使える。
-    client.mask(text="担当は佐藤。SONYと比較。")
-
-    #    複数をまとめるなら parts= に id つきで並べる。
-    client.mask(
-        parts=[
-            {"id": "prompt", "text": "2 社を比較して。担当は佐藤。"},
-            {"id": "memo", "text": "SONYの評価は高い。"},
+        # (B) 渡した文書側を戻したいときも、同じ mapping で戻せる（part ごとに 1 回）。
+        #     mapping は 1 個でバンドル全体を覆うので、戻すテキストの数だけ呼ぶだけ。
+        restored_parts = [
+            client.unmask(mp["masked_text"], res["mapping"])["restored_text"]
+            for mp in res["masked_parts"]
         ]
-    )
 
-    # ② content_hash ― 事前にサーバへ取り込み済みのファイルを指す（再送不要・速い）。
-    client.mask(parts=[{"id": "fileA", "content_hash": "ab12…"}])
-
-    # ③ file ― 手元のファイル（xlsx/pdf/docx…）をその場で送る（サーバがテキスト化）。
-    #    part に filename を書き、files= に本体（パス or (名前, bytes)）を渡す。
-    client.mask(
-        parts=[{"id": "fileB", "file": {"filename": "見積.xlsx"}}],
-        files={"fileB": "見積.xlsx"},
-    )
-
-複数 part を 1 回で渡すと（＝バンドル）、同じ実体は全 part で同じプレースホルダに揃う
-（SONY はどの part でも [社1]）。masked_parts は入力と同じ順・同じ id で返る。
-
-file を 1 つでも渡すと multipart/form-data（JSON マニフェスト＋本体）、
-それ以外は application/json で送る（自動判定）。
+- ``mapping`` はバンドル共有の 1 個。**戻したいテキストの数だけ ``unmask`` を呼ぶ**
+  （LLM 応答＝(A) は 1 回、各 part を戻す＝(B) は part の数だけ）。同じ mapping を使い回す。
+- mapping に無いプレースホルダは無変更（LLM の捏造・改変への安全側）。
+- ``kind`` … ``"text"`` / ``"file"`` / ``"content_hash"``。``content`` は順に、
+  文字列 / ファイルのパス（or ``(名前, バイト列)``）/ 取込済み文書のハッシュ。
+- 単一テキストは ``client.mask(text="…")`` の省略記法（part 1 個）。
+- 複数 part を 1 回で渡すと（＝バンドル）、同じ実体は全 part で同じプレースホルダに揃う
+  （SONY はどの part でも ``[社1]``）。unmask も共有の対応表 1 つで戻せる。
+- ``id`` は任意（省略時 ``p0``,``p1``…）。結果 ``masked_parts`` と対応づけたいとき付ける。
+- HTTP の送り方（JSON か multipart か）はクライアントが内部で振り分ける（呼ぶ側は気にしない）。
 """
 
 from __future__ import annotations
@@ -121,32 +113,38 @@ class MaskClient:
         flatten_tables: bool = True,
         models: list[str] | None = None,
         return_pending: bool = True,
-        files: dict[str, FileBody] | None = None,
     ) -> dict[str, Any]:
         """parts をマスクし、バンドル全体で共有する対応表を得る（``POST /mask``。設計 §3-1）。
 
-        ``text`` は ``parts:[{id:"_", text}]`` の糖衣。同梱ファイル part を使う場合は
-        ``files={part_id: <path or (filename, bytes)>}`` を渡す（multipart になる）。
+        ``parts`` は ``{"kind": "text"|"file"|"content_hash", "content": ..., "id": 任意}``
+        の並び。``text="…"`` は単一 text part の省略記法。file を含むかどうかで JSON /
+        multipart を**内部で振り分ける**（呼ぶ側は HTTP の送り方を意識しない）。
         """
+        if text is not None and parts is not None:
+            raise ValueError(
+                "text と parts は同時に指定できません（text は単一 part の省略記法）"
+            )
+        if text is not None:
+            parts = [{"kind": "text", "id": "_", "content": text}]
+        if not parts:
+            raise ValueError("parts か text のいずれかを指定してください")
+
+        # 呼ぶ側の {kind, content} 列を wire 形式へ組み直し、ファイル本体を分離する。
+        wire_parts, uploads = _build_parts(parts)
         manifest: dict[str, Any] = {
+            "parts": wire_parts,
             "detection": detection,
             "mask_level": mask_level,
             "flatten_tables": flatten_tables,
             "return_pending": return_pending,
         }
-        if parts is not None:
-            manifest["parts"] = parts
-        if text is not None:
-            manifest["text"] = text
         if models is not None:
             manifest["models"] = models
 
-        if not files:
+        # ファイル本体があれば multipart、無ければ JSON（送り方はここで隠蔽する）。
+        if not uploads:
             return self._post_json("/mask", manifest)
-
-        # 同梱ファイルあり＝multipart（JSON マニフェスト文字列 + 本体）。
-        upload = {pid: _as_upload(body) for pid, body in files.items()}
-        return self._post_multipart("/mask", manifest, upload)
+        return self._post_multipart("/mask", manifest, uploads)
 
     def unmask(self, text: str, mapping: Mapping) -> dict[str, Any]:
         """LLM 応答テキストを mapping で復元する（``POST /unmask``。設計 §3-2）。
@@ -189,8 +187,40 @@ class MaskClient:
         raise MaskApiError(resp.status_code, detail)
 
 
+def _build_parts(
+    parts: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, tuple[str, bytes, str]]]:
+    """呼ぶ側の ``{"kind", "content", "id"?}`` 列をサーバの wire 形式に組み直す。
+
+    戻り値は ``(manifest の parts, 送るファイル本体 {id: (name, bytes, content_type)})``。
+    ファイル本体があるときだけ multipart になる（判定は :meth:`MaskClient.mask`）。
+    """
+    wire: list[dict[str, Any]] = []
+    uploads: dict[str, tuple[str, bytes, str]] = {}
+    for i, p in enumerate(parts):
+        kind = p.get("kind")
+        pid = str(p.get("id") or f"p{i}")
+        content = p.get("content")
+        if kind == "text":
+            wire.append({"id": pid, "text": content})
+        elif kind == "content_hash":
+            wire.append({"id": pid, "content_hash": content})
+        elif kind == "file":
+            if content is None:
+                raise ValueError(f"part[{i}] は file ですが content がありません")
+            name, blob, ctype = _as_upload(content)
+            wire.append({"id": pid, "file": {"filename": name}})
+            uploads[pid] = (name, blob, ctype)
+        else:
+            raise ValueError(
+                f"part[{i}] の kind が不正です: {kind!r}"
+                "（text / file / content_hash のいずれか）"
+            )
+    return wire, uploads
+
+
 def _as_upload(body: FileBody) -> tuple[str, bytes, str]:
-    """ファイル本体指定を httpx の files 形式 (filename, bytes, content_type) にする。"""
+    """file part の content（パス or (名前, バイト列)）を (名前, バイト列, MIME) にする。"""
     if isinstance(body, (str, Path)):
         p = Path(body)
         return (p.name, p.read_bytes(), "application/octet-stream")

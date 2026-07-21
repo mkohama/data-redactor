@@ -114,7 +114,14 @@ curl -X POST http://127.0.0.1:8000/unmask \
 
 ---
 
-## 4. Python から使う（最小）
+## 4. Python から使う
+
+呼ぶ側は **`parts`（入力の一覧）だけ**を組み立てる。各 part は
+`{"kind": "text"|"file"|"content_hash", "content": ...}`。
+**JSON か multipart かはクライアントが内部で振り分ける**ので、curl 例のような
+「manifest とファイル本体を分けて送る」作業は不要（file の本体も `content` に入れるだけ）。
+
+### 最小（単一テキスト）
 
 ```python
 from mask_client import MaskClient   # examples/ 内。自分のアプリでは相対 import を調整
@@ -127,6 +134,40 @@ with MaskClient("http://127.0.0.1:8000") as client:
 
     restored = client.unmask(answer, res["mapping"])["restored_text"]
 ```
+
+### プロンプト＋複数ファイルを 1 回で（＝バンドル）
+
+`text=` の代わりに `parts=` に並べる。file の `content` はパス、または `(名前, バイト列)`。
+
+```python
+res = client.mask(parts=[
+    {"kind": "text", "content": "この3ファイルを要約して。担当は佐藤。"},
+    {"kind": "file", "content": "見積.xlsx"},                 # パス
+    {"kind": "file", "content": ("議事録.docx", raw_bytes)},  # or (名前, バイト列)
+    {"kind": "content_hash", "content": "ab12…"},            # 取込済み文書を参照
+])
+
+for mp in res["masked_parts"]:      # 入力と同じ順・同じ id で返る
+    print(mp["id"], mp["masked_text"])
+# 同じ会社はどのファイルでも同じ番号（SONY=[社1]）。res["mapping"] が共有の対応表。
+```
+
+### 復元（restore）
+
+`mapping` はバンドル共有の 1 個。**戻したいテキストの数だけ `unmask` を呼ぶ**だけ。
+
+```python
+# (A) LLM の応答を戻す。全 part 由来のプレースホルダをまとめて復元（1 回でよい）。
+restored = client.unmask(answer, res["mapping"])["restored_text"]
+
+# (B) 渡した文書側を戻したいときも、同じ mapping で part ごとに戻せる。
+restored_parts = [
+    client.unmask(mp["masked_text"], res["mapping"])["restored_text"]
+    for mp in res["masked_parts"]
+]
+```
+
+`id` は任意（省略時 `p0`,`p1`…）。結果を対応づけたいときは `"id": "見積"` のように付ける。
 
 エラーは `MaskApiError`（`.status_code` / `.detail`）で受け取れる。
 主なステータス: 404（未取込 hash）/ 422（不正入力・未対応拡張子）/ 502（LLM 資格情報）/ 503（モデル未ロード）。
