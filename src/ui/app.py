@@ -55,6 +55,7 @@ from src.ner import (
 from src.sources import SAMPLE_TEXT, load_chunks_from_file
 from src.sources.kb_mcp import (
     DEFAULT_KB_MCP_URL,
+    download_document_sync,
     get_document_chunks_sync,
     list_documents_sync,
     suppress_async_generator_errors,
@@ -74,9 +75,9 @@ MODEL_DESCRIPTIONS = {
 
 
 # マスキング API（サーバ）の接続先。UI は純クライアント（設計 B）＝エンジンを内包せず、
-# この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve（既定 localhost:8000）、
-# Docker は MASK_API_URL=http://api:8000 を環境変数で渡す。
-MASK_API_URL = os.environ.get("MASK_API_URL", "http://127.0.0.1:8000")
+# この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve（既定 localhost:8509。
+# kb-mcp の既定 8000 と衝突させないため 8509）。Docker は MASK_API_URL=http://api:8509 を渡す。
+MASK_API_URL = os.environ.get("MASK_API_URL", "http://127.0.0.1:8509")
 
 
 @st.cache_resource(show_spinner=False)
@@ -311,13 +312,17 @@ def render_input(
 
     ``flatten_tables`` は現在の平文化設定で、🗂 キャッシュ選択の LLM 列の有効/要更新判定に渡す。
 
-    重いテキスト化／ダウンロードは**ここでは行わず**、``get_chunks`` 呼び出しに遅延させる
-    （実際にチャンクを取り出すのは「解析する」ボタンが押されたときだけ）。
+    重い取込（サーバへの送信・kb からのダウンロード・テキスト化）は**ここでは行わず**、
+    ``get_chunks`` 呼び出しに遅延させる（実際に走るのは「読み込む」ボタンが押されたときだけ）。
+
+    text/file/kb は ``get_chunks`` の中で ``MaskClient.ingest_document`` を呼んでサーバへ取り込み
+    （テキスト化・チャンク化の所有者はサーバ＝設計 B）、返るチャンクを解析に使う。kb は kb-mcp
+    から元ファイルを取得して file として取り込む（cache＝キャッシュ選択は取込済みチャンクを返す）。
 
     戻り値 ``(input_id, input_kind, source_label, get_chunks)``：
       - ``input_id``  … 入力の同一性を表すハッシュ可能なタプル（署名に使う）。
                         入力未確定なら ``None``（解析不可）。
-      - ``input_kind``… ``"text" / "file" / "kb"``（平文プレビューの要否判定に使う）。
+      - ``input_kind``… ``"text" / "file" / "kb" / "cache"``（平文プレビューの要否判定に使う）。
       - ``source_label``… 結果見出しに出す表示名。
       - ``get_chunks``… 呼ぶとチャンク列を返す callable（未確定なら ``None``）。
     """
@@ -330,8 +335,14 @@ def render_input(
             input_id = ("file", uploaded_file.name, uploaded_file.size)
 
             def get_file_chunks(f=uploaded_file) -> list[str]:
-                with st.spinner("ファイルをテキスト化・チャンク化中 ..."):
-                    return extract_chunks_from_upload(f)
+                # ファイル本体をサーバへ送り、サーバが DocumentLoader で抽出・チャンク化する
+                # （テキスト化・チャンク化の所有者はサーバ＝設計 B）。返るチャンクを解析に使う。
+                with st.spinner(
+                    "ファイルをサーバへ送信してテキスト化・チャンク化中 ..."
+                ):
+                    client = _mask_client(MASK_API_URL)
+                    info = client.ingest_document(file=(f.name, f.getvalue()))
+                    return client.get_document(info["content_hash"])["chunks"]
 
             return input_id, "file", uploaded_file.name, get_file_chunks
         return None, "file", "", None
@@ -361,19 +372,25 @@ def render_input(
             st.warning("kb-mcp に登録された文書がありません。")
             return None, "kb", "", None
 
-        # 解析済み（＝NER キャッシュ済み）の kb 文書 → 「✓」を頭に付ける目安（名前一致）に使う。
-        cached_kb = {
-            d.source_name
-            for d in _ner_cache().list_documents()
-            if d.source_kind == "kb"
-        }
+        # 取込済み（＝サーバのキャッシュに file として取り込んだ kb 文書）に「📦」を付ける目安。
+        # kb 文書は元ファイルを取得して file 取込するので source_kind は "file"。取込時に
+        # source_name へ kb 文書ラベル（_kb_doc_label）を刻むので、それと突き合わせる（案A）。
+        # API 未接続なら印だけ出さない（一覧自体は kb-mcp 直取得なので表示できる）。
+        try:
+            imported = {
+                d["source_name"]
+                for d in _mask_client(MASK_API_URL).list_documents()
+                if d["source_kind"] == "file"
+            }
+        except (MaskApiError, httpx.HTTPError):
+            imported = set()
 
-        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。📦＝キャッシュ済みの目安。
+        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。📦＝取込済みの目安。
         # チャンク数は kb-mcp の一覧メタ（knowledge://documents の chunk_count）をそのまま表示。
         kb_df = pd.DataFrame(
             [
                 {
-                    "📦": "✓" if _kb_doc_label(m) in cached_kb else "",
+                    "📦": "✓" if _kb_doc_label(m) in imported else "",
                     "名前": (
                         m.get("title") or m.get("file_name") or m.get("id") or "?"
                     ),
@@ -390,7 +407,7 @@ def render_input(
             sel_key="kb_sel",
             caption=(
                 f"kb-mcp 文書: {len(docs)} 件"
-                "（行をクリックして選択。📦＝キャッシュ済みの目安・チャンク数は kb-mcp の登録値）"
+                "（行をクリックして選択。📦＝取込済みの目安・チャンク数は kb-mcp の登録値）"
             ),
             column_config={"📦": st.column_config.TextColumn("📦", width="small")},
         )
@@ -404,9 +421,15 @@ def render_input(
 
         label = _kb_doc_label(meta)
 
-        def get_kb_chunks(u=url, d=doc_id) -> list[str]:
-            with st.spinner("本文を取得中 ..."):
-                return fetch_kb_document_chunks(u, d)
+        def get_kb_chunks(u=url, d=doc_id, name=label) -> list[str]:
+            # kb-mcp から「元ファイル」を取得し、それをサーバへ送って file として取り込む
+            # （格納チャンクは overlap 付き＝使わない。サーバが overlap 0 で再抽出）。
+            # source_name に kb 文書ラベルを刻んで一覧の「📦 取込済み」判定に使う（案A）。
+            with st.spinner("kb-mcp から元ファイルを取得してサーバへ送信中 ..."):
+                filename, blob = download_document_sync(d, u)
+                client = _mask_client(MASK_API_URL)
+                info = client.ingest_document(file=(filename, blob), source_name=name)
+                return client.get_document(info["content_hash"])["chunks"]
 
         return ("kb", url, doc_id), "kb", label, get_kb_chunks
 
@@ -444,7 +467,14 @@ def render_input(
     # テキスト入力（単一チャンクとして扱う。長文でもエンジン側で安全分割される）
     input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
     if input_text.strip():
-        return ("text", input_text), "text", "入力テキスト", (lambda t=input_text: [t])
+
+        def get_text_chunks(t=input_text) -> list[str]:
+            # サーバへ取り込んで cache.db に登録する（一覧・再利用の対象になる）。
+            client = _mask_client(MASK_API_URL)
+            info = client.ingest_document(text=t, source_name="入力テキスト")
+            return client.get_document(info["content_hash"])["chunks"]
+
+        return ("text", input_text), "text", "入力テキスト", get_text_chunks
     return None, "text", "", None
 
 
@@ -1021,8 +1051,21 @@ def render_cache_view() -> None:
         "編集後は [💾 種別の変更を保存] を押す）"
         "　LLM 列: **✓**=現行 detector_version で有効／**⚠ 要更新**=旧版のキャッシュのみ（窓ポリシー等が変わった）／**—**=無し。"
     )
+    # 旧方式（kb-mcp の格納チャンクを直接取り込んだ）文書が残っている場合の再取込促し。
+    # 新方式では kb 文書は元ファイルを取得して file として取り込む（overlap 0 で再抽出）ため、
+    # source_kind=="kb" の行は旧方式の遺物＝content_hash が変わり新経路ではヒットしない。
+    if any(d["source_kind"] == "kb" for d in docs):
+        st.warning(
+            "⚠ 旧方式（kb チャンク）で取り込まれた文書（種別 `kb`）が残っています。"
+            "新方式では kb 文書は元ファイルを取得して `file` として取り込みます（別の内容ハッシュに"
+            "なります）。🔒 マスキング → 📚 kb-mcp から選択 → 読み込み で取り込み直すとキャッシュが"
+            "更新されます。旧エントリが不要なら削除してください。"
+        )
     current_ver = _detector_version()
-    kind_options = ["text", "file", "kb", "cache"]
+    # 実在する種別（text/file）＋既存データに残る種別の和。旧経路の遺物（"kb"＝旧チャンク取込、
+    # "cache"＝再解析で出所が潰れた行）が残っていても表示・修正でき、消えれば選択肢から自然に
+    # 消える。SelectboxColumn は現在値が options に無いとエラーになるので和にする。
+    kind_options = sorted({"text", "file"} | {d["source_kind"] for d in docs})
 
     def _llm_col(d: dict) -> str:
         # 管理ビューは flatten 文脈を持たないので detector_version 一致のみで判定する。
@@ -2095,16 +2138,9 @@ def main() -> None:
                         "dict_path": dict_path,
                         "allowlist_path": allowlist_path,
                     }
-                    # 文書メタ＋チャンクを記録（「🗂 キャッシュから選択」で入力元に再利用できる）。
-                    chash = content_hash(chunks)
-                    rec_kind, rec_name = in_kind, src_label or "(無題)"
-                    # キャッシュ入力での再解析は「入力方法」が cache なだけで、文書の出所は
-                    # 元のまま（file/kb/text）。種別を "cache" で潰さないよう既存メタを保つ。
-                    if in_kind == "cache":
-                        existing = _ner_cache().get_source(chash)
-                        if existing is not None:
-                            rec_kind, rec_name = existing
-                    _ner_cache().record_document(chash, rec_kind, rec_name, chunks)
+                    # 文書メタ＋チャンクの記録はサーバが取込（ingest_document）時に行う（設計 B）。
+                    # text/file/kb は get_chunks 内でサーバへ取り込み済み（cache は既に登録済み）。
+                    # よってここでのローカル record_document は不要（種別はサーバが text/file を付与）。
                 else:
                     result, elapsed = analyze_ner(chunks, model_name, flatten_tables)
                     st.session_state[slot] = {

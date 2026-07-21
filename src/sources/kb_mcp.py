@@ -11,6 +11,7 @@ kb-mcp 側は次のように HTTP サーバを起動しておくこと:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -42,6 +43,10 @@ def suppress_async_generator_errors() -> None:
 
 class KbMcpConnectionError(Exception):
     """kb-mcp サーバへの接続に失敗した場合の例外."""
+
+
+class KbMcpDownloadError(Exception):
+    """kb-mcp からのファイルダウンロードに失敗した場合の例外 (not_found / error)."""
 
 
 def _extract_root_cause(exc: BaseException) -> str:
@@ -150,6 +155,29 @@ class KbMcpClient:
         data: Any = await self._read_resource_json(f"knowledge://documents/{doc_id}")
         return data
 
+    async def download_document(self, doc_id: str) -> tuple[str, bytes]:
+        """指定ドキュメントの「元ファイル」を取得し (ファイル名, バイト列) を返す.
+
+        kb-mcp の download_document ツールを呼ぶ (格納済みチャンクではなく元ファイル本体).
+        バイナリを確実に扱うため encoding=base64 で受け取り, バイト列へデコードする.
+        status が success 以外 (not_found / error) は KbMcpDownloadError を送出する.
+        """
+        result = await self.session.call_tool(
+            "download_document", {"document_id": doc_id, "encoding": "base64"}
+        )
+        if not result.content:
+            raise KbMcpDownloadError(f"空の応答: {doc_id}")
+        payload = getattr(result.content[0], "text", "")
+        data = json.loads(payload)
+        if data.get("status") != "success":
+            raise KbMcpDownloadError(
+                f"ダウンロード失敗 ({data.get('status')}): "
+                f"{data.get('error') or doc_id}"
+            )
+        blob = base64.b64decode(data["content"])
+        filename = data.get("file_name") or doc_id
+        return filename, blob
+
 
 def list_documents_sync(url: str = DEFAULT_KB_MCP_URL) -> list[dict[str, Any]]:
     """同期版: 文書一覧を取得する (Streamlit から使う)."""
@@ -186,6 +214,22 @@ def get_document_chunks_sync(doc_id: str, url: str = DEFAULT_KB_MCP_URL) -> list
     if isinstance(content, str) and content.strip():
         return [content]
     return []
+
+
+def download_document_sync(
+    doc_id: str, url: str = DEFAULT_KB_MCP_URL
+) -> tuple[str, bytes]:
+    """同期版: 指定ドキュメントの元ファイルを (ファイル名, バイト列) で取得する.
+
+    マスキング API へ multipart/file で送るために使う (サーバがソース非依存＝取得は
+    クライアントの責務。取得した元ファイルをサーバが DocumentLoader で再抽出する)。
+    """
+
+    async def _run() -> tuple[str, bytes]:
+        async with KbMcpClient(url) as client:
+            return await client.download_document(doc_id)
+
+    return asyncio.run(_run())
 
 
 def get_document_text_sync(doc_id: str, url: str = DEFAULT_KB_MCP_URL) -> str:
