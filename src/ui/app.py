@@ -993,9 +993,21 @@ def render_dict_editor() -> None:
 
 
 def render_cache_view() -> None:
-    """キャッシュ済み文書の一覧・削除（🗂 キャッシュ モード）。"""
-    cache = _ner_cache()
-    docs = cache.list_documents()
+    """キャッシュ済み文書の一覧・削除（🗂 キャッシュ モード）。
+
+    文書一覧・削除・種別更新はサーバ所有のキャッシュ（cache.db）に対して API 経由で行う。
+    各文書は API の DocumentInfo（dict）で、キー content_hash / source_kind / source_name /
+    char_count / chunk_count / created_at / ner_models / llm_versions を持つ。
+    """
+    client = _mask_client(MASK_API_URL)
+    try:
+        docs = client.list_documents()
+    except (MaskApiError, httpx.HTTPError) as e:
+        st.error(
+            "文書一覧を取得できません（API 未接続）。サイドバー上部の接続状態を確認してください。"
+        )
+        st.caption(f"詳細: {e}")
+        return
     if not docs:
         st.info(
             "キャッシュはまだありません。マスキングで文書を解析すると、NER 結果が自動で"
@@ -1012,9 +1024,9 @@ def render_cache_view() -> None:
     current_ver = _detector_version()
     kind_options = ["text", "file", "kb", "cache"]
 
-    def _llm_col(d) -> str:
+    def _llm_col(d: dict) -> str:
         # 管理ビューは flatten 文脈を持たないので detector_version 一致のみで判定する。
-        vers = cache.llm_versions(d.content_hash)
+        vers = d["llm_versions"]
         if not vers:
             return "—"
         return "✓" if current_ver in vers else "⚠ 要更新"
@@ -1023,14 +1035,14 @@ def render_cache_view() -> None:
         [
             {
                 "削除": False,
-                "ソース": d.source_name,
-                "種別": d.source_kind,
-                "チャンク": d.chunk_count,
-                "文字数": d.char_count,
-                "NER": _short_models(d.models) or "—",
+                "ソース": d["source_name"],
+                "種別": d["source_kind"],
+                "チャンク": d["chunk_count"],
+                "文字数": d["char_count"],
+                "NER": _short_models(tuple(d["ner_models"])) or "—",
                 "LLM": _llm_col(d),
-                "解析日時": d.created_at,
-                "hash": d.content_hash[:12],
+                "解析日時": d["created_at"],
+                "hash": d["content_hash"][:12],
             }
             for d in docs
         ]
@@ -1051,15 +1063,20 @@ def render_cache_view() -> None:
 
     # 種別の変更（出所の手動修正）を検出して保存する。
     kind_changes = [
-        (d.content_hash, new_kind)
+        (d["content_hash"], new_kind)
         for d, new_kind in zip(docs, edited["種別"].tolist())
-        if new_kind != d.source_kind
+        if new_kind != d["source_kind"]
     ]
     if kind_changes and st.button(
         f"💾 種別の変更（{len(kind_changes)} 件）を保存", type="primary"
     ):
-        for content_hash_, new_kind in kind_changes:
-            cache.set_source_kind(content_hash_, new_kind)
+        try:
+            for content_hash_, new_kind in kind_changes:
+                client.update_document(content_hash_, source_kind=new_kind)
+        except (MaskApiError, httpx.HTTPError) as e:
+            st.error("種別の更新に失敗しました（API 未接続）。")
+            st.caption(f"詳細: {e}")
+            return
         # data_editor の編集状態を破棄してから再描画する。表の行が変わった後も古い編集
         # （チェック行のインデックス）が残ると、行数の減った新しい表へ再適用される際に
         # bool 列へ NaN が入り、pandas 3.x が TypeError を投げるため（静的キーの罠）。
@@ -1069,8 +1086,13 @@ def render_cache_view() -> None:
 
     to_delete = [d for d, on in zip(docs, edited["削除"].tolist()) if on]
     if to_delete and st.button(f"🗑 選択した {len(to_delete)} 件のキャッシュを削除"):
-        for d in to_delete:
-            cache.delete(d.content_hash)
+        try:
+            for d in to_delete:
+                client.delete_document(d["content_hash"])
+        except (MaskApiError, httpx.HTTPError) as e:
+            st.error("キャッシュの削除に失敗しました（API 未接続）。")
+            st.caption(f"詳細: {e}")
+            return
         # 削除で行数が減る。古い編集状態を残すと次回描画で bool 列へ NaN が入り落ちるので破棄する。
         st.session_state.pop("cache_view", None)
         st.success(f"{len(to_delete)} 件のキャッシュを削除しました。")
