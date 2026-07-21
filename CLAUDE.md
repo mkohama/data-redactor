@@ -22,19 +22,19 @@ data-redactor — GiNZA (spaCy) による日本語固有表現抽出（NER）ツ
 ## 開発ワークフロー
 
 - 実行は統一サブコマンド **`data-redactor`**（`[project.scripts]`、実体は `src/cli.py`。click ベース）:
-  - `uv run data-redactor ui` … Streamlit UI を起動（`streamlit run app.py` のラッパ）
+  - `uv run data-redactor ui` … Streamlit UI を起動（`streamlit run src/ui/app.py` のラッパ）
   - `uv run data-redactor ner <file> [--open/--serve/--model/--labels/--flatten]` … NER → HTML 表示
   - `uv run data-redactor debug <file> [--both-models/--all-tokens/--flatten/--out]` …
     各トークンの SudachiPy 品詞 / NER ラベルを並べて recall の穴を観察
   - `uv run data-redactor check` … 品質ゲート（ruff + mypy）をまとめて実行
   - `uv run data-redactor sync-pii-masker [ref]` … pii-masker（submodule）更新への追従を自動化
-    （submodule 更新 → `app.py` の `_DETECTOR_STATIC` のハッシュ書換 → ENE type ドリフト検査 →
+    （submodule 更新 → `src/detector.py` の `_DETECTOR_STATIC` のハッシュ書換 → ENE type ドリフト検査 →
     ruff/mypy/pytest。**stage のみ・コミットはしない**。詳細は README「pii-masker が更新されたら」）。
   - `main.py` は後方互換シム（`uv run main.py <サブコマンド>` でも同じ）。
   - エントリポイント登録には `pyproject.toml` の `[build-system]`（hatchling, `packages=["src"]`）と
     `[project.scripts]` が必要。追加後は `uv sync` で再インストールするとコマンドが有効になる。
-- 品質ゲート: `uv run data-redactor check`（= `uv run ruff check src main.py app.py` ＋
-  `uv run mypy src main.py app.py`）。
+- 品質ゲート: `uv run data-redactor check`（= `uv run ruff check src main.py` ＋
+  `uv run mypy src main.py`。app.py は `src/ui/` 配下＝`src` に含まれる）。
   - **mypy は現状 0 件（クリーン）を維持する。新規にエラーを増やさないこと**。
     かつて kb-mcp 移植元由来の legacy 3件（`text_utils.py` / `powerpoint_loader.py`）が
     常時出ていたが 2026-06-30 に解消済み（insight-memo 参照）。スタブ無しライブラリは
@@ -42,7 +42,7 @@ data-redactor — GiNZA (spaCy) による日本語固有表現抽出（NER）ツ
   - black は環境に入っていないことがある。スタイルは周囲に合わせる。
 - **`.venv` を握ったまま再 sync / 再起動するとアクセス拒否になる**。先に streamlit を止める:
   `Get-Process | ? { $_.CommandLine -like '*streamlit*app.py*' } | Stop-Process -Force`
-- Streamlit は app.py はホットリロードするが、**import した自作モジュール（main.py 等）の
+- Streamlit は `src/ui/app.py` はホットリロードするが、**import した自作モジュール（src/* 等）の
   変更は確実には反映されない**。直したらサーバー再起動。
 
 ## アーキテクチャ（エンジンと表示の分離を保つ）
@@ -61,10 +61,17 @@ src/
     text_splitter.py    SemanticRAGTextSplitter（ファイルタイプ別チャンク分割）
     splitters/          base / default / markdown / pdf / excel / token_utils
   config.py           ChunkingConfig（チャンクサイズ設定。kb-mcp と同値）
-main.py / app.py      薄い表示層（CLI / Streamlit）
+  masking/            マスク判定エンジン（辞書・除外・確信度・mask_parts）＋ NerCache
+  detector.py         LLM 検出の版・窓ポリシー・run_llm_detection（UI 非依存の共有層）
+  api/                マスキング HTTP API（FastAPI サーバ。設計 B）
+  client/             MaskClient（api へのクライアント。httpx のみ・src 非依存）
+  ui/                 Streamlit UI（src/ui/app.py。api のクライアント）
+main.py               後方互換 CLI シム（実体は src/cli.py）
 ```
 
-- 表示層（main.py / app.py）はエンジンを呼ぶだけ。エンジンに Streamlit/IO を持ち込まない。
+- 設計 B：エンジン（GiNZA・cache.db）の所有者は API プロセスだけ。UI（`src/ui/app.py`）も外部アプリも
+  `from src.client import MaskClient` で API に接続する（`data-redactor serve` ＝サーバ、
+  `data-redactor ui` ＝クライアント）。M5e で UI のエンジン直呼びを MaskClient 経由へ置換中。
 
 ## 重要な地雷・設計判断
 

@@ -1,6 +1,6 @@
 """data-redactor の統一コマンドラインインタフェース（薄い表示層）。
 
-低レベルな ``uv run main.py ...`` / ``uv run streamlit run app.py`` の代わりに、
+低レベルな ``uv run main.py ...`` / ``uv run streamlit run src/ui/app.py`` の代わりに、
 1 つのエントリポイント ``data-redactor`` にサブコマンドをぶら下げる。
 
     uv run data-redactor ui                 # Streamlit UI を起動
@@ -43,7 +43,7 @@ from src.ner import (
 )
 from src.sources import SAMPLE_TEXT, load_chunks_from_file
 
-# プロジェクトルート（app.py や品質ゲート対象の解決に使う）
+# プロジェクトルート（src/ui/app.py や品質ゲート対象の解決に使う）
 _ROOT = Path(__file__).resolve().parent.parent
 # マスク辞書の既定パス
 _DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
@@ -160,11 +160,11 @@ def cli() -> None:
 )
 @click.argument("streamlit_args", nargs=-1, type=click.UNPROCESSED)
 def ui(streamlit_args: tuple[str, ...]) -> None:
-    """Streamlit UI を起動する（`streamlit run app.py` のラッパ）。
+    """Streamlit UI を起動する（`streamlit run src/ui/app.py` のラッパ）。
 
     追加引数はそのまま streamlit に渡す。例: `data-redactor ui --server.port 8502`
     """
-    app = _ROOT / "app.py"
+    app = _ROOT / "src" / "ui" / "app.py"
     cmd = [sys.executable, "-m", "streamlit", "run", str(app), *streamlit_args]
     try:
         code = subprocess.call(cmd)
@@ -570,7 +570,7 @@ def _run_lint(tool: str, args: list[str]) -> int:
 @cli.command()
 def check() -> None:
     """品質ゲート（ruff + mypy）を実行する。"""
-    targets = ["src", "main.py", "app.py"]
+    targets = ["src", "main.py"]  # app.py は src/ui/ 配下に移動＝"src" に含まれる
     click.echo("$ ruff check " + " ".join(targets))
     rc_ruff = _run_lint("ruff", ["check", *targets])
     click.echo("\n$ mypy " + " ".join(targets))
@@ -730,7 +730,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
         click.echo("--skip-tests: ruff/mypy/pytest はスキップしました。")
     else:
         click.echo("\n===== 検証（ruff / mypy / pytest） =====")
-        targets = ["src", "main.py", "app.py"]
+        targets = ["src", "main.py"]  # app.py は src/ui/ 配下に移動＝"src" に含まれる
         rc_ruff = _run_lint("ruff", ["check", *targets])
         rc_mypy = _run_lint("mypy", [*targets])
         rc_test = subprocess.call([sys.executable, "-m", "pytest", "-q"], cwd=_ROOT)

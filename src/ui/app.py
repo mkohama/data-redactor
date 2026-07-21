@@ -78,10 +78,13 @@ def get_engine(model_name: str) -> NerEngine:
     return engine
 
 
-# マスク辞書・除外リスト・キャッシュの既定パス（ルート直下 data/）
-_DEFAULT_DICT = Path(__file__).resolve().parent / "data" / "mask_dict.yaml"
-_DEFAULT_ALLOWLIST = Path(__file__).resolve().parent / "data" / "mask_allowlist.yaml"
-_DEFAULT_CACHE_DB = Path(__file__).resolve().parent / "data" / "cache.db"
+# マスク辞書・除外リスト・キャッシュの既定パス（リポジトリルート直下 data/）。
+#   このファイルは src/ui/app.py なので、ルートは親を 3 つ遡る（ui → src → root）。
+#   ※ M5e-2 で MaskClient 経由になり、UI が data/ を直接持たなくなったらこれらは消える。
+_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
+_DEFAULT_ALLOWLIST = _ROOT / "data" / "mask_allowlist.yaml"
+_DEFAULT_CACHE_DB = _ROOT / "data" / "cache.db"
 
 
 @st.cache_resource(show_spinner=False)
