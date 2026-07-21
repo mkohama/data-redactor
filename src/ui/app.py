@@ -24,18 +24,14 @@ import streamlit as st
 from src.client import MaskApiError, MaskClient
 from src.core.document.document_loader import DocumentLoader
 from src.masking import (
-    AUTO_MASK_CONFIDENCE,
     MaskAllowlist,
     MaskDictionary,
     MaskingEngine,
     NerCache,
     allowlist_sort_key,
-    apply_allowlist_to_analysis,
     content_hash,
     dict_sort_key,
-    load_allowlist_entries,
     load_entries,
-    save_allowlist_entries,
     save_entries,
 )
 from src.detector import detector_version as _detector_version
@@ -684,97 +680,138 @@ def _confidence_label(confidence: str) -> str:
     return f"{_CONFIDENCE_ORDER.get(confidence, 9) + 1} : {confidence}"
 
 
-def _sorted_by_confidence(items, *, key, mask_rank=None):
+# API の確信度は wire（ASCII）。UI は日本語表示なのでここで対応づける（設計 §1-A）。
+_WIRE_TO_JP = {
+    "certain": "確定",
+    "strong": "強",
+    "medium": "中",
+    "weak": "弱",
+    "faint": "微弱",
+    "excluded": "除外",
+}
+
+
+def _conf_jp(wire: str) -> str:
+    """確信度の wire（ASCII）→ 日本語表示。未知値はそのまま返す。"""
+    return _WIRE_TO_JP.get(wire, wire)
+
+
+def _group_spans(group: dict) -> set[tuple[int, int]]:
+    """API の実体グループ（dict）の全出現 span を集合で返す。"""
+    return {tuple(o["span"]) for o in group["occurrences"]}
+
+
+def _sorted_by_confidence(items, *, key, mask_rank=None, conf_key=None):
     """（あれば）マスク状態 → 確信度 降順（確定→強→中→弱）→ 第2キー（表層）昇順で並べる。
 
-    items は ``.confidence`` を持つ候補 / 実体。``mask_rank`` は ``it -> int``（小さいほど上。
-    例：マスク中=0 / 一部=1 / 未マスク=2）。指定すると**マスク中の行が先頭**に来る。
+    ``conf_key`` は ``it -> 確信度（日本語）`` を返す関数（既定は属性 ``.confidence``）。
+    API の dict を並べるときは ``conf_key=lambda g: _conf_jp(g["confidence"])`` を渡す。
+    ``mask_rank`` は ``it -> int``（小さいほど上）。指定すると**マスク中の行が先頭**に来る。
     """
+    if conf_key is None:
+
+        def conf_key(it: object) -> str:
+            return it.confidence  # type: ignore[attr-defined]
+
     return sorted(
         items,
         key=lambda it: (
             mask_rank(it) if mask_rank is not None else 0,
-            _CONFIDENCE_ORDER.get(it.confidence, 9),
+            _CONFIDENCE_ORDER.get(conf_key(it), 9),
             key(it),
         ),
     )
 
 
-def _auto_mask_spans(engine, analysis) -> set:
+def _auto_mask_spans(analysis_json: dict) -> set[tuple[int, int]]:
     """既定でマスクする出現の span 集合（共有選択 ``mask_sel`` の初期値）。
 
-    確信度は出現ごとに決まるが、自動選択は **実体単位**で行う：ある表層（実体）に 確定/強 の出現が
-    1 つでもあれば、その表層の**全出現**を選ぶ（＝CLI の ``apply(expand=True)`` と同じ）。
-    1 か所だけ 2系統一致で強・残りが LLM 単独で中、という社名（例 ``C社ファイル`` 4出現中1が強）を
-    「一部」しかマスクしない**漏れを防ぐ**。同形異義語（``小浜市``=地名 / ``小浜さん``=人名）は
-    どの出現も 2系統一致にならず中止まりなので、この自動選択には引っかからない（出現ごとの区別は保つ）。
+    API `/analyze` の ``auto_selection``（mask_level に基づく実体単位の既定選択・案2）をそのまま
+    集合にする。ある表層に 確定/強 の出現が 1 つでもあればその表層の全出現が入る（サーバ側で計算済み）。
     """
-    spans: set[tuple[int, int]] = set()
-    for g in engine.group_candidates(analysis.candidates):
-        if g.confidence in AUTO_MASK_CONFIDENCE:
-            spans.update((m.start, m.end) for m in g.members)
-    return spans
+    return {tuple(s) for s in analysis_json["auto_selection"]}
 
 
-def _apply_selection(engine, analysis, sel: set):
-    """共有選択 ``sel``（マスクする span 集合）から :class:`MaskResult` を作る。
+def _llm_available(client: MaskClient, content_hash_: str, flatten: bool) -> bool:
+    """この文書に現行版の LLM 検出キャッシュがサーバにあるか（マージの detection 自動判定用）。
 
-    **結果はビューに依存しない**：``sel`` にある span（＝選択した出現）だけを正確にマスクする
-    （展開しない）。実体ごと/出現ごとは「``sel`` をどう編集するか」の違いだけで、表示結果は常に
-    ``sel`` と一致する＝**ビュー切替で広がらない**。実体ごとで語をチェックして[反映]すると、その語の
-    全（検出）出現が ``sel`` に入る（＝実質その語を一括マスク）が、それは明示操作のときだけ。
+    get_document の llm_versions（キャッシュ済み detector_version の一覧）に現行 detector_version を
+    含む項目があれば True。接続不可・未取込などは False（＝LLM を強制しない＝NER のみ集約）。
     """
-    selected = [c for c in analysis.candidates if (c.start, c.end) in sel]
-    return engine.apply(analysis, selected, expand=False)
+    try:
+        versions = client.get_document(content_hash_).get("llm_versions", [])
+    except (MaskApiError, httpx.HTTPError):
+        return False
+    dv = _detector_version()
+    return any(dv in v for v in versions)
 
 
-def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
-    """実体ごと：同じ語は文書内の全出現を一括マスク。``confidences`` で表示する確信度を絞る。"""
+def _render_by_entity(groups, confidences, sel, ver, stored):
+    """実体ごと：同じ語は文書内の全出現を一括マスク。``confidences`` で表示する確信度を絞る。
 
-    def _group_mask_rank(g) -> int:
-        spans = {(m.start, m.end) for m in g.members}
+    ``groups`` は API `/analyze` の実体グループ（dict）のリスト。
+    """
+
+    def _group_mask_rank(g: dict) -> int:
+        spans = _group_spans(g)
         if spans <= sel:  # 全出現が選択＝マスク（チェック ON）
             return 0
         return 1 if spans & sel else 2  # 一部選択 / 未選択
 
     all_groups = _sorted_by_confidence(
-        engine.group_candidates(analysis.candidates),
-        key=lambda g: g.surface,
+        groups,
+        key=lambda g: g["surface"],
         mask_rank=_group_mask_rank,
+        conf_key=lambda g: _conf_jp(g["confidence"]),
     )
-    groups = [g for g in all_groups if g.confidence in confidences]
-    hidden = len(all_groups) - len(groups)
-    st.subheader(f"マスク候補（{len(groups)} 実体）— チェックで選択")
+    shown = [g for g in all_groups if _conf_jp(g["confidence"]) in confidences]
+    hidden = len(all_groups) - len(shown)
+    if not shown:
+        # 空だと DataFrame に列が無く data_editor 後の列参照で落ちるので早期に案内して返す。
+        st.subheader("マスク候補（0 実体）")
+        if all_groups:
+            st.info(
+                f"確信度フィルタで全 {len(all_groups)} 実体を非表示中です。"
+                "『表示する確信度』を広げてください。"
+            )
+        else:
+            st.info(
+                "マスク候補が見つかりませんでした（この文書＋現在の検出設定では 0 件）。"
+            )
+        return [], False, [], False
+    st.subheader(f"マスク候補（{len(shown)} 実体）— チェックで選択")
     cap = "チェックは**全出現が選択されているときだけ ON**。チェックした実体は文書内の全出現がマスクされます。"
     if hidden:
         cap += f"（確信度フィルタで {hidden} 実体を非表示）"
     cap += "　※`選択状況` が **⚠一部** の語は、出現ごとビューで一部だけ選択中です。"
     st.caption(cap)
     rows = []
-    for g in groups:
-        spans = [(m.start, m.end) for m in g.members]
+    for g in shown:
+        spans = _group_spans(g)
+        count = g["count"]
         n_sel = sum(1 for s in spans if s in sel)
         if n_sel == 0:
             status = ""
-        elif n_sel < g.count:
-            status = f"⚠ 一部 {n_sel}/{g.count}"
+        elif n_sel < count:
+            status = f"⚠ 一部 {n_sel}/{count}"
         else:
-            status = f"全 {g.count}"
+            status = f"全 {count}"
+        votes = g["votes"]
         rows.append(
             {
-                "マスク": n_sel == g.count,  # 全出現が選択済みのときだけ ON
+                "マスク": n_sel == count,  # 全出現が選択済みのときだけ ON
                 "選択状況": status,
-                "除外": g.confidence == "除外",
+                "除外": _conf_jp(g["confidence"]) == "除外",
                 "辞書登録": False,
-                "確信度": _confidence_label(g.confidence),
-                "カテゴリ": g.category,
-                "表層": g.surface,
-                "出現": g.count,
-                "ja_ginza": g.vote_labels("ja_ginza"),
-                "electra": g.vote_labels("ja_ginza_electra"),
-                "Sudachi": g.vote_labels("sudachi"),
-                "LLM": g.vote_labels("llm"),
-                "辞書": "○" if g.vote_label("dict") else "",
+                "確信度": _confidence_label(_conf_jp(g["confidence"])),
+                "カテゴリ": g["category"],
+                "表層": g["surface"],
+                "出現": count,
+                "ja_ginza": votes.get("ja_ginza", ""),
+                "electra": votes.get("ja_ginza_electra", ""),
+                "Sudachi": votes.get("sudachi", ""),
+                "LLM": votes.get("llm", ""),
+                "辞書": "○" if votes.get("dict") else "",
             }
         )
     table = pd.DataFrame(rows)
@@ -813,11 +850,9 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
     registers = edited["辞書登録"].tolist()
     if applied:  # **変化したチェックだけ**反映（出現ごとの部分選択を壊さない）
         new_sel = set(sel)
-        for g, on, ex in zip(groups, masks, excludes):
-            spans = {(m.start, m.end) for m in g.members}
-            was_on = (
-                spans <= sel
-            )  # 表示時のチェック状態（全出現が選択済み＝チェック ON）
+        for g, on, ex in zip(shown, masks, excludes):
+            spans = _group_spans(g)
+            was_on = spans <= sel  # 表示時のチェック状態（全出現選択済み＝ON）
             if ex or (was_on and not on):  # 除外 or チェックを外した → 全出現を削除
                 new_sel -= spans
             elif on and not was_on:  # 新たにチェック → 全出現を追加
@@ -826,20 +861,51 @@ def _render_by_entity(engine, analysis, confidences, sel, ver, stored):
         stored["mask_sel"] = new_sel
         stored["mask_ver"] = ver + 1
         st.rerun()
-    to_exclude = [g.surface for g, ex in zip(groups, excludes) if ex]
-    to_register = [(g.surface, g.category) for g, on in zip(groups, registers) if on]
+    to_exclude = [g["surface"] for g, ex in zip(shown, excludes) if ex]
+    to_register = [
+        (g["surface"], g["category"]) for g, on in zip(shown, registers) if on
+    ]
     return to_exclude, excl, to_register, reg
 
 
-def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
-    """出現ごと：各出現を個別にマスク。チェックは共有選択 sel を読み書きする。"""
-    all_cands = _sorted_by_confidence(
-        list(analysis.candidates),
-        key=lambda c: c.surface,
-        mask_rank=lambda c: 0 if (c.start, c.end) in sel else 1,  # マスク中を先頭に
+def _render_by_occurrence(groups, confidences, sel, ver, stored, text):
+    """出現ごと：各出現を個別にマスク。チェックは共有選択 sel を読み書きする。
+
+    ``groups`` は API の実体グループ（dict）。各グループの occurrences を平坦化して 1 出現 1 行にする。
+    出現の確信度は occurrence 側、カテゴリ/表層/votes はグループ側の値を使う。``text`` は文脈表示用。
+    """
+    occs = [
+        {
+            "surface": g["surface"],
+            "category": g["category"],
+            "confidence": _conf_jp(o["confidence"]),
+            "votes": g["votes"],
+            "span": tuple(o["span"]),
+        }
+        for g in groups
+        for o in g["occurrences"]
+    ]
+    all_occs = _sorted_by_confidence(
+        occs,
+        key=lambda o: o["surface"],
+        mask_rank=lambda o: 0 if o["span"] in sel else 1,  # マスク中を先頭に
+        conf_key=lambda o: o["confidence"],
     )
-    cands = [c for c in all_cands if c.confidence in confidences]
-    hidden = len(all_cands) - len(cands)
+    cands = [o for o in all_occs if o["confidence"] in confidences]
+    hidden = len(all_occs) - len(cands)
+    if not cands:
+        # 空だと DataFrame に列が無く data_editor 後の列参照で落ちるので早期に案内して返す。
+        st.subheader("マスク候補（0 出現）")
+        if all_occs:
+            st.info(
+                f"確信度フィルタで全 {len(all_occs)} 出現を非表示中です。"
+                "『表示する確信度』を広げてください。"
+            )
+        else:
+            st.info(
+                "マスク候補が見つかりませんでした（この文書＋現在の検出設定では 0 件）。"
+            )
+        return [], False, [], False
     st.subheader(f"マスク候補（{len(cands)} 出現）— 出現ごとに選択")
     cap = (
         "各出現を個別にマスク（フランク=人名 vs フランクに=気軽に、等を文脈で使い分け）。"
@@ -852,20 +918,20 @@ def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
     table = pd.DataFrame(
         [
             {
-                "マスク": (c.start, c.end) in sel,
-                "除外": c.confidence == "除外",
+                "マスク": o["span"] in sel,
+                "除外": o["confidence"] == "除外",
                 "辞書登録": False,
-                "確信度": _confidence_label(c.confidence),
-                "カテゴリ": c.category,
-                "表層": c.surface,
-                "文脈": _context(analysis.text, c.start, c.end),
-                "ja_ginza": c.vote_labels("ja_ginza"),
-                "electra": c.vote_labels("ja_ginza_electra"),
-                "Sudachi": c.vote_labels("sudachi"),
-                "LLM": c.vote_labels("llm"),
-                "辞書": "○" if c.vote_label("dict") else "",
+                "確信度": _confidence_label(o["confidence"]),
+                "カテゴリ": o["category"],
+                "表層": o["surface"],
+                "文脈": _context(text, o["span"][0], o["span"][1]),
+                "ja_ginza": o["votes"].get("ja_ginza", ""),
+                "electra": o["votes"].get("ja_ginza_electra", ""),
+                "Sudachi": o["votes"].get("sudachi", ""),
+                "LLM": o["votes"].get("llm", ""),
+                "辞書": "○" if o["votes"].get("dict") else "",
             }
-            for c in cands
+            for o in cands
         ]
     )
     with st.form("mask_occurrence_form"):
@@ -899,17 +965,18 @@ def _render_by_occurrence(engine, analysis, confidences, sel, ver, stored):
     registers = edited["辞書登録"].tolist()
     if applied:  # 表示中の出現について sel を更新（ON=その span を追加／OFF=削除）
         new_sel = set(sel)
-        for c, on, ex in zip(cands, masks, excludes):
-            span = (c.start, c.end)
+        for o, on, ex in zip(cands, masks, excludes):
             if on and not ex:
-                new_sel.add(span)
+                new_sel.add(o["span"])
             else:
-                new_sel.discard(span)
+                new_sel.discard(o["span"])
         stored["mask_sel"] = new_sel
         stored["mask_ver"] = ver + 1
         st.rerun()
-    to_exclude = [c.surface for c, ex in zip(cands, excludes) if ex]
-    to_register = [(c.surface, c.category) for c, on in zip(cands, registers) if on]
+    to_exclude = [o["surface"] for o, ex in zip(cands, excludes) if ex]
+    to_register = [
+        (o["surface"], o["category"]) for o, on in zip(cands, registers) if on
+    ]
     return to_exclude, excl, to_register, reg
 
 
@@ -1372,19 +1439,32 @@ def _append_to_dictionary(
 
 
 def render_masking_result(stored: dict) -> None:
-    """マスキングの結果表示（保存済み結果から。候補選択・表示切替は再解析しない）。"""
+    """マスキングの結果表示（サーバの解析 JSON から。候補選択・表示切替は再解析しない）。
+
+    ``stored["analysis_json"]`` は API `/analyze` の応答（groups / auto_selection / text）。
+    選択反映は `/apply`、手動選択差分は `/draft`、除外/辞書登録は `/allowlist`・`/dictionary`＋再 `/analyze`。
+    """
     models = stored["models"]
-    dict_path = stored["dict_path"]
-    allowlist_path = stored.get("allowlist_path", str(_DEFAULT_ALLOWLIST))
     source_label = stored["source_label"]
-    analysis = stored["analysis"]
+    analysis = stored["analysis_json"]
     chunks = stored["chunks"]
+    flatten = stored.get("flatten", False)
+    detection = stored.get("analysis_detection", "both")
+    groups = analysis["groups"]
+    text = analysis["text"]
 
-    engine = get_masking_engine(tuple(models), dict_path)
+    client = _mask_client(MASK_API_URL)
+    chash = content_hash(chunks)
 
-    if analysis.timings:
-        total = sum(s for _, s in analysis.timings)
-        st.success(_timing_caption(analysis.timings, total, len(chunks)), icon="✅")
+    # 再解析（除外/辞書の反映）に使う共通引数。auto 選択は mask_level=strong（確定/強）。
+    def _reanalyze() -> dict:
+        return client.analyze_document(
+            chash,
+            detection=detection,
+            mask_level="strong",
+            flatten_tables=flatten,
+            models=models,
+        )
 
     if source_label:
         st.subheader(f"結果: {source_label}")
@@ -1412,35 +1492,33 @@ def render_masking_result(stored: dict) -> None:
     by_entity = unit.startswith("実体")
 
     # 共有選択（マスクする span 集合）＝ auto（確定/強）＋ 保存済みドラフト（手動の差分）。
-    # ドラフトは content_hash 単位で DB に永続化するので、**再起動・再解析でも手動選択が消えない**。
+    # ドラフトは content_hash 単位でサーバ側 DB に永続化＝**再起動・再解析でも手動選択が消えない**。
     # 実体ごと/出現ごとの両ビューがこの 1 つの集合を読み書きするので、切替で選択が消えない。
-    chash = content_hash(chunks)
-    auto = _auto_mask_spans(engine, analysis)
+    auto = _auto_mask_spans(analysis)
     if "mask_sel" not in stored:
-        draft = _ner_cache().get_draft(chash)
-        if draft is not None:
-            added, removed = draft
-            stored["mask_sel"] = (auto | added) - removed  # auto ∪ added − removed
-        else:
-            stored["mask_sel"] = set(auto)
+        try:
+            draft = client.get_draft(chash)
+        except (MaskApiError, httpx.HTTPError):
+            draft = {"added": [], "removed": []}  # 取得失敗時は auto だけで開始
+        added = {tuple(s) for s in draft.get("added", [])}
+        removed = {tuple(s) for s in draft.get("removed", [])}
+        stored["mask_sel"] = (auto | added) - removed  # auto ∪ added − removed
         stored["mask_ver"] = 0
     sel = stored["mask_sel"]
     ver = stored["mask_ver"]
 
     if by_entity:
         to_exclude, excl_clicked, to_register, reg_clicked = _render_by_entity(
-            engine, analysis, confidences, sel, ver, stored
+            groups, confidences, sel, ver, stored
         )
     else:
         to_exclude, excl_clicked, to_register, reg_clicked = _render_by_occurrence(
-            engine, analysis, confidences, sel, ver, stored
+            groups, confidences, sel, ver, stored, text
         )
 
-    # 「除外」チェックを除外リストへ追記し、**再解析なしで**この文書にも即反映する
-    # （NER は再実行せず、保存済み解析の候補の confidence を書き換えるだけ）。
+    # 「除外」チェックを除外リスト（サーバ所有）へ追記し、再解析して即反映する。
     if excl_clicked and to_exclude:
-        path = Path(allowlist_path)
-        current = load_allowlist_entries(path) if path.exists() else []
+        current = client.get_allowlist()["entries"]
         existing = {e["surface"] for e in current}
         # UI から送る除外は完全一致（部分一致=False・大小無視）。細かい指定は除外リストエディタで行う。
         merged = current + [
@@ -1448,62 +1526,59 @@ def render_masking_result(stored: dict) -> None:
             for s in to_exclude
             if s not in existing
         ]
-        save_allowlist_entries(path, merged)
-        added = len(merged) - len(current)
-        # 現在の解析結果にその場で適用（再解析不要）。署名も更新してバナーを出さない。
-        stored["analysis"] = apply_allowlist_to_analysis(
-            analysis, MaskAllowlist.load(path)
-        )
-        # 除外（confidence="除外"）になった span を共有選択から外す（他の手動選択は保持）。
+        added_n = len(merged) - len(current)
+        client.put_allowlist(merged)  # サーバは PUT 後に allowlist を再ロード
+        stored["analysis_json"] = _reanalyze()
+        # 除外（confidence=excluded）になった span を共有選択から外す（他の手動選択は保持）。
         excluded = {
-            (c.start, c.end)
-            for c in stored["analysis"].candidates
-            if c.confidence == "除外"
+            tuple(o["span"])
+            for g in stored["analysis_json"]["groups"]
+            if _conf_jp(g["confidence"]) == "除外"
+            for o in g["occurrences"]
         }
-        stored["mask_sel"] = {s for s in stored["mask_sel"] if s not in excluded}
-        stored["mask_ver"] = stored["mask_ver"] + 1
-        stored["settings_sig"] = _masking_settings_sig(
-            models, stored["flatten"], dict_path, allowlist_path
-        )
+        stored["mask_sel"] = {s for s in sel if s not in excluded}
+        stored["mask_ver"] = ver + 1
         st.success(
-            f"除外リストに {added} 件追加し、再解析なしで反映しました（計 {len(merged)} 件）。"
+            f"除外リストに {added_n} 件追加し、再解析して反映しました（計 {len(merged)} 件）。"
         )
         st.rerun()
 
-    # 「辞書登録」チェックを辞書へ追記し、**その場で再マージ**して即反映する。GiNZA/LLM は
-    # キャッシュ参照のみ（再実行しない）＝軽い（マージ&確信度タブの再実行と同等）。辞書一致は
-    # 確定になり、その語の全出現が自動マスク対象になる（→ 選択に加える）。
+    # 「辞書登録」チェックを辞書（サーバ所有）へ追記し、再解析して即反映する。辞書一致は確定になり、
+    # その語の全出現が自動マスク対象になる（→ 選択に加える）。GiNZA/LLM はサーバのキャッシュ再利用。
     if reg_clicked and to_register:
-        n_added, skipped = _append_to_dictionary(dict_path, to_register)
-        if n_added:
-            # LLM 検出を用意：セッション優先、無ければキャッシュから読む（ヒット＝Azure を呼ばない）。
-            used = stored.get("analysis_channels", {"ner": True, "llm": False})
-            det = (stored.get("llm") or {}).get("detection")
-            if det is None and used.get("llm"):
-                with st.spinner("LLM 検出をキャッシュから読み込み中 ..."):
-                    _, det = run_llm_detection(chunks, stored["flatten"], force=False)
-            with st.spinner("辞書を反映して再マージ中 ...（GiNZA/LLM はキャッシュ）"):
-                stored["analysis"] = analyze_masking(
-                    chunks,
-                    models,
-                    stored["flatten"],
-                    dict_path,
-                    allowlist_path,
-                    llm_detection=det,
-                    run_ner=used.get("ner", True),
-                )
+        current = client.get_dictionary()["entries"]
+        existing = {e["canonical"] for e in current}
+        registrable = {"社名", "商標", "人名"}
+        add: list[dict] = []
+        skipped: list[str] = []
+        seen: set[str] = set()
+        for surface, category in to_register:
+            if category not in registrable:
+                skipped.append(f"{surface}（{category}）")
+                continue
+            if surface in existing or surface in seen:
+                continue
+            seen.add(surface)
+            add.append(
+                {
+                    "category": category,
+                    "canonical": surface,
+                    "aliases": [],
+                    "mask": "",
+                    "partial": False,
+                    "case_sensitive": False,
+                }
+            )
+        if add:
+            client.put_dictionary(current + add)  # サーバは PUT 後に辞書を再ロード
+            with st.spinner(
+                "辞書を反映して再解析中 ...（GiNZA/LLM はサーバのキャッシュ）"
+            ):
+                stored["analysis_json"] = _reanalyze()
             # 新たに確定になった語（辞書一致）を共有選択に加える（他の手動選択は保持）。
-            # 辞書は get_masking_engine が毎回読み直すので、登録が反映された engine で auto を取る。
-            reloaded = get_masking_engine(tuple(models), dict_path)
-            stored["mask_sel"] = set(stored["mask_sel"]) | _auto_mask_spans(
-                reloaded, stored["analysis"]
-            )
-            stored["mask_ver"] = stored["mask_ver"] + 1
-            # 辞書 mtime が変わり settings_sig がズレる → 署名を更新して再読込バナーを出さない。
-            stored["settings_sig"] = _masking_settings_sig(
-                models, stored["flatten"], dict_path, allowlist_path
-            )
-            msg = f"辞書に {n_added} 件登録し、再マージして反映しました（確定＝自動マスク）。"
+            stored["mask_sel"] = set(sel) | _auto_mask_spans(stored["analysis_json"])
+            stored["mask_ver"] = ver + 1
+            msg = f"辞書に {len(add)} 件登録し、再解析して反映しました（確定＝自動マスク）。"
             if skipped:
                 msg += (
                     "　※辞書に登録できるカテゴリ（社名/商標/人名）でないため "
@@ -1520,22 +1595,45 @@ def render_masking_result(stored: dict) -> None:
         else:
             st.info("選択した語はすでに辞書に登録済みです。")
 
-    # 手動選択（auto からの差分）を文書単位で永続化（変化時のみ）。再起動/再解析で復元される。
+    # 手動選択（auto からの差分）をサーバの draft に永続化（変化時のみ）。再起動/再解析で復元される。
     if stored.get("_draft_saved") != stored["mask_sel"]:
-        _ner_cache().save_draft(
-            chash, stored["mask_sel"] - auto, auto - stored["mask_sel"]
+        client.save_draft(
+            chash,
+            added=[list(s) for s in stored["mask_sel"] - auto],
+            removed=[list(s) for s in auto - stored["mask_sel"]],
         )
         stored["_draft_saved"] = set(stored["mask_sel"])
 
-    # 共有選択から結果を作る（ビュー非依存＝sel の span だけをマスク。切替で広がらない）。
-    result = _apply_selection(engine, analysis, stored["mask_sel"])
+    # 共有選択から結果を作る（サーバ /apply。sel の span だけをマスク＝ビュー切替で広がらない）。
+    try:
+        applied = client.apply_selection(
+            chash,
+            [list(s) for s in stored["mask_sel"]],
+            detection=detection,
+            flatten_tables=flatten,
+            models=models,
+        )
+    except MaskApiError as e:
+        _show_analyze_error(e, detection)
+        return
+    except httpx.HTTPError as e:
+        st.error(f"マスキング API に接続できません: {e}")
+        return
+    masked_text = applied["masked_text"]
+    mapping = applied["mapping"]
+
+    # 色付き（元文）表示用：選択中 span → カテゴリ（groups から引く。text は解析座標）。
+    span_cat = {
+        tuple(o["span"]): g["category"] for g in groups for o in g["occurrences"]
+    }
+    total_occ = sum(g["count"] for g in groups)
 
     # --- 結果（色付き表示 / マスク済み / 元テキスト） ---
     col_main, col_side = st.columns([3, 1])
     with col_side:
-        st.caption(f"モデル: {', '.join(models)} / 辞書: {len(engine.dictionary)} 表層")
-        st.metric("マスク（選択中）", f"{len(result.mapping)} 種")
-        st.metric("候補", f"{len(analysis.candidates)} 出現")
+        st.caption(f"モデル: {', '.join(models)}")
+        st.metric("マスク（選択中）", f"{len(mapping)} 種")
+        st.metric("候補", f"{total_occ} 出現")
         st.metric("チャンク数", f"{len(chunks)} 件")
 
     with col_main:
@@ -1543,37 +1641,38 @@ def render_masking_result(stored: dict) -> None:
             "表示", ["色付き（元文）", "マスク済み", "元テキスト"], horizontal=True
         )
         if view.startswith("色付き"):
-            html = render_masking_html(
-                result.text, [(c.start, c.end, c.category) for c in result.masked]
-            )
+            spans = [
+                (s[0], s[1], span_cat[s]) for s in stored["mask_sel"] if s in span_cat
+            ]
+            html = render_masking_html(text, spans)
             st.html(
                 '<div style="height:400px; overflow:auto; resize:vertical; '
                 "line-height:2.2; border:1px solid rgba(128,128,128,0.25); "
                 f'border-radius:6px; padding:0.5em;">{html}</div>'
             )
         elif view.startswith("マスク"):
-            placeholders = {m.placeholder: m.category for m in result.mapping}
-            st.html(_readable_text_block(result.masked_text, placeholders=placeholders))
+            placeholders = {m["placeholder"]: m["category"] for m in mapping}
+            st.html(_readable_text_block(masked_text, placeholders=placeholders))
         else:
-            st.html(_readable_text_block(result.text))
+            st.html(_readable_text_block(text))
         st.download_button(
             "⬇ マスク済みテキストをダウンロード",
-            result.masked_text,
+            masked_text,
             file_name="masked.txt",
             mime="text/plain",
         )
 
-    st.subheader(f"対応表（マスク {len(result.mapping)} 種）")
-    if result.mapping:
+    st.subheader(f"対応表（マスク {len(mapping)} 種）")
+    if mapping:
         st.dataframe(
             pd.DataFrame(
                 [
                     {
-                        "プレースホルダ": m.placeholder,
-                        "カテゴリ": m.category,
-                        "原語": " / ".join(m.surfaces),
+                        "プレースホルダ": m["placeholder"],
+                        "カテゴリ": m["category"],
+                        "原語": " / ".join(m["surfaces"]),
                     }
-                    for m in result.mapping
+                    for m in mapping
                 ]
             ),
             hide_index=True,
@@ -1602,8 +1701,8 @@ def _render_state_header(stored: dict) -> None:
         "llm" in stored, cache.has_llm(chash, LLM_MODEL, flatten, _detector_version())
     )
     draft = cache.get_draft(chash)
-    merge = "✅" if "analysis" in stored else "⬜"
-    if "analysis" in stored and draft and (draft[0] or draft[1]):
+    merge = "✅" if "analysis_json" in stored else "⬜"
+    if "analysis_json" in stored and draft and (draft[0] or draft[1]):
         merge += "（下書きあり）"
     st.caption(
         f"パイプライン状態:　平文 ✅　→　NER検出 {ner}　＋　LLM検出 {llm}　→　"
@@ -1632,7 +1731,7 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
                 stored["allowlist_path"],
             )
         # マージは NER 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
-        stored.pop("analysis", None)
+        stored.pop("analysis_json", None)
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
 
@@ -1765,7 +1864,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
             "elapsed": elapsed,
         }
         # マージは LLM 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
-        stored.pop("analysis", None)
+        stored.pop("analysis_json", None)
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
 
@@ -1794,84 +1893,88 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
     render_llm_result(llm["body_text"], llm["detection"])
 
 
+def _show_analyze_error(e: MaskApiError, detection: str) -> None:
+    """`/analyze`（や `/apply`）の MaskApiError をユーザ向けメッセージにして表示する。"""
+    code = e.status_code
+    if code == 502 and detection in ("llm", "both"):
+        st.error(
+            "LLM 検出でエラーが発生しました（サーバの Azure 認証・接続の問題）。\n"
+            "実機で `az login` 済みか、サーバの .env（RESOURCE_NAME_GPT41_MINI）を確認してください。\n"
+            "LLM 抜きで進めるには 🤖 LLM検出 を使わず、マージは NER のみで実行されます。\n"
+            f"（詳細: {e.detail}）"
+        )
+    elif code == 503:
+        st.error(
+            "サーバの NER モデルがまだロード中です。少し待ってから再実行してください。\n"
+            f"（詳細: {e.detail}）"
+        )
+    elif code == 404:
+        st.error(
+            "この文書がサーバに見つかりません（未取込）。もう一度『読み込む』からやり直してください。\n"
+            f"（詳細: {e.detail}）"
+        )
+    else:
+        st.error(f"解析に失敗しました（HTTP {code}）: {e.detail}")
+
+
 def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
-    """マージ&確信度タブ（出口2）：辞書＋正規表現に、**実行済み or キャッシュ済み**の
-    NER / LLM チャネルを自動合流して候補レビューする（§13・案A）。
+    """マージ&確信度タブ（出口2）：サーバの `/analyze` で候補を集約・確信度づけしてレビューする。
 
-    常に：辞書＋正規表現（決定的・軽い。辞書のため Sudachi トークナイズが内部で走る）。
-    NER / LLM は「このセッションで実行済み」または「キャッシュ済み」なら**自動で合流**する
-    （いずれもキャッシュ参照のみ＝GiNZA / Azure の再実行はしない）。未実行かつ未キャッシュなら
-    合流しない（＝勝手に重い処理を走らせない）。状態は実行ボタンの手前に明示する。
+    detection は「**現行版の LLM キャッシュがある or LLM検出タブを実行済み**なら both、なければ ner」で
+    自動判定する（LLM を勝手に走らせない＝Azure を強制しない・現状の振る舞いを踏襲）。サーバが辞書＋
+    正規表現＋NER（＋LLM）を集約する。重い NER/LLM はサーバ側でキャッシュ再利用される。
     """
+    client = _mask_client(MASK_API_URL)
     chash = content_hash(stored["chunks"])
-    cache = _ner_cache()
+    models = stored["models"]
 
-    # NER：セッション実行済み or 必要モデルが全てキャッシュ済みなら合流（どちらも GiNZA 再実行なし）。
-    ner_in_session = "ner" in stored
-    want = set(stored["models"])
-    ner_cached = bool(want) and want.issubset(
-        cache.cached_ner_models(chash, flatten_tables)
+    # LLM を合流するか：サーバに現行版キャッシュがある、または LLM 検出タブを実行済みなら both。
+    llm_wanted = (
+        _llm_available(client, chash, flatten_tables)
+        or "llm" in stored
+        or "llm_json" in stored
     )
-    run_ner = ner_in_session or ner_cached
+    detection = "both" if llm_wanted else "ner"
 
-    # LLM：セッション実行済み or キャッシュ済みなら合流（キャッシュからは Azure 呼び出しなしで読む）。
-    llm_in_session = "llm" in stored
-    llm_cached = cache.has_llm(chash, LLM_MODEL, flatten_tables, _detector_version())
-    has_llm = llm_in_session or llm_cached
-
-    def _src(in_session: bool) -> str:
-        return "実行済み" if in_session else "キャッシュ"
-
-    if "analysis" not in stored:
-        chans = ["辞書", "正規表現"]
-        if run_ner:
-            chans.append(f"NER（{_src(ner_in_session)}）")
-        if has_llm:
-            chans.append(f"LLM（{_src(llm_in_session)}）")
-        # キャッシュも実行結果も無いチャネル＝そのままでは合流できない。各タブでの実行を促す。
-        missing = []
-        if not run_ner:
-            missing.append("NER（🔍 NER検出 タブ）")
-        if not has_llm:
-            missing.append("LLM（🤖 LLM検出 タブ）")
+    if "analysis_json" not in stored:
         clicked = st.button("▶ マージ&確信度を実行", type="primary", key="run_merge")
         if not clicked:
-            msg = f"『▶ マージ&確信度を実行』で **{' ＋ '.join(chans)}** の票を集約し確信度づけします。"
-            if missing:
+            chans = "辞書＋正規表現＋NER" + ("＋LLM" if llm_wanted else "")
+            msg = f"『▶ マージ&確信度を実行』で **{chans}** の票を集約し確信度づけします。"
+            if not llm_wanted:
                 msg += (
-                    "\n\n" + "・".join(missing) + " はまだ結果がありません。"
-                    "合流したい場合は各タブで実行してください（実行後は自動で合流します）。"
+                    "\n\nLLM は未実行・未キャッシュのため合流しません（Azure を強制しない）。"
+                    "合流したい場合は 🤖 LLM検出 タブで実行してください（実行後は自動で合流します）。"
                 )
             msg += (
                 "\n\n確信度：1系統（NER か LLM の片方）→中／2系統（NER∧LLM）→強／辞書→確定／"
                 "正規表現パターン→強／地名・その他→弱。"
-                "（NER の sudachi/electra/ja_ginza は票でなく系統内の入力＝何個一致しても NER は1系統。）"
             )
             st.info(msg)
             return
-        # LLM 検出を用意：セッション優先、無ければキャッシュから読む（ヒット＝Azure を呼ばない）。
-        det = (stored.get("llm") or {}).get("detection")
-        if det is None and llm_cached:
-            with st.spinner("LLM 検出をキャッシュから読み込み中 ..."):
-                _, det = run_llm_detection(
-                    stored["chunks"], flatten_tables, force=False
+        try:
+            with st.spinner(
+                "候補を集約・確信度づけ中 ...（NER/LLM はサーバのキャッシュ再利用）"
+            ):
+                stored["analysis_json"] = client.analyze_document(
+                    chash,
+                    detection=detection,
+                    mask_level="strong",
+                    flatten_tables=flatten_tables,
+                    models=models,
                 )
-        with st.spinner("候補を集約・確信度づけ中 ..."):
-            stored["analysis"] = analyze_masking(
-                stored["chunks"],
-                stored["models"],
-                flatten_tables,
-                stored["dict_path"],
-                stored["allowlist_path"],
-                llm_detection=det,
-                run_ner=run_ner,
-            )
-        # 実際に合流したチャネルを記録（後続の再描画でキャプションがブレないように）。
-        stored["analysis_channels"] = {"ner": run_ner, "llm": has_llm}
+        except MaskApiError as e:
+            _show_analyze_error(e, detection)
+            return
+        except httpx.HTTPError as e:
+            st.error(f"マスキング API に接続できません: {e}")
+            return
+        stored["analysis_detection"] = detection
+        stored["analysis_channels"] = {"ner": True, "llm": detection == "both"}
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
         stored["mask_ver"] = 0
-    used = stored.get("analysis_channels", {"ner": run_ner, "llm": has_llm})
+    used = stored.get("analysis_channels", {"ner": True, "llm": detection == "both"})
     st.caption(
         "合流したチャネル: 辞書＋正規表現"
         + ("＋NER" if used.get("ner") else "")
