@@ -26,11 +26,21 @@ uv run data-redactor serve --port 8001     # ポート変更
 ## 2. デモを実行する
 
 ```powershell
-uv run python examples/roundtrip_demo.py                     # detection=ner（オフライン完結）
-uv run python examples/roundtrip_demo.py --detection both    # LLM 検出も併用（Azure 資格情報が必要）
+# テキストだけのバンドル（オフライン完結・手軽）
+uv run python examples/roundtrip_demo.py
+
+# ファイルの受け渡しを確認する（examples/sample_data の全ファイルを添付）
+uv run python examples/roundtrip_demo.py --files
+
+# 添付ファイルを明示（複数可）／ポート変更／LLM 検出も併用
+uv run python examples/roundtrip_demo.py --files path/to/a.xlsx path/to/b.pdf
 uv run python examples/roundtrip_demo.py --base-url http://127.0.0.1:8001
+uv run python examples/roundtrip_demo.py --detection both    # ← Azure 資格情報が必要
 ```
 
+`--files` を付けると **file part**（サーバがテキスト化）を含むバンドルを送り、ファイルの
+受け渡し・マスク・復元まで確認できます（値を省くと `examples/sample_data/` の中身を使用。
+実データを含みうるため同ディレクトリは git 管理外）。
 `detection=llm`/`both` は検出に LLM（pii-masker/Azure）を使うため `az login` 等が必要です
 （未設定だとサーバが 502 を返します）。既定の `ner` は辞書＋正規表現＋GiNZA だけで動きます。
 
@@ -38,14 +48,18 @@ uv run python examples/roundtrip_demo.py --base-url http://127.0.0.1:8001
 
 ```
 -- マスク済みテキスト（これを LLM に渡す）--
-  [prompt] 次の 2 社の比較資料を要約して。担当は[人物1]。
-  [docA] [社1]の新型センサは[社2]を上回る感度を示した。
-  [docB] 一方で[社2]のレンズ設計は[社1]より堅実との評価。
+  [prompt] 次の資料を要約して。担当は[人物1]。
+  [docA] [社1]の新型センサは[社2]を上回る。
+  [docB] 一方[社2]のレンズは堅実との評価。
 
--- 対応表（バンドル全体で共有・同じ実体は全パートで同じプレースホルダ）--
-  [社1]    <- SONY（社名 / certain / dict）  表記: SONY
+-- 対応表（バンドル共有・同じ実体は全 part で同じプレースホルダ）--
+  [人物1]  <- 佐藤（人名 / medium / ner）  表記: 佐藤
+  [社1]    <- SONY（社名 / medium / ner）  表記: SONY
   ...
 ```
+
+`--files` を付けると末尾で **漏れチェック**（マスク対象が伏せ字後に残っていないか）と、
+**各 part の復元**（プレースホルダ数 マスク後→復元後）も表示します。
 
 ---
 

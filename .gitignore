@@ -40,3 +40,6 @@ data/cache.db
 
 # Office の一時ロックファイル
 ~$*
+
+# examples のサンプル入力（実データ＝社内氏名・メール等を含みうるためコミットしない）
+examples/sample_data/
