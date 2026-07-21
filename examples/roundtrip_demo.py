@@ -151,12 +151,19 @@ def main(argv: list[str] | None = None) -> int:
         default="medium",
         help="自動マスクの下限。単系統(ner/llm)は中止まりなので既定を medium にしてある。",
     )
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
+        help="1 リクエストの秒数。detection=both で複数ファイルは遅いので長め。0 で無制限。",
+    )
     args = ap.parse_args(argv)
 
     parts = _build_parts(args.files)
+    timeout = args.timeout if args.timeout > 0 else None
 
     try:
-        with MaskClient(args.base_url) as client:
+        with MaskClient(args.base_url, timeout=timeout) as client:
             health = client.health()
             print(f"■ /health  {health}")
             if args.detection in ("ner", "both") and not health.get("models_ready"):
