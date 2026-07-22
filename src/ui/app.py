@@ -1,9 +1,10 @@
-"""GiNZA 固有表現抽出 Streamlit UI（薄い表示層）。
+"""機密情報マスキング Streamlit UI（薄い表示層・純クライアント）。
 
-実際の抽出は src.ner.NerEngine が担当する。本ファイルは入力 UI・表示のみを行う。
+検出・マスク・キャッシュ（GiNZA / cache.db）はすべてサーバ（data-redactor serve）が所有し、
+本ファイルは src.client.MaskClient 越しに HTTP で問い合わせる（設計 B）。入力 UI・表示のみを行う。
 
 起動:
-    uv run streamlit run app.py
+    uv run data-redactor ui   （＝ streamlit run src/ui/app.py）
 """
 
 from __future__ import annotations
@@ -33,9 +34,6 @@ from src.ner import (
     AVAILABLE_MODELS,
     DEFAULT_COLOR,
     MASKING_CATEGORY_COLORS,
-    NerEngine,
-    build_color_map,
-    render_html,
     render_masking_html,
 )
 from src.sources import SAMPLE_TEXT
@@ -102,14 +100,6 @@ def _render_connection_status() -> bool:
             "しばらく待つか、サーバのログを確認してください。"
         )
     return True
-
-
-@st.cache_resource(show_spinner="GiNZA モデルを読み込み中 ...")
-def get_engine(model_name: str) -> NerEngine:
-    """モデルごとに NerEngine を生成・キャッシュする（モデルもここでロード）。"""
-    engine = NerEngine(model_name)
-    _ = engine.nlp  # ここでロードしておく（以降の解析を高速化）
-    return engine
 
 
 # マスク辞書・除外リスト・キャッシュの既定パス（リポジトリルート直下 data/）。
@@ -492,91 +482,6 @@ def _render_extracted_text(chunks: list[str]) -> None:
             file_name="extracted.txt",
             mime="text/plain",
         )
-
-
-def _timing_caption(timings, total_seconds: float, n_chunks: int) -> str:
-    """解析時間の説明文（合計・モデル別・チャンク当たり）を作る。"""
-    per = total_seconds / n_chunks if n_chunks else 0.0
-    if timings:  # モデル別の内訳（マスキングは 2 モデル）
-        parts = " / ".join(f"{m}: {s:.1f}s" for m, s in timings)
-        return f"⏱ 解析 合計 {total_seconds:.1f}s（{parts}）・ {per:.2f}s/チャンク（{n_chunks} 件）"
-    return f"⏱ 解析 {total_seconds:.1f}s ・ {per:.2f}s/チャンク（{n_chunks} 件）"
-
-
-def analyze_ner(chunks: list[str], model_name: str, flatten_tables: bool):
-    """NER 解析（重い）。ボタン押下時のみ呼ぶ。戻り値は (結果, 所要秒)。"""
-    engine = get_engine(model_name)
-    start = time.perf_counter()
-    with st.spinner(f"⏳ {model_name} で解析中 ...（{len(chunks)} チャンク）"):
-        result = engine.extract_chunks(chunks, flatten_tables=flatten_tables)
-    elapsed = time.perf_counter() - start
-    return result, elapsed
-
-
-def render_ner_result(stored: dict, *, view_height: int, font_size: float) -> None:
-    """固有表現抽出（NER）の結果表示（保存済み結果から。再解析しない）。"""
-    model_name = stored["model_name"]
-    flatten_tables = stored["flatten"]
-    source_label = stored["source_label"]
-    result = stored["result"]
-    chunks = stored["chunks"]
-
-    engine = get_engine(model_name)
-    colors = build_color_map(engine.available_labels())
-
-    if stored.get("elapsed"):
-        st.success(_timing_caption((), stored["elapsed"], len(chunks)), icon="✅")
-
-    if source_label:
-        st.subheader(f"解析結果: {source_label}")
-
-    present_labels = result.labels
-    selected_labels = st.multiselect(
-        "表示するラベル（最初は全件。選択を外すと非表示）",
-        options=present_labels,
-        default=present_labels,
-    )
-    shown = result.filter(selected_labels)
-
-    col_main, col_side = st.columns([3, 1])
-
-    with col_side:
-        st.caption(
-            f"モデル: `{model_name}` / 平文化: {'ON' if flatten_tables else 'OFF'}"
-        )
-        st.metric(
-            "表示中 / 全固有表現",
-            f"{len(shown.entities)} / {len(result.entities)} 件",
-        )
-        st.metric("解析文字数", f"{len(result.text)} 文字")
-        st.metric("チャンク数", f"{len(chunks)} 件")
-
-        if result.entities:
-            counts = pd.Series([e.label for e in result.entities]).value_counts()
-            st.write("**ラベル別件数**")
-            st.dataframe(
-                counts.rename_axis("ラベル").reset_index(name="件数"),
-                hide_index=True,
-                width="stretch",
-            )
-
-    with col_main:
-        html = render_html(shown, colors)
-        st.html(
-            f'<div style="height:{view_height}px; overflow:auto; resize:vertical; '
-            "line-height:2.2; border:1px solid rgba(128,128,128,0.25); "
-            f'border-radius:6px; padding:0.5em; font-size:{font_size}em;">{html}</div>'
-        )
-
-    st.subheader("固有表現の一覧")
-    if shown.entities:
-        rows = [
-            {"テキスト": e.text, "ラベル": e.label, "開始": e.start, "終了": e.end}
-            for e in shown.entities
-        ]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-    else:
-        st.write("表示対象の固有表現がありません。")
 
 
 def _context(text: str, start: int, end: int, width: int = 20) -> str:
@@ -1851,127 +1756,88 @@ def main() -> None:
         page_title="data-redactor — マスキング", page_icon="🔒", layout="wide"
     )
 
-    # --- 参考ツール（サブ扱い）：NER ビューア ---
-    # 本ツールの主機能はマスキング。NER は GiNZA の固有表現を確認する参考ツールとして
-    # サイドバーのトグルで開く。トグルを**先に**読み、ON のときは上部の「モード」行を出さない
-    # （NER に専念＝無関係なモード選択を見せない）。
     with st.sidebar:
         _render_connection_status()
         st.divider()
-        ner_tool = st.toggle(
-            "🔍 NER ビューア（参考）",
-            value=False,
-            help="主機能はマスキング。これは GiNZA の固有表現を確認する参考ツール"
-            "（OFF でマスキングに戻る）。",
+
+    mode = st.radio(
+        "モード",
+        ["🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト", "🗂 キャッシュ"],
+        horizontal=True,
+    )
+    cache_mode = mode.startswith("🗂")
+    dict_mode = mode.startswith("📒")
+    allowlist_mode = mode.startswith("🚫")
+
+    # --- キャッシュ一覧モード（解析済み文書の確認・削除） ---
+    if cache_mode:
+        with st.sidebar:
+            st.header("⚙️ 設定")
+        st.title("🗂 キャッシュ")
+        st.caption(
+            "解析（NER）をキャッシュ済みの文書一覧。再解析は NER をスキップして高速になります。"
+            "削除すると次回はフル解析に戻ります。**ローカル専用**（`data/cache.db`・git 管理外）。"
         )
-
-    dict_mode = allowlist_mode = cache_mode = False
-    if ner_tool:
-        masking_mode = False  # モード行は出さず、共通フローを NER 経路で通す
-    else:
-        mode = st.radio(
-            "モード",
-            ["🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト", "🗂 キャッシュ"],
-            horizontal=True,
+        render_cache_view()
+        return
+    # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
+    # 辞書ファイルはサーバ所有（設計 B）＝パスはクライアントで指定しない。
+    if dict_mode:
+        with st.sidebar:
+            st.header("⚙️ 設定")
+        st.title("📒 マスク辞書")
+        st.caption(
+            "マスキングで確定マスクする社名・商標・社員名の名簿。"
+            "確認・追加・編集・保存ができます。"
         )
-        masking_mode = mode.startswith("🔒")
-        dict_mode = mode.startswith("📒")
-        allowlist_mode = mode.startswith("🚫")
-        cache_mode = mode.startswith("🗂")
+        render_dict_editor()
+        return
 
-        # --- キャッシュ一覧モード（解析済み文書の確認・削除） ---
-        if cache_mode:
-            with st.sidebar:
-                st.header("⚙️ 設定")
-            st.title("🗂 キャッシュ")
-            st.caption(
-                "解析（NER）をキャッシュ済みの文書一覧。再解析は NER をスキップして高速になります。"
-                "削除すると次回はフル解析に戻ります。**ローカル専用**（`data/cache.db`・git 管理外）。"
-            )
-            render_cache_view()
-            return
-        # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
-        # 辞書ファイルはサーバ所有（設計 B）＝パスはクライアントで指定しない。
-        if dict_mode:
-            with st.sidebar:
-                st.header("⚙️ 設定")
-            st.title("📒 マスク辞書")
-            st.caption(
-                "マスキングで確定マスクする社名・商標・社員名の名簿。"
-                "確認・追加・編集・保存ができます。"
-            )
-            render_dict_editor()
-            return
+    # --- 除外リストモード（文書入力なし。除外語の確認・編集・保存だけ） ---
+    # 除外リストファイルもサーバ所有（設計 B）＝パスはクライアントで指定しない。
+    if allowlist_mode:
+        with st.sidebar:
+            st.header("⚙️ 設定")
+        st.title("🚫 除外リスト")
+        st.caption(
+            "マスク**しない**語の名簿。NER の誤検出（社内コード・変数名・汎用語・誤検出メール"
+            "など）をここに入れると、以後どの文書でも候補が「除外」へ落ちます。"
+            "**辞書（名簿）は上書きしません**（recall 安全。連絡先 regex の誤検出は除外可）。"
+        )
+        render_allowlist_editor()
+        return
 
-        # --- 除外リストモード（文書入力なし。除外語の確認・編集・保存だけ） ---
-        # 除外リストファイルもサーバ所有（設計 B）＝パスはクライアントで指定しない。
-        if allowlist_mode:
-            with st.sidebar:
-                st.header("⚙️ 設定")
-            st.title("🚫 除外リスト")
-            st.caption(
-                "マスク**しない**語の名簿。NER の誤検出（社内コード・変数名・汎用語・誤検出メール"
-                "など）をここに入れると、以後どの文書でも候補が「除外」へ落ちます。"
-                "**辞書（名簿）は上書きしません**（recall 安全。連絡先 regex の誤検出は除外可）。"
-            )
-            render_allowlist_editor()
-            return
-
-    # --- サイドバー（モード別の設定） ---
+    # --- サイドバー（マスキングの設定） ---
     with st.sidebar:
         st.header("⚙️ 設定")
-        if masking_mode:
-            models = st.multiselect(
-                "モデル（併用推奨）",
-                options=MODELS,
-                default=MODELS,
-                format_func=lambda m: f"{m}（{MODEL_DESCRIPTIONS.get(m, '')}）",
-            )
-            dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
-            allowlist_path = st.text_input(
-                "除外リスト (YAML)",
-                value=str(_DEFAULT_ALLOWLIST),
-                help="マスクしない語の名簿。一致した検出候補を「除外」へ落とす"
-                "（辞書＝名簿は守る／連絡先の誤検出は除外可）。🚫 除外リスト タブで編集。",
-            )
-            flatten_tables = st.toggle(
-                "テーブルを平文化して検出",
-                value=True,
-                help="表の `|` を句読点に直して**検出精度を上げる**処理（検出専用）。"
-                "マスク結果は `|` を含む原文のまま＝セル内の語だけが伏せ字になり、"
-                "`|` は区切りとして残ります（出力の体裁を保持）。既定 ON（表が無ければ無影響）。",
-            )
-        else:
-            model_name = st.selectbox(
-                "モデル",
-                options=MODELS,
-                format_func=lambda m: f"{m}（{MODEL_DESCRIPTIONS.get(m, '')}）",
-            )
-            flatten_tables = st.toggle(
-                "テーブルを平文化する",
-                value=False,
-                help="Markdown テーブルの `|` を除いて平文に変換してから解析します。",
-            )
-            st.divider()
-            st.subheader("🖥️ 表示")
-            view_height = st.slider("表示エリアの高さ (px)", 300, 2000, 600, 50)
-            font_size = st.slider("文字サイズ (em)", 0.8, 2.0, 1.05, 0.05)
-
-    if masking_mode:
-        st.title("🔒 機密情報マスキング")
-        st.caption(
-            "テキスト入力 / ファイルアップロード / kb-mcp から選択した文書の"
-            "機密情報（人名・社名・商標など）を検出してマスクします。"
+        models = st.multiselect(
+            "モデル（併用推奨）",
+            options=MODELS,
+            default=MODELS,
+            format_func=lambda m: f"{m}（{MODEL_DESCRIPTIONS.get(m, '')}）",
         )
-    else:
-        st.title("🔍 NER ビューア（参考）")
-        st.caption(
-            "**参考ツール**（本機能はマスキング）。テキスト入力 / ファイル / kb-mcp の文書を "
-            "GiNZA で固有表現抽出し色付き表示します。サイドバーの『NER ビューア』を OFF で"
-            "マスキングに戻ります。"
+        dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
+        allowlist_path = st.text_input(
+            "除外リスト (YAML)",
+            value=str(_DEFAULT_ALLOWLIST),
+            help="マスクしない語の名簿。一致した検出候補を「除外」へ落とす"
+            "（辞書＝名簿は守る／連絡先の誤検出は除外可）。🚫 除外リスト タブで編集。",
+        )
+        flatten_tables = st.toggle(
+            "テーブルを平文化して検出",
+            value=True,
+            help="表の `|` を句読点に直して**検出精度を上げる**処理（検出専用）。"
+            "マスク結果は `|` を含む原文のまま＝セル内の語だけが伏せ字になり、"
+            "`|` は区切りとして残ります（出力の体裁を保持）。既定 ON（表が無ければ無影響）。",
         )
 
-    # --- 入力（両モード共通。ここでは描画だけ。解析はボタン押下時のみ） ---
+    st.title("🔒 機密情報マスキング")
+    st.caption(
+        "テキスト入力 / ファイルアップロード / kb-mcp から選択した文書の"
+        "機密情報（人名・社名・商標など）を検出してマスクします。"
+    )
+
+    # --- 入力（ここでは描画だけ。解析はボタン押下時のみ） ---
     input_mode = st.radio(
         "入力方法",
         [
@@ -1986,26 +1852,22 @@ def main() -> None:
         input_mode, flatten_tables
     )
 
-    # 結果は (モード × 入力方法) ごとに別スロットへ保存する。これで入力方法を切り替えると
-    # その方法の最後の結果（無ければ案内）が出て、別タブから戻れば元の結果が復元される
-    # （テキストで解析→ファイルへ切替えてもテキストの結果が残り続ける、を防ぐ）。
-    mode_key = "masking" if masking_mode else "ner"
-    slot = f"{mode_key}:{input_kind}"
+    # 結果は入力方法ごとに別スロットへ保存する。入力方法を切り替えるとその方法の最後の結果
+    # （無ければ案内）が出て、別タブから戻れば元の結果が復元される（テキストで解析→ファイルへ
+    # 切替えてもテキストの結果が残り続ける、を防ぐ）。
+    slot = f"masking:{input_kind}"
 
     # 再解析が必要かは「設定署名」と「入力署名」の 2 本で見る。
     #  - 設定署名（モデル/平文化/辞書 mtime）は**入力が無くても**算出できる。辞書を保存して
     #    別タブから戻ると file_uploader はファイルを失う（Streamlit が非描画ウィジェットの
     #    状態を捨てる）ので入力署名は不明になるが、設定署名は比較でき辞書変更を検知できる。
     #  - 入力署名（input_id）は入力が確定しているときだけ比較する。
-    if masking_mode:
-        settings_sig: tuple = _masking_settings_sig(
-            models, flatten_tables, dict_path, allowlist_path
-        )
-    else:
-        settings_sig = ("ner", model_name, flatten_tables)
+    settings_sig = _masking_settings_sig(
+        models, flatten_tables, dict_path, allowlist_path
+    )
 
     # --- 解析ボタン（テキスト/ファイル/kb-mcp 共通。押したときだけ重い解析が走る） ---
-    if masking_mode and not models:
+    if not models:
         st.warning("モデルを 1 つ以上選択してください。")
     stored = st.session_state.get(slot)
 
@@ -2015,7 +1877,7 @@ def main() -> None:
     # cache/kb は **選択を fragment 内で行う**ため、行クリックでは外側（このボタン）が再実行されず
     #   選択が反映されない。そこでボタンを選択に依存させず、モデルさえあれば押せるようにし、
     #   未選択のクリックは下のハンドラで案内する（stored への誤フォールバックはしない）。
-    models_ok = not (masking_mode and not models)
+    models_ok = bool(models)
     can_fresh = get_chunks is not None and models_ok
     can_reuse_stored = input_kind == "file" and stored is not None and models_ok
     # cache/kb は選択を fragment 内で行う＝行クリックでは外側（このボタン）が再実行されず選択が
@@ -2023,11 +1885,11 @@ def main() -> None:
     # 選択が解決される）。未選択のままのクリックは下のハンドラで案内する。
     can_select_list = input_kind in ("cache", "kb") and models_ok
     can_analyze = can_fresh or can_reuse_stored or can_select_list
-    # マスキングは「読み込み」（チャンク確定のみ）→各タブで個別実行。NER ビューアは従来どおり即解析。
-    action_label = "📥 読み込む" if masking_mode else "🔍 解析する"
+    # 「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
+    action_label = "📥 読み込む"
     clicked = st.button(action_label, type="primary", disabled=not can_analyze)
     if not can_analyze:  # なぜ押せないかを明示（モデル未選択 / 入力未指定）
-        if masking_mode and not models:
+        if not models:
             st.caption("⚠ サイドバーでモデルを 1 つ以上選択してください。")
         else:
             st.caption("⚠ 入力（テキスト／ファイル／kb-mcp）を指定すると押せます。")
@@ -2060,35 +1922,21 @@ def main() -> None:
                 st.warning("一覧から行をクリックして文書を選択してください。")
                 chunks = None
             if chunks:
-                base = {
+                # パイプラインは「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
+                # 文書メタ＋チャンクの記録はサーバが取込（ingest_document）時に行う（設計 B）。
+                # text/file/kb は get_chunks 内でサーバへ取り込み済み（cache は既に登録済み）。
+                st.session_state[slot] = {
                     "settings_sig": settings_sig,
                     "input_sig": in_sig,
                     "chunks": chunks,
                     "source_label": src_label,
                     "input_kind": in_kind,
                     "flatten": flatten_tables,
+                    "kind": "masking",
+                    "models": models,
+                    "dict_path": dict_path,
+                    "allowlist_path": allowlist_path,
                 }
-                if masking_mode:
-                    # パイプラインは「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
-                    st.session_state[slot] = {
-                        **base,
-                        "kind": "masking",
-                        "models": models,
-                        "dict_path": dict_path,
-                        "allowlist_path": allowlist_path,
-                    }
-                    # 文書メタ＋チャンクの記録はサーバが取込（ingest_document）時に行う（設計 B）。
-                    # text/file/kb は get_chunks 内でサーバへ取り込み済み（cache は既に登録済み）。
-                    # よってここでのローカル record_document は不要（種別はサーバが text/file を付与）。
-                else:
-                    result, elapsed = analyze_ner(chunks, model_name, flatten_tables)
-                    st.session_state[slot] = {
-                        **base,
-                        "kind": "ner",
-                        "result": result,
-                        "model_name": model_name,
-                        "elapsed": elapsed,
-                    }
 
     stored = st.session_state.get(slot)  # クリックで更新された可能性があるので取り直す
     if not stored:
@@ -2110,15 +1958,9 @@ def main() -> None:
                 "（マスキングは再読み込みで各タブの結果がリセットされます）。"
             )
 
-        if masking_mode:
-            # 1ソース＝1パイプライン：平文/NER検出/LLM検出/マージ&確信度 のタブで見せる（§12）。
-            #   平文はタブ内に置くので、ここでの inline 表示はしない。
-            _render_pipeline(stored, flatten_tables)
-        else:
-            # NER ビューア（参考）：従来どおり。テキスト化平文を先に出してから結果表示。
-            if stored["input_kind"] != "text":
-                _render_extracted_text(stored["chunks"])
-            render_ner_result(stored, view_height=view_height, font_size=font_size)
+        # 1ソース＝1パイプライン：平文/NER検出/LLM検出/マージ&確信度 のタブで見せる（§12）。
+        #   平文はタブ内に置くので、ここでの inline 表示はしない。
+        _render_pipeline(stored, flatten_tables)
 
 
 if __name__ == "__main__":
