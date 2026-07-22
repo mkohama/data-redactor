@@ -14,7 +14,6 @@ import os
 import re
 import time
 from collections.abc import Callable
-from pathlib import Path
 
 import httpx
 import pandas as pd
@@ -99,14 +98,6 @@ def _render_connection_status() -> bool:
             "しばらく待つか、サーバのログを確認してください。"
         )
     return True
-
-
-# マスク辞書・除外リスト・キャッシュの既定パス（リポジトリルート直下 data/）。
-#   このファイルは src/ui/app.py なので、ルートは親を 3 つ遡る（ui → src → root）。
-#   ※ M5e-2 で MaskClient 経由になり、UI が data/ を直接持たなくなったらこれらは消える。
-_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
-_DEFAULT_ALLOWLIST = _ROOT / "data" / "mask_allowlist.yaml"
 
 
 def _short_models(models: tuple[str, ...]) -> str:
@@ -412,30 +403,14 @@ def render_input(
     return None, "text", "", None
 
 
-def _dict_signature(dict_path: str) -> tuple[str, float | None]:
-    """辞書ファイルの同一性（パス＋更新時刻）。保存で内容が変われば署名がズレる。"""
-    p = Path(dict_path)
-    try:
-        return (str(p), p.stat().st_mtime) if p.exists() else (str(p), None)
-    except OSError:
-        return (str(p), None)
+def _masking_settings_sig(models: list[str], flatten_tables: bool) -> tuple:
+    """マスキングの設定署名（モデル / 平文化）。再解析バナー（入力/設定が変わったか）の判定に使う。
 
-
-def _masking_settings_sig(
-    models: list[str], flatten_tables: bool, dict_path: str, allowlist_path: str
-) -> tuple:
-    """マスキングの設定署名（モデル/平文化/辞書 mtime/除外リスト mtime）。
-
-    再解析バナーの判定に使う。除外を「再解析なし」で反映したときに、この署名で stored を
-    更新しておけばバナーが誤って出ない（main と同じ式を使うため共通化）。
+    辞書・除外リストはサーバ所有（設計 B）で UI はファイルを持たないため署名には含めない。
+    辞書/除外の変更はマージタブの登録/除外ボタンで即再解析されるか、エディタ編集後に
+    [📥 読み込む] で再取得される。
     """
-    return (
-        "masking",
-        tuple(models),
-        flatten_tables,
-        _dict_signature(dict_path),
-        _dict_signature(allowlist_path),
-    )
+    return ("masking", tuple(models), flatten_tables)
 
 
 def _readable_text_block(
@@ -1824,13 +1799,8 @@ def main() -> None:
             default=MODELS,
             format_func=lambda m: f"{m}（{MODEL_DESCRIPTIONS.get(m, '')}）",
         )
-        dict_path = st.text_input("マスク辞書 (YAML)", value=str(_DEFAULT_DICT))
-        allowlist_path = st.text_input(
-            "除外リスト (YAML)",
-            value=str(_DEFAULT_ALLOWLIST),
-            help="マスクしない語の名簿。一致した検出候補を「除外」へ落とす"
-            "（辞書＝名簿は守る／連絡先の誤検出は除外可）。🚫 除外リスト タブで編集。",
-        )
+        # 辞書・除外リストはサーバ所有（設計 B）。編集は 📒 マスク辞書 / 🚫 除外リスト タブで行う
+        # （UI はファイルパスを持たない）。
         flatten_tables = st.toggle(
             "テーブルを平文化して検出",
             value=True,
@@ -1864,13 +1834,10 @@ def main() -> None:
     slot = f"masking:{input_kind}"
 
     # 再解析が必要かは「設定署名」と「入力署名」の 2 本で見る。
-    #  - 設定署名（モデル/平文化/辞書 mtime）は**入力が無くても**算出できる。辞書を保存して
-    #    別タブから戻ると file_uploader はファイルを失う（Streamlit が非描画ウィジェットの
-    #    状態を捨てる）ので入力署名は不明になるが、設定署名は比較でき辞書変更を検知できる。
+    #  - 設定署名（モデル/平文化）は**入力が無くても**算出できる（別タブから戻って file_uploader が
+    #    ファイルを失っても、モデル/平文化の変更は検知できる）。
     #  - 入力署名（input_id）は入力が確定しているときだけ比較する。
-    settings_sig = _masking_settings_sig(
-        models, flatten_tables, dict_path, allowlist_path
-    )
+    settings_sig = _masking_settings_sig(models, flatten_tables)
 
     # --- 解析ボタン（テキスト/ファイル/kb-mcp 共通。押したときだけ重い解析が走る） ---
     if not models:
@@ -1940,8 +1907,6 @@ def main() -> None:
                     "flatten": flatten_tables,
                     "kind": "masking",
                     "models": models,
-                    "dict_path": dict_path,
-                    "allowlist_path": allowlist_path,
                 }
 
     stored = st.session_state.get(slot)  # クリックで更新された可能性があるので取り直す
