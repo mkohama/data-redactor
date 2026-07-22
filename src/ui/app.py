@@ -17,7 +17,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 import httpx
-import openai
 import pandas as pd
 import streamlit as st
 
@@ -732,18 +731,32 @@ def _auto_mask_spans(analysis_json: dict) -> set[tuple[int, int]]:
     return {tuple(s) for s in analysis_json["auto_selection"]}
 
 
-def _llm_available(client: MaskClient, content_hash_: str, flatten: bool) -> bool:
-    """この文書に現行版の LLM 検出キャッシュがサーバにあるか（マージの detection 自動判定用）。
+def _doc_status(client: MaskClient, content_hash_: str) -> dict:
+    """サーバの文書メタ（ner_models / llm_versions 等）を取得する。未接続・未取込は空 dict。
 
-    get_document の llm_versions（キャッシュ済み detector_version の一覧）に現行 detector_version を
-    含む項目があれば True。接続不可・未取込などは False（＝LLM を強制しない＝NER のみ集約）。
+    NER/LLM タブと状態ヘッダの「キャッシュ済みか」の判定に使う（設計 B：状態はサーバの
+    get_document 由来にし、UI はローカルの cache.db を直接見ない）。取得失敗は空 dict＝
+    「キャッシュ無し」扱いにして UI を落とさない（各操作側でエラー表示する前提）。
     """
     try:
-        versions = client.get_document(content_hash_).get("llm_versions", [])
+        return client.get_document(content_hash_)
     except (MaskApiError, httpx.HTTPError):
-        return False
+        return {}
+
+
+def _status_has_llm(status: dict) -> bool:
+    """get_document の結果に現行版の LLM 検出キャッシュがあるか。
+
+    llm_versions（キャッシュ済み detector_version の一覧）に現行 detector_version を含む項目が
+    あれば True。空・未接続などは False（＝LLM を強制しない＝NER のみ集約）。
+    """
     dv = _detector_version()
-    return any(dv in v for v in versions)
+    return any(dv in v for v in status.get("llm_versions", []))
+
+
+def _llm_available(client: MaskClient, content_hash_: str, flatten: bool) -> bool:
+    """この文書に現行版の LLM 検出キャッシュがサーバにあるか（マージの detection 自動判定用）。"""
+    return _status_has_llm(_doc_status(client, content_hash_))
 
 
 def _render_by_entity(groups, confidences, sel, ver, stored):
@@ -1685,24 +1698,27 @@ def render_masking_result(stored: dict) -> None:
 def _render_state_header(stored: dict) -> None:
     """選択ソースのパイプライン状態（冒頭設計図のミニ版）。
 
-    ✅=本セッションで実行済み / 📂=キャッシュ有（表示は一瞬） / ⬜=未。保存物（session＋cache.db）から導出。
+    ✅=本セッションで実行済み / 📂=キャッシュ有（表示は一瞬） / ⬜=未。状態はサーバ由来
+    （get_document の ner_models / llm_versions、get_draft の手動差分）から導出する（設計 B）。
     """
     chash = content_hash(stored["chunks"])
-    flatten = stored.get("flatten", False)
-    cache = _ner_cache()
+    client = _mask_client(MASK_API_URL)
+    status = _doc_status(client, chash)
 
     def mark(in_session: bool, cached: bool) -> str:
         return "✅" if in_session else ("📂" if cached else "⬜")
 
     want = set(stored.get("models", []))
-    cached_models = cache.cached_ner_models(chash, flatten)
-    ner = mark("ner" in stored, bool(want) and want.issubset(cached_models))
-    llm = mark(
-        "llm" in stored, cache.has_llm(chash, LLM_MODEL, flatten, _detector_version())
-    )
-    draft = cache.get_draft(chash)
+    cached_models = set(status.get("ner_models", []))
+    ner = mark("ner_json" in stored, bool(want) and want.issubset(cached_models))
+    llm = mark("llm_json" in stored, _status_has_llm(status))
+    try:
+        draft = client.get_draft(chash)
+    except (MaskApiError, httpx.HTTPError):
+        draft = {"added": [], "removed": []}
+    has_draft = bool(draft.get("added") or draft.get("removed"))
     merge = "✅" if "analysis_json" in stored else "⬜"
-    if "analysis_json" in stored and draft and (draft[0] or draft[1]):
+    if "analysis_json" in stored and has_draft:
         merge += "（下書きあり）"
     st.caption(
         f"パイプライン状態:　平文 ✅　→　NER検出 {ner}　＋　LLM検出 {llm}　→　"
@@ -1711,91 +1727,148 @@ def _render_state_header(stored: dict) -> None:
     )
 
 
-def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
-    """NER検出タブ（独立経路）：キャッシュ状態に応じて 実行 / 表示＋再実行 を出し分ける。"""
-    chash = content_hash(stored["chunks"])
-    cached_models = _ner_cache().cached_ner_models(chash, flatten_tables)
-    want = set(stored["models"])
-    ner_cached = bool(want) and want.issubset(cached_models)
-    in_session = "ner" in stored
+def _ner_view_groups(analysis_json: dict) -> list[dict]:
+    """`/analyze` の groups のうち NER（GiNZA）由来の票を持つものだけ返す（NER検出タブ用）。
 
-    def _run(force: bool) -> None:
-        if force:
-            _ner_cache().delete_ner(chash)
-        with st.spinner("GiNZA で解析中 ...（ステージ進捗が出ます）"):
-            stored["ner"] = analyze_masking(
-                stored["chunks"],
-                stored["models"],
-                flatten_tables,
-                stored["dict_path"],
-                stored["allowlist_path"],
-            )
+    votes に ja_ginza / ja_ginza_electra いずれかのラベルがあれば NER 由来とみなす
+    （辞書・正規表現のみで拾った候補は NER タブには出さない＝GiNZA の効きを見るビュー）。
+    """
+    return [
+        g
+        for g in analysis_json["groups"]
+        if g["votes"].get("ja_ginza") or g["votes"].get("ja_ginza_electra")
+    ]
+
+
+def _render_group_html(text: str, groups: list[dict], *, height: int = 360) -> None:
+    """実体グループ（dict）の全出現を text 上でカテゴリ色ハイライトして表示する。"""
+    spans = [
+        (o["span"][0], o["span"][1], g["category"])
+        for g in groups
+        for o in g["occurrences"]
+    ]
+    html = render_masking_html(text, spans)
+    st.html(
+        f'<div style="height:{height}px; overflow:auto; resize:vertical; line-height:2.2; '
+        "border:1px solid rgba(128,128,128,0.25); border-radius:6px; "
+        f'padding:0.5em;">{html}</div>'
+    )
+
+
+def _render_detect_buttons(
+    *,
+    label: str,
+    in_session: bool,
+    cached: bool,
+    cached_caption: str,
+    idle_caption: str,
+    key_prefix: str,
+    run: Callable[[bool], None],
+) -> None:
+    """NER/LLM タブ共通：実行済み / キャッシュ済み / 未 の 3 状態でボタンを出し分ける。
+
+    ``run(refresh)`` を押下時に呼ぶ（refresh=True でサーバのキャッシュを無視して再解析）。
+    """
+    if in_session:
+        st.caption(f"{label} 状態: ✅ 実行済み（このセッション）")
+        if st.button("🔄 再実行（キャッシュ無視）", key=f"{key_prefix}_rerun"):
+            run(True)
+    elif cached:
+        st.caption(f"{label} 状態: 📂 {cached_caption}")
+        c1, c2 = st.columns(2)
+        if c1.button(
+            "📂 キャッシュの結果を表示", type="primary", key=f"{key_prefix}_show"
+        ):
+            run(False)
+        if c2.button("🔄 再実行（キャッシュ無視）", key=f"{key_prefix}_rerun"):
+            run(True)
+    else:
+        st.caption(f"{label} 状態: ⬜ {idle_caption}")
+        if st.button(f"▶ {label} 解析を実行", type="primary", key=f"{key_prefix}_run"):
+            run(False)
+
+
+def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
+    """NER検出タブ（独立経路）：サーバの `/analyze`(detection="ner") で候補を集約して表示する。
+
+    重い GiNZA 解析はサーバ側で実行・キャッシュされる（設計 B＝UI はエンジンを内包しない）。
+    キャッシュ状態は get_document の ner_models から判定し、実行 / 表示＋再実行 を出し分ける。
+    """
+    client = _mask_client(MASK_API_URL)
+    chash = content_hash(stored["chunks"])
+    models = stored["models"]
+    cached_models = set(_doc_status(client, chash).get("ner_models", []))
+    want = set(models)
+    ner_cached = bool(want) and want.issubset(cached_models)
+
+    def _run(refresh: bool) -> None:
+        try:
+            t0 = time.perf_counter()
+            with st.spinner(
+                "サーバで NER 解析中 ...（キャッシュ済みなら一瞬・未解析は GiNZA で重い）"
+            ):
+                stored["ner_json"] = client.analyze_document(
+                    chash,
+                    detection="ner",
+                    mask_level="strong",
+                    flatten_tables=flatten_tables,
+                    models=models,
+                    refresh=refresh,
+                )
+            stored["ner_elapsed"] = time.perf_counter() - t0
+        except MaskApiError as e:
+            _show_analyze_error(e, "ner")
+            return
+        except httpx.HTTPError as e:
+            st.error(f"マスキング API に接続できません: {e}")
+            return
         # マージは NER 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
         stored.pop("analysis_json", None)
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
 
-    if in_session:
-        st.caption("NER 状態: ✅ 実行済み（このセッション）")
-        if st.button("🔄 再実行（キャッシュ無視）", key="ner_rerun"):
-            _run(force=True)
-    elif ner_cached:
-        st.caption(
-            f"NER 状態: 📂 キャッシュ済み（{_short_models(tuple(sorted(cached_models)))}）"
-        )
-        c1, c2 = st.columns(2)
-        if c1.button("📂 キャッシュの結果を表示", type="primary", key="ner_show"):
-            _run(force=False)
-        if c2.button("🔄 再実行（キャッシュ無視）", key="ner_rerun"):
-            _run(force=True)
-    else:
-        extra = (
-            f"（一部のみキャッシュ: {_short_models(tuple(sorted(cached_models)))}）"
-            if cached_models
-            else ""
-        )
-        st.caption(f"NER 状態: ⬜ 未解析{extra}（GiNZA・重い）")
-        if st.button("▶ NER 解析を実行", type="primary", key="ner_run"):
-            _run(force=False)
-
-    if "ner" not in stored:
-        return
-
-    analysis = stored["ner"]
-    if analysis.timings:
-        total = sum(s for _, s in analysis.timings)
-        st.success(
-            _timing_caption(analysis.timings, total, len(stored["chunks"])), icon="✅"
-        )
-    ner_channels = {"ja_ginza", "ja_ginza_electra"}
-    cands = [
-        c for c in analysis.candidates if any(ch in ner_channels for ch, _ in c.votes)
-    ]
-    st.caption(
-        f"GiNZA(NER) 由来の候補 {len(cands)} 件（独立ビュー）。確信度の確定はマージ&確信度タブで。"
+    extra = (
+        f"（一部のみキャッシュ: {_short_models(tuple(sorted(cached_models)))}）"
+        if cached_models and not ner_cached
+        else ""
     )
-    if not cands:
+    _render_detect_buttons(
+        label="NER",
+        in_session="ner_json" in stored,
+        cached=ner_cached,
+        cached_caption=f"サーバにキャッシュ済み（{_short_models(tuple(sorted(cached_models)))}）",
+        idle_caption=f"未解析{extra}（サーバで GiNZA・重い）",
+        key_prefix="ner",
+        run=_run,
+    )
+
+    result = stored.get("ner_json")
+    if not result:
+        return
+    ner_groups = _ner_view_groups(result)
+    if stored.get("ner_elapsed") is not None:
+        st.success(
+            f"⏱ サーバ解析 {stored['ner_elapsed']:.1f}s（{len(ner_groups)} 実体）",
+            icon="✅",
+        )
+    st.caption(
+        f"GiNZA(NER) 由来の候補 {len(ner_groups)} 実体（独立ビュー）。確信度の確定はマージ&確信度タブで。"
+    )
+    if not ner_groups:
         st.write("NER 由来の候補はありません。")
         return
-    html = render_masking_html(
-        analysis.text, [(c.start, c.end, c.category) for c in cands]
-    )
-    st.html(
-        '<div style="height:360px; overflow:auto; resize:vertical; line-height:2.2; '
-        "border:1px solid rgba(128,128,128,0.25); border-radius:6px; "
-        f'padding:0.5em;">{html}</div>'
-    )
+    _render_group_html(result["text"], ner_groups)
     st.dataframe(
         pd.DataFrame(
             [
                 {
-                    "テキスト": c.surface,
-                    "カテゴリ": c.category,
-                    "確信度": c.confidence,
-                    "ja_ginza": c.vote_labels("ja_ginza"),
-                    "electra": c.vote_labels("ja_ginza_electra"),
+                    "テキスト": g["surface"],
+                    "カテゴリ": g["category"],
+                    "確信度": _conf_jp(g["confidence"]),
+                    "ja_ginza": g["votes"].get("ja_ginza", ""),
+                    "electra": g["votes"].get("ja_ginza_electra", ""),
                 }
-                for c in cands
+                for g in ner_groups
             ]
         ),
         hide_index=True,
@@ -1804,93 +1877,84 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
-    """LLM検出タブ（独立経路・出口1）：キャッシュ状態に応じて 実行 / 表示＋再実行 を出し分ける。"""
+    """LLM検出タブ（独立経路・出口1）：サーバの `/analyze`(detection="llm") で LLM 検出を表示する。
+
+    LLM 検出（pii-masker/Azure）はサーバ側で実行・キャッシュされる（Azure 認証も serve 側）。
+    ⑥b で API 化した際、ENE type / 一致方法 / 理由 / 未特定件数は簡略化した（groups の
+    surface / category / confidence / LLM 票のみ表示。必要になれば `/analyze` 応答に追加する）。
+    """
+    client = _mask_client(MASK_API_URL)
     chash = content_hash(stored["chunks"])
-    llm_cached = _ner_cache().has_llm(
-        chash, LLM_MODEL, flatten_tables, _detector_version()
-    )
-    in_session = "llm" in stored
+    models = stored["models"]
+    llm_cached = _status_has_llm(_doc_status(client, chash))
 
-    def _run(force: bool) -> None:
-        status = st.empty()
-
-        def _cb(
-            i: int, n: int
-        ) -> None:  # 窓ごとの進捗（キャッシュヒット時は呼ばれない）
-            status.info(f"⏳ LLM 検出中 … 窓 {i + 1}/{n}（{LLM_MODEL} / pii-masker）")
-
+    def _run(refresh: bool) -> None:
         try:
             t0 = time.perf_counter()
-            body_text, detection = run_llm_detection(
-                stored["chunks"], flatten_tables, force=force, progress=_cb
-            )
-            elapsed = time.perf_counter() - t0
-        except openai.RateLimitError as e:
-            # HTTP 429。az login / .env とは無関係（Azure 側のレート制限・一時的な混雑）。
-            # SDK が既定リトライを使い切っても表面化することがある。時間をおけば通ることが多い。
-            status.empty()
-            st.error(
-                "LLM 検出が Azure 側のレート制限／一時的な混雑で失敗しました（HTTP 429）。\n"
-                "認証・設定の問題ではありません。少し待ってから再実行してください。\n"
-                f"（詳細: {e}）"
-            )
+            with st.spinner(
+                f"サーバで LLM 検出中 ...（{LLM_MODEL} / pii-masker・Azure）"
+            ):
+                stored["llm_json"] = client.analyze_document(
+                    chash,
+                    detection="llm",
+                    mask_level="strong",
+                    flatten_tables=flatten_tables,
+                    models=models,
+                    refresh=refresh,
+                )
+            stored["llm_elapsed"] = time.perf_counter() - t0
+        except MaskApiError as e:
+            _show_analyze_error(e, "llm")
             return
-        except openai.APITimeoutError as e:
-            status.empty()
-            st.error(
-                "LLM 検出がタイムアウトしました。文書が大きい場合は時間をおいて再実行してください。\n"
-                f"（詳細: {e}）"
-            )
+        except httpx.HTTPError as e:
+            st.error(f"マスキング API に接続できません: {e}")
             return
-        except openai.AuthenticationError as e:
-            status.empty()
-            st.error(
-                "LLM 検出の認証に失敗しました。実機で `az login` 済みか、"
-                ".env の RESOURCE_NAME_GPT41_MINI を確認してください。\n"
-                f"（詳細: {e}）"
-            )
-            return
-        except Exception as e:  # noqa: BLE001
-            status.empty()
-            st.error(
-                f"LLM 検出に失敗しました: {e}\n"
-                "（実機で `az login` 済みか、.env の RESOURCE_NAME_GPT41_MINI を確認）"
-            )
-            return
-        status.empty()
-        stored["llm"] = {
-            "body_text": body_text,
-            "detection": detection,
-            "elapsed": elapsed,
-        }
         # マージは LLM 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
         stored.pop("analysis_json", None)
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
 
-    if in_session:
-        st.caption("LLM 状態: ✅ 実行済み（このセッション）")
-        if st.button("🔄 再実行（キャッシュ無視）", key="llm_rerun"):
-            _run(force=True)
-    elif llm_cached:
-        st.caption("LLM 状態: 📂 キャッシュ済み")
-        c1, c2 = st.columns(2)
-        if c1.button("📂 キャッシュの結果を表示", type="primary", key="llm_show"):
-            _run(force=False)
-        if c2.button("🔄 再実行（キャッシュ無視）", key="llm_rerun"):
-            _run(force=True)
-    else:
-        st.caption(f"LLM 状態: ⬜ 未実行（{LLM_MODEL} / Azure・要 `az login`）")
-        if st.button("▶ LLM 検出を実行", type="primary", key="llm_run"):
-            _run(force=False)
+    _render_detect_buttons(
+        label="LLM",
+        in_session="llm_json" in stored,
+        cached=llm_cached,
+        cached_caption="サーバにキャッシュ済み",
+        idle_caption=f"未実行（{LLM_MODEL} / サーバの Azure 認証が必要）",
+        key_prefix="llm",
+        run=_run,
+    )
 
-    llm = stored.get("llm")
-    if not llm:
+    result = stored.get("llm_json")
+    if not result:
         return
-    if llm.get("elapsed") is not None:
-        n = len(llm["detection"].spans)
-        st.success(f"⏱ LLM 検出 {llm['elapsed']:.1f}s（{n} 件）", icon="✅")
-    render_llm_result(llm["body_text"], llm["detection"])
+    llm_groups = [g for g in result["groups"] if g["votes"].get("llm")]
+    if stored.get("llm_elapsed") is not None:
+        st.success(
+            f"⏱ LLM 検出 {stored['llm_elapsed']:.1f}s（{len(llm_groups)} 実体）",
+            icon="✅",
+        )
+    st.caption(
+        f"LLM 由来の候補 {len(llm_groups)} 実体（出口1・独立ビュー）。確信度の確定はマージ&確信度タブで。"
+    )
+    if not llm_groups:
+        st.write("LLM の検出はありませんでした。")
+        return
+    _render_group_html(result["text"], llm_groups)
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "テキスト": g["surface"],
+                    "カテゴリ": g["category"],
+                    "確信度": _conf_jp(g["confidence"]),
+                    "LLM": g["votes"].get("llm", ""),
+                }
+                for g in llm_groups
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
 
 
 def _show_analyze_error(e: MaskApiError, detection: str) -> None:
@@ -1929,11 +1993,7 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
     models = stored["models"]
 
     # LLM を合流するか：サーバに現行版キャッシュがある、または LLM 検出タブを実行済みなら both。
-    llm_wanted = (
-        _llm_available(client, chash, flatten_tables)
-        or "llm" in stored
-        or "llm_json" in stored
-    )
+    llm_wanted = _llm_available(client, chash, flatten_tables) or "llm_json" in stored
     detection = "both" if llm_wanted else "ner"
 
     if "analysis_json" not in stored:
