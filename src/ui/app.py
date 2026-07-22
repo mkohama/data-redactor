@@ -11,7 +11,6 @@ from __future__ import annotations
 import html
 import os
 import re
-import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -23,21 +22,13 @@ import streamlit as st
 from src.client import MaskApiError, MaskClient
 from src.core.document.document_loader import DocumentLoader
 from src.masking import (
-    MaskAllowlist,
-    MaskDictionary,
-    MaskingEngine,
     NerCache,
     allowlist_sort_key,
     content_hash,
     dict_sort_key,
-    load_entries,
-    save_entries,
 )
 from src.detector import detector_version as _detector_version
-from src.detector import run_llm_detection as _shared_run_llm_detection
 from src.llm.detect_layer import DEFAULT_MODEL as LLM_MODEL
-from src.llm.schema import LlmDetection
-from src.masking.engine import vote_category
 from src.ner import (
     AVAILABLE_MODELS,
     DEFAULT_COLOR,
@@ -47,11 +38,10 @@ from src.ner import (
     render_html,
     render_masking_html,
 )
-from src.sources import SAMPLE_TEXT, load_chunks_from_file
+from src.sources import SAMPLE_TEXT
 from src.sources.kb_mcp import (
     DEFAULT_KB_MCP_URL,
     download_document_sync,
-    get_document_chunks_sync,
     list_documents_sync,
     suppress_async_generator_errors,
 )
@@ -135,55 +125,6 @@ _DEFAULT_CACHE_DB = _ROOT / "data" / "cache.db"
 def _ner_cache() -> NerCache:
     """NER 層キャッシュ（解析過程の高速化）。SQLite 接続は軽いがインスタンスは共有する。"""
     return NerCache(_DEFAULT_CACHE_DB)
-
-
-def _load_allowlist(allowlist_path: str) -> MaskAllowlist:
-    if allowlist_path and Path(allowlist_path).exists():
-        return MaskAllowlist.load(allowlist_path)
-    return MaskAllowlist.empty()
-
-
-@st.cache_resource(show_spinner="モデルを読み込み中 ...")
-def _masking_engine_for_models(models: tuple[str, ...]) -> MaskingEngine:
-    """モデルだけを読み込んだマスキングエンジン（重いのでキャッシュ。辞書は都度差し替える）。"""
-    engine = MaskingEngine(dictionary=MaskDictionary.empty(), models=list(models))
-    for e in engine.engines:
-        _ = e.nlp  # 先にロード
-    return engine
-
-
-def _load_dictionary(dict_path: str) -> MaskDictionary:
-    if dict_path and Path(dict_path).exists():
-        return MaskDictionary.load(dict_path)
-    return MaskDictionary.empty()
-
-
-def get_masking_engine(models: tuple[str, ...], dict_path: str) -> MaskingEngine:
-    """マスキングエンジンを返す。モデルはキャッシュ、**辞書は毎回読み直して差し替える**。
-
-    辞書編集 UI で保存した直後の再実行でも、モデルを再ロードせずに新しい辞書が反映される。
-    """
-    engine = _masking_engine_for_models(tuple(models))
-    engine.dictionary = _load_dictionary(dict_path)
-    return engine
-
-
-@st.cache_data(show_spinner=False)
-def fetch_kb_document_chunks(url: str, doc_id: str) -> list[str]:
-    """kb-mcp から指定文書のチャンク本文を取得する (url+doc_id でキャッシュ)。"""
-    return get_document_chunks_sync(doc_id, url)
-
-
-def extract_chunks_from_upload(uploaded_file) -> list[str]:
-    """アップロードされたファイルを一時保存し、チャンク化したテキストを返す。"""
-    suffix = Path(uploaded_file.name).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = Path(tmp.name)
-    try:
-        return load_chunks_from_file(tmp_path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def _short_models(models: tuple[str, ...]) -> str:
@@ -551,22 +492,6 @@ def _render_extracted_text(chunks: list[str]) -> None:
             file_name="extracted.txt",
             mime="text/plain",
         )
-
-
-def _stage_callback(status, n_chunks: int):
-    """ステージ表示用コールバック。重い処理の前に「何段/全何段・何を実行中か」を出す。
-
-    1 モデルの解析中はサブ進捗を出さない（最速の既定バッチで処理＝途中経過は取れない）。
-    代わりにどの段階かを示す。Streamlit はブロッキング中も直前に積んだ表示を反映するので、
-    各段階の開始時に更新すれば「実行中の段階」が見える。
-    """
-
-    def cb(idx: int, total: int, label: str) -> None:
-        status.info(
-            f"⏳ ステージ {idx + 1}/{total}: {label} ...（{n_chunks} チャンク）"
-        )
-
-    return cb
 
 
 def _timing_caption(timings, total_seconds: float, n_chunks: int) -> str:
@@ -1300,155 +1225,6 @@ def render_allowlist_editor() -> None:
             st.success(
                 f"サーバに保存しました（{len(kept)} 件）。以降の解析に即反映されます。"
             )
-
-
-def analyze_masking(
-    chunks: list[str],
-    models: list[str],
-    flatten_tables: bool,
-    dict_path: str,
-    allowlist_path: str,
-    llm_detection: LlmDetection | None = None,
-    run_ner: bool = True,
-):
-    """マスキング検出。ボタン押下時のみ呼ぶ。
-
-    ``llm_detection`` を渡すと LLM 検出を ``llm`` チャネルとして票に合流する（出口2）。
-    ``run_ner=False`` で GiNZA を回さず、辞書＋regex（＋LLM）だけで集約する（§13・軽い）。
-    """
-    engine = get_masking_engine(tuple(models), dict_path)
-    allowlist = _load_allowlist(allowlist_path)
-    status = st.empty()
-    analysis = engine.analyze(
-        chunks,
-        flatten_tables=flatten_tables,
-        allowlist=allowlist,
-        ner_cache=_ner_cache(),
-        progress=_stage_callback(status, len(chunks)),
-        llm_detection=llm_detection,
-        run_ner=run_ner,
-    )
-    status.empty()
-    return analysis
-
-
-# detector_version・窓ポリシー・検出対象・LLM 検出の実行は **src/detector.py（UI 非依存）へ集約**した
-#   （FastAPI サーバと同じ版・同じキャッシュ鍵を共有するため）。ここは Streamlit 用の薄い再輸出のみ：
-#   キャッシュ ``_ner_cache()`` を注入した ``run_llm_detection`` を旧シグネチャのまま提供する。
-#   _detector_version は import 時に ``detector_version`` を別名束縛済み（既存呼び出しはそのまま動く）。
-def run_llm_detection(
-    chunks: list[str],
-    flatten_tables: bool,
-    *,
-    force: bool = False,
-    progress: Callable[[int, int], None] | None = None,
-) -> tuple[str, LlmDetection]:
-    """LLM 検出（Stage A）を実行（キャッシュ越し）。本文 ``text`` と ``LlmDetection`` を返す。
-
-    実体は :func:`src.detector.run_llm_detection`。ここでは Streamlit の共有キャッシュ
-    ``_ner_cache()`` を束ねて渡すだけ（呼び出し側は従来どおり cache を意識しない）。
-    """
-    return _shared_run_llm_detection(
-        _ner_cache(), chunks, flatten_tables, force=force, progress=progress
-    )
-
-
-def render_llm_result(body_text: str, detection: LlmDetection) -> None:
-    """LLM 単独ビュー（出口1）：LLM が拾った検出だけを displaCy＋表で表示する。"""
-    st.caption(f"モデル `{detection.model}` / 版 `{detection.detector_version}`")
-    col_main, col_side = st.columns([3, 1])
-    with col_side:
-        st.metric("検出（位置特定済み）", f"{len(detection.spans)} 件")
-        st.metric("位置特定できなかった検出", f"{len(detection.not_found)} 件")
-    with col_main:
-        spans = [
-            (s.start, s.end, vote_category("llm", s.ene_type) or "その他")
-            for s in detection.spans
-        ]
-        html = render_masking_html(body_text, spans)
-        st.html(
-            '<div style="height:400px; overflow:auto; resize:vertical; '
-            "line-height:2.2; border:1px solid rgba(128,128,128,0.25); "
-            f'border-radius:6px; padding:0.5em;">{html}</div>'
-        )
-
-    if detection.spans:
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "type(ENE)": s.ene_type,
-                        "カテゴリ": vote_category("llm", s.ene_type) or "その他",
-                        "テキスト": body_text[s.start : s.end],
-                        "位置": f"{s.start}-{s.end}",
-                        "一致": s.how,
-                        "理由": s.reason or "",
-                    }
-                    for s in detection.spans
-                ]
-            ),
-            hide_index=True,
-            width="stretch",
-        )
-    else:
-        st.write("LLM の検出はありませんでした。")
-
-    if detection.not_found:
-        st.warning(
-            f"本文に位置特定できなかった検出が {len(detection.not_found)} 件あります"
-            "（綴りのゆれ等。要確認）。"
-        )
-        st.dataframe(
-            pd.DataFrame(
-                [{"type(ENE)": t, "テキスト": x} for t, x in detection.not_found]
-            ),
-            hide_index=True,
-            width="stretch",
-        )
-
-
-# 候補から辞書に登録できるカテゴリ（辞書は社名/商標/人名のみ）。
-# 地名/連絡先/その他はこの3種に当てはまらないので辞書登録の対象外（除外リスト側で扱う）。
-_DICT_REGISTRABLE_CATEGORIES = {"社名", "商標", "人名"}
-
-
-def _append_to_dictionary(
-    dict_path: str, items: list[tuple[str, str]]
-) -> tuple[int, list[str]]:
-    """候補 ``(表層, カテゴリ)`` を辞書 YAML に**完全一致・自動採番**で追記する。
-
-    辞書に入れられるのは 社名/商標/人名 のみ（``_DICT_REGISTRABLE_CATEGORIES``）。地名/連絡先/
-    その他は skip して呼び出し側に返す。既に代表表記として登録済みの語は重複追加しない。
-    UI から送る登録は除外リストと同じく完全一致（部分一致=False・大小無視）。細かい指定
-    （別名・置換・部分一致・大小区別）は 📒 マスク辞書 タブのエディタで行う。
-    戻り値は ``(追加件数, 登録できなかった語のリスト)``。
-    """
-    path = Path(dict_path)
-    entries = load_entries(path) if path.exists() else []
-    existing = {e["canonical"] for e in entries}
-    added: list[dict] = []
-    skipped: list[str] = []
-    seen_new: set[str] = set()
-    for surface, category in items:
-        if category not in _DICT_REGISTRABLE_CATEGORIES:
-            skipped.append(f"{surface}（{category}）")
-            continue
-        if surface in existing or surface in seen_new:
-            continue
-        seen_new.add(surface)
-        added.append(
-            {
-                "category": category,
-                "canonical": surface,
-                "aliases": [],
-                "mask": "",
-                "partial": False,
-                "case_sensitive": False,
-            }
-        )
-    if added:
-        save_entries(path, entries + added)
-    return len(added), skipped
 
 
 def render_masking_result(stored: dict) -> None:
