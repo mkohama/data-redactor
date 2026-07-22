@@ -23,7 +23,6 @@ import streamlit as st
 from src.client import MaskApiError, MaskClient
 from src.core.document.document_loader import DocumentLoader
 from src.masking import (
-    NerCache,
     allowlist_sort_key,
     content_hash,
     dict_sort_key,
@@ -108,13 +107,6 @@ def _render_connection_status() -> bool:
 _ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
 _DEFAULT_ALLOWLIST = _ROOT / "data" / "mask_allowlist.yaml"
-_DEFAULT_CACHE_DB = _ROOT / "data" / "cache.db"
-
-
-@st.cache_resource(show_spinner=False)
-def _ner_cache() -> NerCache:
-    """NER 層キャッシュ（解析過程の高速化）。SQLite 接続は軽いがインスタンスは共有する。"""
-    return NerCache(_DEFAULT_CACHE_DB)
 
 
 def _short_models(models: tuple[str, ...]) -> str:
@@ -162,47 +154,46 @@ def _select_table_fragment(
     st.session_state[sel_key] = ids[rows[0]] if rows else None
 
 
-def _llm_cache_status(content_hash: str, flatten: bool, has_llm: bool) -> str:
-    """🗂 ピッカー用の LLM キャッシュ状態。``✓``=現行設定で有効 / ``⚠ 要更新``=旧版のみ / ``—``=無し。
+def _llm_cache_status(llm_versions: list[str]) -> str:
+    """🗂 ピッカー用の LLM キャッシュ状態。``✓``=現行版で有効 / ``⚠ 要更新``=旧版のみ / ``—``=無し。
 
-    現在の ``(LLM_MODEL, flatten, _detector_version())`` に一致する行があれば「✓」（そのまま使える）。
-    LLM 検出履歴はあるが現行設定に一致しなければ「⚠ 要更新」（窓ポリシー等が変わった＝再検出が要る）。
-    実際のキャッシュヒット条件（has_llm）と同じ鍵で判定するので、表示と挙動がズレない。
+    サーバの get_document/list_documents が返す ``llm_versions``（保存済み detector_version の一覧）に
+    現行 detector_version が含まれれば「✓」、あるが含まれなければ「⚠ 要更新」（窓ポリシー等が変わった＝
+    再検出が要る）、空なら「—」。render_cache_view の LLM 列と同じ判定（flatten 文脈は持たない）。
     """
-    if not has_llm:
+    if not llm_versions:
         return "—"
-    if _ner_cache().has_llm(content_hash, LLM_MODEL, flatten, _detector_version()):
-        return "✓"
-    return "⚠ 要更新"
+    return "✓" if _detector_version() in llm_versions else "⚠ 要更新"
 
 
 @st.fragment
-def _cache_picker_fragment(docs: list, flatten: bool) -> None:
+def _cache_picker_fragment(docs: list) -> None:
     """🗂 キャッシュ選択の UI 一式（テーブル＋選択依存の操作）を 1 つの fragment にまとめる。
 
     行クリックは **この fragment だけ** 再実行され、画面全体は再描画しない。
     選択した content_hash を ``st.session_state["cache_sel"]`` に入れる（``render_input`` が読む）。
-    ``docs`` は呼び出し側がソース名で安定ソート済み（並び替えで取り違えない）。``flatten`` は現在の平文化
-    設定で、LLM 列の「現行設定で有効か（✓）/要更新（⚠）」判定に使う。
-    NER のやり直し（キャッシュ無視）は読み込み時でなく **🔍 NER検出 タブ**で行う（パイプライン化に伴う移設）。
+    ``docs`` はサーバの ``list_documents``（dict のリスト）を呼び出し側がソース名で安定ソート済み
+    （並び替えで取り違えない）。NER のやり直し（キャッシュ無視）は読み込み時でなく
+    **🔍 NER検出 タブ**で行う（パイプライン化に伴う移設）。
     """
+    client = _mask_client(MASK_API_URL)
     df = pd.DataFrame(
         [
             {
-                "ソース": d.source_name,
-                "種別": d.source_kind,
-                "チャンク": d.chunk_count,
-                "文字数": d.char_count,
-                "NER": _short_models(d.models) or "—",
-                "LLM": _llm_cache_status(d.content_hash, flatten, d.has_llm),
-                "解析日時": d.created_at,
+                "ソース": d["source_name"],
+                "種別": d["source_kind"],
+                "チャンク": d["chunk_count"],
+                "文字数": d["char_count"],
+                "NER": _short_models(tuple(d["ner_models"])) or "—",
+                "LLM": _llm_cache_status(d["llm_versions"]),
+                "解析日時": d["created_at"],
             }
             for d in docs
         ]
     )
     st.caption(
         f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択）。"
-        "LLM 列: **✓**=現在の設定で有効／**⚠ 要更新**=キャッシュはあるが窓ポリシー等が変わり再検出が必要／**—**=無し。"
+        "LLM 列: **✓**=現行版で有効／**⚠ 要更新**=キャッシュはあるが窓ポリシー等が変わり再検出が必要／**—**=無し。"
     )
     event = st.dataframe(
         df,
@@ -213,12 +204,16 @@ def _cache_picker_fragment(docs: list, flatten: bool) -> None:
         key="cache_pick",
     )
     rows = event.selection.rows
-    sel_hash = docs[rows[0]].content_hash if rows else None
+    sel_hash = docs[rows[0]]["content_hash"] if rows else None
     st.session_state["cache_sel"] = sel_hash
     if sel_hash is None:
         st.caption("👆 行をクリックして文書を選択してください。")
         return
-    if not _ner_cache().get_chunks(sel_hash):
+    try:
+        has_chunks = bool(client.get_document(sel_hash).get("chunks"))
+    except (MaskApiError, httpx.HTTPError):
+        has_chunks = False
+    if not has_chunks:
         st.warning(
             "このキャッシュにはチャンク本文がありません（チャンク保存より前の古いエントリ）。"
             "一度ふつうに解析し直すと、以降ここから選べます。"
@@ -232,11 +227,8 @@ def _cache_picker_fragment(docs: list, flatten: bool) -> None:
 
 def render_input(
     input_mode: str,
-    flatten_tables: bool,
 ) -> tuple[tuple | None, str, str, Callable[[], list[str]] | None]:
     """入力ウィジェットを描画し、解析に必要な情報を返す。
-
-    ``flatten_tables`` は現在の平文化設定で、🗂 キャッシュ選択の LLM 列の有効/要更新判定に渡す。
 
     重い取込（サーバへの送信・kb からのダウンロード・テキスト化）は**ここでは行わず**、
     ``get_chunks`` 呼び出しに遅延させる（実際に走るのは「読み込む」ボタンが押されたときだけ）。
@@ -360,35 +352,51 @@ def render_input(
         return ("kb", url, doc_id), "kb", label, get_kb_chunks
 
     if input_mode.startswith("🗂"):
-        docs = _ner_cache().list_documents()
+        client = _mask_client(MASK_API_URL)
+        try:
+            docs = client.list_documents()
+        except (MaskApiError, httpx.HTTPError) as e:
+            st.error(
+                "文書一覧を取得できません（API 未接続）。サイドバー上部の接続状態を確認してください。"
+            )
+            st.caption(f"詳細: {e}")
+            return None, "cache", "", None
         if not docs:
             st.info(
                 "キャッシュがありません。テキスト/ファイル/kb-mcp を解析すると登録され、"
                 "ここから入力元に選べるようになります。"
             )
             return None, "cache", "", None
-        # 選択 UI 一式（テーブル＋強制再解析チェック＋案内）は 1 つの fragment 内で描く。
+        # 選択 UI 一式（テーブル＋案内）は 1 つの fragment 内で描く。
         # **ソース名で安定ソート**して渡すので、解析（created_at 更新）で行が動かず選択がズレない。
-        docs = sorted(docs, key=lambda doc: doc.source_name)
-        _cache_picker_fragment(docs, flatten_tables)
+        docs = sorted(docs, key=lambda d: d["source_name"])
+        _cache_picker_fragment(docs)
 
-        # fragment が session_state に書いた選択・強制再解析を読んで get_chunks を組む（ここでは
-        # 選択依存のウィジェットを描かない＝行クリックで再描画されない外側に widget を置かない）。
+        # fragment が session_state に書いた選択を読んで get_chunks を組む（ここでは選択依存の
+        # ウィジェットを描かない＝行クリックで再描画されない外側に widget を置かない）。
         sel_hash = st.session_state.get("cache_sel")
-        matches = [x for x in docs if x.content_hash == sel_hash]
+        matches = [x for x in docs if x["content_hash"] == sel_hash]
         if not matches:
             return None, "cache", "", None
         d = matches[0]
-        cached_chunks = _ner_cache().get_chunks(d.content_hash)
+        try:
+            cached_chunks = client.get_document(d["content_hash"])["chunks"]
+        except (MaskApiError, httpx.HTTPError):
+            cached_chunks = []
         if not cached_chunks:  # 警告は fragment 内で表示済み（古いエントリ）
-            return None, "cache", d.source_name, None
+            return None, "cache", d["source_name"], None
 
         # 読み込みは保存チャンクを返すだけ（NER は回さない）。NER のやり直し（キャッシュ無視）は
-        # NER検出 タブのチェックで delete_ner する（パイプライン化に伴い読み込み時の強制再解析は廃止）。
+        # NER検出 タブで行う（パイプライン化に伴い読み込み時の強制再解析は廃止）。
         def get_cache_chunks(c=cached_chunks) -> list[str]:
             return c
 
-        return (("cache", d.content_hash), "cache", d.source_name, get_cache_chunks)
+        return (
+            ("cache", d["content_hash"]),
+            "cache",
+            d["source_name"],
+            get_cache_chunks,
+        )
 
     # テキスト入力（単一チャンクとして扱う。長文でもエンジン側で安全分割される）
     input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
@@ -1848,9 +1856,7 @@ def main() -> None:
         ],
         horizontal=True,
     )
-    input_id, input_kind, source_label, get_chunks = render_input(
-        input_mode, flatten_tables
-    )
+    input_id, input_kind, source_label, get_chunks = render_input(input_mode)
 
     # 結果は入力方法ごとに別スロットへ保存する。入力方法を切り替えるとその方法の最後の結果
     # （無ければ案内）が出て、別タブから戻れば元の結果が復元される（テキストで解析→ファイルへ
