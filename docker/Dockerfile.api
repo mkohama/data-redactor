@@ -1,9 +1,11 @@
 # =============================================================================
 # data-redactor API イメージ（マルチステージビルド・重）
 #
-# 設計 B：エンジン（GiNZA・cache.db）を所有する HTTP API（uvicorn src.api.app:app）。
-# torch・spaCy・GiNZA・pii-masker・Azure CLI を含む。UI は別イメージ（docker/Dockerfile.ui・軽）で、
-# この API を MASK_API_URL で参照する純クライアント。
+# 役割:
+#   機密情報の検出・マスク処理と、その結果のキャッシュ（GiNZA・cache.db）を担う本体。
+#   起動すると HTTP API（uvicorn src.api.app:app）として待ち受ける。
+#   torch・spaCy・GiNZA・pii-masker・Azure CLI を含むため、イメージは重い。
+#   画面表示は別イメージ（docker/Dockerfile.ui・軽）が担い、そちらが MASK_API_URL でこの API を呼ぶ。
 #
 # data-redactor 固有の注意:
 #   - Python は 3.11 固定（ja-ginza-electra の tokenizers 制約。3.12 だと wheel 無し）。

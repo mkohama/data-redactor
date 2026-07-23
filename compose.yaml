@@ -1,11 +1,16 @@
-# 設計 B の 2 サービス・2 イメージ構成:
-#   data-redactor-api … エンジン（GiNZA・cache.db）を持つ HTTP API（uvicorn）。torch/spaCy/GiNZA/
-#                        pii-masker/Azure CLI を含む重イメージ。data/ と az をマウントする。
-#   data-redactor-ui  … その純クライアントの Streamlit UI。MASK_API_URL で api を指すだけの軽イメージ
-#                        （spaCy/torch/langchain/openai を含まない）。data/ も az も持たない（設計 B）。
+# 2 つのコンテナで動かす。
 #
-# それぞれ別 Dockerfile・別イメージ。起動: `docker compose up --build`
-# （初回は api の GiNZA electra prewarm で時間がかかる）。
+# - data-redactor-api:
+#     機密情報の検出・マスク処理と、その結果のキャッシュ（GiNZA・cache.db）を担う本体。
+#     torch・GiNZA・pii-masker・Azure CLI を含むため、イメージは重い。
+#     機密データ（data/）と Azure の認証情報（~/.azure）は、このコンテナだけが持つ。
+# - data-redactor-ui:
+#     画面の表示だけを担う。検出・マスクは自分では行わず、api に HTTP で問い合わせる。
+#     そのため spaCy・torch・langchain・openai を含まず、イメージは軽い。
+#
+# api と ui は、それぞれ別の Dockerfile・別のイメージ。
+# 起動は「docker compose up --build」。
+# 初回は api が GiNZA electra の重みを読み込むため、起動までに時間がかかる。
 services:
   data-redactor-api:
     image: data-redactor-api:latest
@@ -22,14 +27,19 @@ services:
     env_file: .env
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
-      # 機密データの永続化（cache.db / mask_dict.yaml / mask_allowlist.yaml）。API が単一所有する。
+      # 検出結果のキャッシュや辞書などの機密データを、コンテナの外（ホストの data/）に残す。
+      # 読み書きするのは、この api コンテナだけ。
       - ./data:/app/data
-      # Entra ID 認証（LLM 検出の Azure）: ホストの az login キャッシュを流用する。
-      # ★ az login は WSL/Linux 側で実行すること（Windows の ~/.azure は DPAPI 暗号化されており
-      #   Linux コンテナ内の az では復号できず認証に失敗する）。SP 環境変数方式を使うなら下行は不要。
+      # LLM 検出で使う Azure の認証に、ホストで実行済みの az login の結果を流用する。
+      #
+      # 注意:
+      #   - az login は WSL / Linux 側で実行すること。
+      #   - Windows の ~/.azure は暗号化されており、Linux コンテナ内の az では復号できず、認証に失敗する。
+      #   - 環境変数でサービスプリンシパルを渡す方式にするなら、この行は不要。
       - ${HOME}/.azure:/home/appuser/.azure:rw
-    # /health が 200 を返す＝起動時の GiNZA ロード完了（＝UI が繋いでよい状態）。curl は
-    # ランタイムに導入済み（az cli 用）。electra ロードのぶん start_period を長めに取る。
+    # /health が 200 を返したら、起動時の GiNZA 読み込みが終わった合図。
+    # これを ui の起動条件にして、読み込み中の api に ui がつないでエラー表示するのを防ぐ。
+    # electra の読み込みに時間がかかるので、待ち始めるまでの猶予（start_period）は長めにとる。
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8509/health"]
       interval: 10s
@@ -48,21 +58,25 @@ services:
     container_name: data-redactor-ui
     restart: unless-stopped
     ports:
-      # ホスト 8508 → コンテナ 8501（ホストの 8501 は他で使用中のことがあるため 8508 を割当）。
+      # ホストの 8508 番を、コンテナの 8501 番（Streamlit）につなぐ。
+      # ホストの 8501 は他のアプリが使っていることがあるので、8508 にずらしている。
       - "8508:8501"
     env_file: .env
     environment:
-      # UI は純クライアント。compose ネットワーク内の api サービスを指す（設計 B）。
+      # ui は画面だけを担うので、検出・マスクは api に投げる。
+      # その接続先を、compose のネットワーク内のサービス名（data-redactor-api）で指定する。
       - MASK_API_URL=http://data-redactor-api:8509
     user: "${UID:-1000}:${GID:-1000}"
     depends_on:
-      # API が healthy（GiNZA ロード完了）になってから UI を上げる＝初回接続エラーを避ける。
+      # api の /health が通る（GiNZA の読み込みが終わる）まで、ui は起動を待つ。
       data-redactor-api:
         condition: service_healthy
-    # UI は data/ も az も持たない（エンジン・機密の所有者は api だけ＝設計 B）。
-    # -- kb-mcp がホスト側で動く場合、コンテナからは localhost ではなく host.docker.internal で繋ぐ
-    #    （kb 文書の取得は UI プロセスが行う）。.env で
-    #    KB_MCP_URL=http://host.docker.internal:8000/mcp とし、Linux では以下を有効化する
-    #    （Docker Desktop / Mac / Windows では既定で解決できるため不要）。
+    # ui は data/ も Azure の認証も持たない。機密データと検出エンジンは api だけが持つ。
+    #
+    # kb-mcp をホスト側で動かしている場合の注意:
+    #   - コンテナの中からは localhost では届かないので、host.docker.internal を使う
+    #     （kb-mcp からの文書取得は ui コンテナが行うため）。
+    #   - .env に KB_MCP_URL=http://host.docker.internal:8000/mcp を設定する。
+    #   - Linux では下の extra_hosts を有効にする（Docker Desktop / Mac / Windows では不要）。
     # extra_hosts:
     #   - "host.docker.internal:host-gateway"

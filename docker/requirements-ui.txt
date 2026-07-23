@@ -1,4 +1,5 @@
-# UI（Streamlit）イメージ専用の最小依存（設計 B：UI は純クライアント）。
+# UI（Streamlit）イメージ専用の最小依存。
+# UI は画面表示だけを担い、検出・マスクは API に問い合わせるので、検出エンジン系の依存は要らない。
 #
 # これは **Docker の UI イメージをビルドするときだけ** 使う（`docker/Dockerfile.ui`）。
 # ローカル開発は従来どおり `uv sync`（pyproject / uv.lock）で全依存が入る＝この一覧は無関係。
