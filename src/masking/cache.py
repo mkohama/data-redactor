@@ -13,24 +13,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+# content_hash は軽量モジュールに分離（UI が spaCy 無しで使えるように）。ここは再輸出
+# （`as` は明示的再輸出＝未使用 import ではないことを示す）。
+from src.masking.hashing import content_hash as content_hash
 from src.ner.engine import AnalyzedToken, Analysis, Entity
-
-
-def content_hash(chunks: Iterable[str]) -> str:
-    """チャンク列（解析対象テキスト）の内容ハッシュ。区切りバイトで連結の曖昧性を避ける。"""
-    h = hashlib.sha256()
-    for c in chunks:
-        h.update(c.encode("utf-8"))
-        h.update(b"\x00")
-    return h.hexdigest()
 
 
 def analysis_to_dict(a: Analysis) -> dict:

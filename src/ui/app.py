@@ -20,18 +20,11 @@ import pandas as pd
 import streamlit as st
 
 from src.client import MaskApiError, MaskClient
-from src.core.document.document_loader import DocumentLoader
+from src.constants import SUPPORTED_DOCUMENT_EXTENSIONS
 from src.masking import (
     allowlist_sort_key,
     content_hash,
     dict_sort_key,
-)
-from src.detector import detector_version as _detector_version
-from src.llm.detect_layer import DEFAULT_MODEL as LLM_MODEL
-from src.ner import (
-    DEFAULT_COLOR,
-    MASKING_CATEGORY_COLORS,
-    render_masking_html,
 )
 from src.sources import SAMPLE_TEXT
 from src.sources.kb_mcp import (
@@ -40,11 +33,21 @@ from src.sources.kb_mcp import (
     list_documents_sync,
     suppress_async_generator_errors,
 )
+from src.ui.render import (
+    DEFAULT_COLOR,
+    MASKING_CATEGORY_COLORS,
+    render_masking_html,
+)
+
+# 設計 B：UI は純クライアント。エンジン系（spaCy/torch/GiNZA）・検出器の版・LLM モデル名・
+# 対応拡張子は API から取るか、依存の軽いモジュール（src.constants / src.ui.render /
+# src.masking の軽シンボル）から取る。src.ner / src.llm.detect_layer / document_loader は
+# import しない（＝UI に spaCy/torch/langchain/openai を持ち込まない）。
 
 suppress_async_generator_errors()
 
-# アップロード可能な拡張子 (DocumentLoader が対応する形式)
-SUPPORTED_EXTENSIONS = sorted(e[1:] for e in DocumentLoader.SUPPORTED_EXTENSIONS)
+# アップロード可能な拡張子（サーバの DocumentLoader が対応する形式。定義元は src.constants で依存が軽い）。
+SUPPORTED_EXTENSIONS = sorted(e[1:] for e in SUPPORTED_DOCUMENT_EXTENSIONS)
 
 # マスキング API（サーバ）の接続先。UI は純クライアント（設計 B）＝エンジンを内包せず、
 # この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve（既定 localhost:8509。
@@ -60,6 +63,29 @@ def _mask_client(base_url: str) -> MaskClient:
     base_url を引数（キャッシュ鍵）にしているので、接続先を変えれば作り直される。
     """
     return MaskClient(base_url)
+
+
+def _server_config() -> dict:
+    """サーバの ``/config``（既定値・検出器の版・LLM モデル名など）。未接続時は空 dict。
+
+    設計 B：検出器の版（``detector_version``）や LLM モデル名（``llm_model``）は**サーバが正本**。
+    UI はローカルで計算せず、ここから取る（未接続時は空 dict＝各表示は既定にフォールバック）。
+    localhost への軽い GET なので都度呼ぶ（描画ごとに数回程度＝無視できるコスト）。
+    """
+    try:
+        return _mask_client(MASK_API_URL).config()
+    except (MaskApiError, httpx.HTTPError):
+        return {}
+
+
+def _detector_version() -> str:
+    """サーバの現行 detector_version（LLM 検出キャッシュの版判定に使う）。未接続時は空文字。"""
+    return str(_server_config().get("detector_version", ""))
+
+
+def _llm_model_name() -> str:
+    """サーバが LLM 検出に使うモデル名（表示用）。未接続時は総称 'LLM'。"""
+    return str(_server_config().get("llm_model") or "LLM")
 
 
 def _render_connection_status() -> bool:
@@ -1581,7 +1607,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
         try:
             t0 = time.perf_counter()
             with st.spinner(
-                f"サーバで LLM 検出中 ...（{LLM_MODEL} / pii-masker・Azure）"
+                f"サーバで LLM 検出中 ...（{_llm_model_name()} / pii-masker・Azure）"
             ):
                 stored["llm_json"] = client.analyze_document(
                     chash,
@@ -1608,7 +1634,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
         in_session="llm_json" in stored,
         cached=llm_cached,
         cached_caption="サーバにキャッシュ済み",
-        idle_caption=f"未実行（{LLM_MODEL} / サーバの Azure 認証が必要）",
+        idle_caption=f"未実行（{_llm_model_name()} / サーバの Azure 認証が必要）",
         key_prefix="llm",
         run=_run,
     )
