@@ -166,6 +166,23 @@ def _kb_id(meta: dict) -> str:
     return str(meta.get("id") or meta.get("document_id") or _kb_doc_label(meta))
 
 
+def _kb_imported_set() -> set[str]:
+    """サーバに file として取り込み済みの source_name 集合 (kb 一覧の「📦」判定に使う)。
+
+    kb 文書は元ファイルを取得して file 取込するので source_kind は "file"。取込時に
+    source_name へ kb 文書ラベル (_kb_doc_label) を刻むので、それと突き合わせる。
+    API 未接続なら空集合 (印を出さないだけ)。
+    """
+    try:
+        return {
+            d["source_name"]
+            for d in _mask_client(MASK_API_URL).list_documents()
+            if d["source_kind"] == "file"
+        }
+    except (MaskApiError, httpx.HTTPError):
+        return set()
+
+
 @st.fragment
 def _select_table_fragment(
     df: pd.DataFrame,
@@ -176,46 +193,28 @@ def _select_table_fragment(
     caption: str,
     column_config: dict | None = None,
 ) -> None:
-    """チェック列で単一選択するテーブル (st.fragment で再描画を局所化)。
+    """1 行クリックで単一選択するテーブル (st.fragment で再描画を局所化)。
 
-    選んだ行の安定 ID ids[i] を st.session_state[sel_key] に保存する (未選択は None)。
-    チェック状態は毎回「保存された ID と一致する行だけ ON」で組み直す。だから表の内容
-    (📦 取込済み 等) が変わっても、列見出しで並べ替えても、チェックされた行と保存された選択が
-    ずれない (st.dataframe のハイライトはプログラムから戻せず内容変更でずれるので、これを避ける)。
+    行をクリックするとこのテーブルだけ再実行される (画面全体は再描画しない)。選んだ行の
+    安定 ID ids[row] を st.session_state[sel_key] に書く (未選択は None)。呼び出し側が安定 ID を
+    渡すので、位置でなく ID で解決でき、並べ替えでも取り違えない。
 
-    単一選択：新しく ON にした行だけを選択にする。選択が変わったらウィジェットのキーを更新して
-    作り直し、チェックの重複 (data_editor の編集差分の蓄積) を消してから再描画する。
+    注意: st.dataframe の選択ハイライトはプログラムから戻せず、表の内容が実行中に変わると
+    ずれることがある。呼び出し側は表の内容 (📦 取込済み 等) を実行中に変えないこと
+    (一覧の取得時に固定して、以後は変えない)。
     """
     st.caption(caption)
-    current = st.session_state.get(sel_key)
-    view = df.copy()
-    view.insert(0, "選択", [row_id == current for row_id in ids])
-
-    cfg: dict = {"選択": st.column_config.CheckboxColumn("選択", width="small")}
-    if column_config:
-        cfg.update(column_config)
-    nonce_key = f"{key}_nonce"
-    nonce = st.session_state.get(nonce_key, 0)
-    edited = st.data_editor(
-        view,
+    event = st.dataframe(
+        df,
         hide_index=True,
         width="stretch",
-        num_rows="fixed",
-        disabled=list(df.columns),  # 「選択」列だけ編集可 (他は読み取り専用)
-        column_config=cfg,
-        key=f"{key}_{nonce}",
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config=column_config,
+        key=key,
     )
-
-    checked = [row_id for row_id, on in zip(ids, edited["選択"].tolist()) if on]
-    want = {current} if current is not None else set()
-    if set(checked) != want:
-        newly = [c for c in checked if c != current]
-        new_sel = newly[0] if newly else (current if current in checked else None)
-        st.session_state[sel_key] = new_sel
-        st.session_state[nonce_key] = (
-            nonce + 1
-        )  # ウィジェット作り直し＝チェック重複を消す
-        st.rerun(scope="fragment")
+    rows = event.selection.rows
+    st.session_state[sel_key] = ids[rows[0]] if rows else None
 
 
 def _llm_cache_status(llm_versions: list[str]) -> str:
@@ -339,6 +338,9 @@ def render_input(
             try:
                 with st.spinner("文書一覧を取得中 ..."):
                     st.session_state["kb_docs"] = list_documents_sync(url)
+                # 📦「取込済み」はこの取得時点で固定する。以後の描画では変えない
+                # (読み込み後に 📦 が変わって表内容が動くと、st.dataframe の選択がずれるため)。
+                st.session_state["kb_imported"] = _kb_imported_set()
             except Exception as e:  # noqa: BLE001
                 st.session_state.pop("kb_docs", None)
                 st.error(f"kb-mcp への接続/取得に失敗しました: {e}")
@@ -354,22 +356,13 @@ def render_input(
             st.warning("kb-mcp に登録された文書がありません。")
             return None, "kb", "", None
 
-        # 取込済み (＝サーバのキャッシュに file として取り込んだ kb 文書) に「📦」を付ける目安。
-        # kb 文書は元ファイルを取得して file 取込するので source_kind は "file"。取込時に
-        # source_name へ kb 文書ラベル (_kb_doc_label) を刻むので、それと突き合わせる (案A)。
-        # API 未接続なら印だけ出さない (一覧自体は kb-mcp 直取得なので表示できる)。
-        try:
-            imported = {
-                d["source_name"]
-                for d in _mask_client(MASK_API_URL).list_documents()
-                if d["source_kind"] == "file"
-            }
-        except (MaskApiError, httpx.HTTPError):
-            imported = set()
+        # 📦「取込済み」は [文書リストを取得] 時に固定した集合を使う (実行中は変えない＝表内容が
+        # 動かず、st.dataframe の選択ハイライトがずれない)。取得前や未接続なら空集合。
+        imported = st.session_state.get("kb_imported", set())
 
-        # チェック列で選ぶテーブル (fragment で再描画局所化)。📦＝取込済みの目安。
+        # 1 行クリックで選ぶテーブル (fragment で再描画局所化)。📦＝取込済みの目安 (取得時点)。
         # チャンク数は kb-mcp の一覧メタ (knowledge://documents の chunk_count) をそのまま表示。
-        # 選択は行位置でなく kb 文書の安定 ID で保持する (📦 の変化や並べ替えでチェックがずれない)。
+        # 選択は行位置でなく kb 文書の安定 ID で保持する (並べ替えでも取り違えない)。
         kb_df = pd.DataFrame(
             [
                 {
@@ -390,7 +383,7 @@ def render_input(
             sel_key="kb_sel",
             caption=(
                 f"kb-mcp 文書: {len(docs)} 件"
-                "（「選択」にチェックして 1 件選ぶ。📦＝取込済みの目安・チャンク数は kb-mcp の登録値）"
+                "（行をクリックして選択。📦＝取込済みの目安・チャンク数は kb-mcp の登録値）"
             ),
             column_config={"📦": st.column_config.TextColumn("📦", width="small")},
         )
