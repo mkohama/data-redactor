@@ -161,6 +161,11 @@ def _kb_doc_label(meta: dict) -> str:
     return f"{name}　({path})" if path else str(name)
 
 
+def _kb_id(meta: dict) -> str:
+    """kb-mcp 文書の安定 ID (選択保持のキー)。id / document_id、無ければ表示名で代用。"""
+    return str(meta.get("id") or meta.get("document_id") or _kb_doc_label(meta))
+
+
 @st.fragment
 def _select_table_fragment(
     df: pd.DataFrame,
@@ -171,26 +176,46 @@ def _select_table_fragment(
     caption: str,
     column_config: dict | None = None,
 ) -> None:
-    """1 行クリックで単一選択するテーブル (``st.fragment`` で再描画を局所化)。
+    """チェック列で単一選択するテーブル (st.fragment で再描画を局所化)。
 
-    行をクリックすると **このテーブルだけ** 再実行され (画面全体は再描画しない＝チラつき/
-    スクロール飛びを抑える)。選んだ行の識別子 ``ids[row]`` を ``st.session_state[sel_key]`` に
-    書く (未選択は ``None``)。単一選択なので前の選択は自動で置き換わる (チェック残り無し)。
-    位置選択だが、呼び出し側が安定順で渡し ``ids`` で解決するので並び替えの取り違えは起きない。
-    列見出しクリックで表示の並べ替えも可能 (選択には影響しない)。
+    選んだ行の安定 ID ids[i] を st.session_state[sel_key] に保存する (未選択は None)。
+    チェック状態は毎回「保存された ID と一致する行だけ ON」で組み直す。だから表の内容
+    (📦 取込済み 等) が変わっても、列見出しで並べ替えても、チェックされた行と保存された選択が
+    ずれない (st.dataframe のハイライトはプログラムから戻せず内容変更でずれるので、これを避ける)。
+
+    単一選択：新しく ON にした行だけを選択にする。選択が変わったらウィジェットのキーを更新して
+    作り直し、チェックの重複 (data_editor の編集差分の蓄積) を消してから再描画する。
     """
     st.caption(caption)
-    event = st.dataframe(
-        df,
+    current = st.session_state.get(sel_key)
+    view = df.copy()
+    view.insert(0, "選択", [row_id == current for row_id in ids])
+
+    cfg: dict = {"選択": st.column_config.CheckboxColumn("選択", width="small")}
+    if column_config:
+        cfg.update(column_config)
+    nonce_key = f"{key}_nonce"
+    nonce = st.session_state.get(nonce_key, 0)
+    edited = st.data_editor(
+        view,
         hide_index=True,
         width="stretch",
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config=column_config,
-        key=key,
+        num_rows="fixed",
+        disabled=list(df.columns),  # 「選択」列だけ編集可 (他は読み取り専用)
+        column_config=cfg,
+        key=f"{key}_{nonce}",
     )
-    rows = event.selection.rows
-    st.session_state[sel_key] = ids[rows[0]] if rows else None
+
+    checked = [row_id for row_id, on in zip(ids, edited["選択"].tolist()) if on]
+    want = {current} if current is not None else set()
+    if set(checked) != want:
+        newly = [c for c in checked if c != current]
+        new_sel = newly[0] if newly else (current if current in checked else None)
+        st.session_state[sel_key] = new_sel
+        st.session_state[nonce_key] = (
+            nonce + 1
+        )  # ウィジェット作り直し＝チェック重複を消す
+        st.rerun(scope="fragment")
 
 
 def _llm_cache_status(llm_versions: list[str]) -> str:
@@ -342,8 +367,9 @@ def render_input(
         except (MaskApiError, httpx.HTTPError):
             imported = set()
 
-        # 1 行クリックで選ぶテーブル (fragment で再描画局所化)。📦＝取込済みの目安。
+        # チェック列で選ぶテーブル (fragment で再描画局所化)。📦＝取込済みの目安。
         # チャンク数は kb-mcp の一覧メタ (knowledge://documents の chunk_count) をそのまま表示。
+        # 選択は行位置でなく kb 文書の安定 ID で保持する (📦 の変化や並べ替えでチェックがずれない)。
         kb_df = pd.DataFrame(
             [
                 {
@@ -359,19 +385,19 @@ def render_input(
         )
         _select_table_fragment(
             kb_df,
-            list(range(len(docs))),
+            [_kb_id(m) for m in docs],
             key="kb_pick",
             sel_key="kb_sel",
             caption=(
                 f"kb-mcp 文書: {len(docs)} 件"
-                "（行をクリックして選択。📦＝取込済みの目安・チャンク数は kb-mcp の登録値）"
+                "（「選択」にチェックして 1 件選ぶ。📦＝取込済みの目安・チャンク数は kb-mcp の登録値）"
             ),
             column_config={"📦": st.column_config.TextColumn("📦", width="small")},
         )
         sel = st.session_state.get("kb_sel")
-        if sel is None or sel >= len(docs):
+        meta = next((m for m in docs if _kb_id(m) == sel), None)
+        if meta is None:
             return None, "kb", "", None
-        meta = docs[sel]
         doc_id = meta.get("id") or meta.get("document_id")
         if not doc_id:
             return None, "kb", "", None
