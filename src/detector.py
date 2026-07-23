@@ -3,7 +3,7 @@
 app.py (Streamlit クライアント) と src/api (FastAPI サーバ) の**両方**が、同じ
 ``detector_version`` と同じ LLM 検出経路を使うための共通層。ここに集約することで
 LLM 検出キャッシュの鍵 ``(content_hash, model, flatten, detector_version)`` が UI/API で
-一致し、**同じ cache.db を共有**できる (設計 B：エンジンを 1 プロセスに集約)。
+一致し、**同じ cache.db を共有**できる (エンジンを 1 プロセスに集約する)。
 
 かつてこれらは app.py (Streamlit) にあったが、Streamlit を import せずに使えないため
 FastAPI から参照できなかった。UI 非依存のこのモジュールへ移した (app.py は薄い再輸出に)。
@@ -94,7 +94,7 @@ def run_llm_detection(
     force: bool = False,
     progress: Callable[[int, int], None] | None = None,
 ) -> tuple[str, LlmDetection]:
-    """LLM 検出 (Stage A) を実行 (キャッシュ越し)。本文 ``text`` と ``LlmDetection`` を返す。
+    """LLM 検出を実行 (キャッシュ越し)。本文 ``text`` と ``LlmDetection`` を返す。
 
     pii-masker を呼ぶ (実機・Azure・``az login`` 前提)。キャッシュは
     ``(content_hash, model, flatten, detector_version)`` で、同一文書は再呼び出ししない。

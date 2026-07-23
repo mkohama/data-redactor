@@ -189,7 +189,7 @@ def prepare_for_ner_with_map(
 # ここは **spaCy 非依存** (SudachiPy/GiNZA を呼ばない純粋な文字列処理)。NER (engine.py) も
 # LLM 検出 (src/llm) も、まずこの層で「解析対象の本文」と「原文への位置対応表」を得る。
 # build_body() は GiNZA を回さずに本文座標を作れるため、LLM-only 経路の起点になる
-# (docs-dev/LLM適用_調査と設計たたき台.md の接続点 (J1) を参照)。
+# (docs-dev/LLM適用_調査と設計たたき台.md を参照)。
 # --------------------------------------------------------------------------- #
 
 # GiNZA が内部で使う SudachiPy のトークナイズ上限 (1 回の解析あたりのバイト数)。
@@ -324,6 +324,6 @@ def build_body(chunks: Iterable[str], *, flatten_tables: bool = False) -> Body:
     """チャンク列から「解析対象の本文」一式 (text / original_text / offset_map) を作る。
 
     **spaCy を呼ばない**＝GiNZA を回さずに本文座標が得られる。NER も LLM 検出もこの本文を
-    共有する (NER は加えてトークン/エンティティを doc から足す)。詳細は接続点 (J1)。
+    共有する (NER は加えてトークン/エンティティを doc から足す)。詳細は preprocess 冒頭のコメント参照。
     """
     return _body_from_pieces(_prepare_pieces(chunks, flatten_tables=flatten_tables))

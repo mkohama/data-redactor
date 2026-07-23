@@ -1,6 +1,6 @@
 """LLM 検出結果の型 (data-redactor 側の表現)。
 
-pii-masker の ``Entity``/``Match`` から詰め直して、キャッシュ・表示 (出口1) ・票変換 (Stage B) で使う。
+pii-masker の ``Entity``/``Match`` から詰め直して、キャッシュ・表示・票変換で使う。
 pii-masker の型をそのまま外に漏らさない (依存をアダプタ境界で閉じる)。
 """
 
@@ -20,16 +20,16 @@ class LlmSpan:
     start: int
     end: int
     ene_type: str  # pii-masker の ENE type (Person / Company / ... / Trademark)
-    reason: str | None  # LLM の判断理由 (出口1 で表示)
+    reason: str | None  # LLM の判断理由 (表示用)
     how: str  # pii-masker Match.how ("exact"/"normalized"/...) 由来の可視化用
 
 
 @dataclass(frozen=True)
 class LlmDetection:
-    """1 文書 (チャンク列) に対する LLM 検出結果 (Stage A の出力)。
+    """1 文書 (チャンク列) に対する LLM 検出結果。
 
     ``spans`` は位置特定できた検出、``not_found`` は本文に当てられなかった検出の
-    ``(ene_type, text)`` (出口1 で「要確認」として見せる)。``model``/``detector_version``
+    ``(ene_type, text)`` (「要確認」として見せる)。``model``/``detector_version``
     はキャッシュ鍵・再現性のために保持する (``detector_version`` ＝ pii-masker の版＋窓ポリシー)。
     """
 

@@ -5,10 +5,10 @@
 - kb_mcp      : kb-mcp サーバ
 - sample      : 動作確認用の組み込みサンプル文 (SAMPLE_TEXT)
 
-**遅延ロード (設計 B) **：``files`` は DocumentLoader (→ langchain → transformers/torch) を引くため、
+**遅延ロード **：``files`` は DocumentLoader (→ langchain → transformers/torch) を引くため、
 パッケージ import 時には読み込まない。UI (純クライアント) は ``SAMPLE_TEXT`` と ``kb_mcp`` だけを使い、
 langchain 無しで ``import src.sources`` できる。``load_chunks_from_file`` などは初アクセス時に
-:func:`__getattr__` が遅延 import する (テキスト化・チャンク化の所有者はサーバ＝設計 B)。
+:func:`__getattr__` が遅延 import する (テキスト化・チャンク化の所有者はサーバ)。
 """
 
 from __future__ import annotations

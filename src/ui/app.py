@@ -1,7 +1,7 @@
 """機密情報マスキング Streamlit UI (薄い表示層・純クライアント)。
 
 検出・マスク・キャッシュ (GiNZA / cache.db) はすべてサーバ (data-redactor serve) が所有し、
-本ファイルは src.client.MaskClient 越しに HTTP で問い合わせる (設計 B)。入力 UI・表示のみを行う。
+本ファイルは src.client.MaskClient 越しに HTTP で問い合わせる。入力 UI・表示のみを行う。
 
 起動:
     uv run data-redactor ui   (＝ streamlit run src/ui/app.py)
@@ -39,7 +39,7 @@ from src.ui.render import (
     render_masking_html,
 )
 
-# 設計 B：UI は純クライアント。エンジン系 (spaCy/torch/GiNZA) ・検出器の版・LLM モデル名・
+# UI は純クライアント。エンジン系 (spaCy/torch/GiNZA) ・検出器の版・LLM モデル名・
 # 対応拡張子は API から取るか、依存の軽いモジュール (src.constants / src.ui.render /
 # src.masking の軽シンボル) から取る。src.ner / src.llm.detect_layer / document_loader は
 # import しない (＝UI に spaCy/torch/langchain/openai を持ち込まない)。
@@ -49,7 +49,7 @@ suppress_async_generator_errors()
 # アップロード可能な拡張子 (サーバの DocumentLoader が対応する形式。定義元は src.constants で依存が軽い)。
 SUPPORTED_EXTENSIONS = sorted(e[1:] for e in SUPPORTED_DOCUMENT_EXTENSIONS)
 
-# マスキング API (サーバ) の接続先。UI は純クライアント (設計 B) ＝エンジンを内包せず、
+# マスキング API (サーバ) の接続先。UI は純クライアント ＝エンジンを内包せず、
 # この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve (既定 localhost:8509。
 # kb-mcp の既定 8000 と衝突させないため 8509)。Docker は MASK_API_URL=http://api:8509 を渡す。
 MASK_API_URL = os.environ.get("MASK_API_URL", "http://127.0.0.1:8509")
@@ -68,7 +68,7 @@ def _mask_client(base_url: str) -> MaskClient:
 def _server_config() -> dict:
     """サーバの ``/config`` (既定値・検出器の版・LLM モデル名など)。未接続時は空 dict。
 
-    設計 B：検出器の版 (``detector_version``) や LLM モデル名 (``llm_model``) は**サーバが正本**。
+    検出器の版 (``detector_version``) や LLM モデル名 (``llm_model``) はサーバが正本。
     UI はローカルで計算せず、ここから取る (未接続時は空 dict＝各表示は既定にフォールバック)。
     localhost への軽い GET なので都度呼ぶ (描画ごとに数回程度＝無視できるコスト)。
     """
@@ -126,7 +126,7 @@ def _short_models(models: tuple[str, ...]) -> str:
 def _loaded_models() -> list[str]:
     """サーバが現在ロードしているモデル名 (health の models_loaded)。未接続・ロード前は空。
 
-    設計 B：モデルの所有者はサーバで、起動時に固定ロードする。UI は選ばず、この
+    モデルの所有者はサーバで、起動時に固定ロードする。UI は選ばず、この
     ロード済み集合をそのまま解析に使う (API はリクエストごとのモデル部分指定に未対応＝
     部分集合を送ると 422 になる。全ロード集合をそのまま渡すので一致して通る)。
     """
@@ -256,7 +256,7 @@ def render_input(
     ``get_chunks`` 呼び出しに遅延させる (実際に走るのは「読み込む」ボタンが押されたときだけ)。
 
     text/file/kb は ``get_chunks`` の中で ``MaskClient.ingest_document`` を呼んでサーバへ取り込み
-    (テキスト化・チャンク化の所有者はサーバ＝設計 B)、返るチャンクを解析に使う。kb は kb-mcp
+    (テキスト化・チャンク化の所有者はサーバ)、返るチャンクを解析に使う。kb は kb-mcp
     から元ファイルを取得して file として取り込む (cache＝キャッシュ選択は取込済みチャンクを返す)。
 
     戻り値 ``(input_id, input_kind, source_label, get_chunks)``：
@@ -276,7 +276,7 @@ def render_input(
 
             def get_file_chunks(f=uploaded_file) -> list[str]:
                 # ファイル本体をサーバへ送り、サーバが DocumentLoader で抽出・チャンク化する
-                # (テキスト化・チャンク化の所有者はサーバ＝設計 B)。返るチャンクを解析に使う。
+                # (テキスト化・チャンク化の所有者はサーバ)。返るチャンクを解析に使う。
                 with st.spinner(
                     "ファイルをサーバへ送信してテキスト化・チャンク化中 ..."
                 ):
@@ -437,7 +437,7 @@ def render_input(
 def _masking_settings_sig(models: list[str], flatten_tables: bool) -> tuple:
     """マスキングの設定署名 (モデル / 平文化)。再解析バナー (入力/設定が変わったか) の判定に使う。
 
-    辞書・除外リストはサーバ所有 (設計 B) で UI はファイルを持たないため署名には含めない。
+    辞書・除外リストはサーバ所有 で UI はファイルを持たないため署名には含めない。
     辞書/除外の変更はマージタブの登録/除外ボタンで即再解析されるか、エディタ編集後に
     [📥 読み込む] で再取得される。
     """
@@ -523,7 +523,7 @@ def _confidence_label(confidence: str) -> str:
     return f"{_CONFIDENCE_ORDER.get(confidence, 9) + 1} : {confidence}"
 
 
-# API の確信度は wire (ASCII)。UI は日本語表示なのでここで対応づける (設計 §1-A)。
+# API の確信度は wire (ASCII)。UI は日本語表示なのでここで対応づける。
 _WIRE_TO_JP = {
     "certain": "確定",
     "strong": "強",
@@ -569,7 +569,7 @@ def _sorted_by_confidence(items, *, key, mask_rank=None, conf_key=None):
 def _auto_mask_spans(analysis_json: dict) -> set[tuple[int, int]]:
     """既定でマスクする出現の span 集合 (共有選択 ``mask_sel`` の初期値)。
 
-    API `/analyze` の ``auto_selection`` (mask_level に基づく実体単位の既定選択・案2) をそのまま
+    API `/analyze` の ``auto_selection`` (mask_level に基づく実体単位の既定選択) をそのまま
     集合にする。ある表層に 確定/強 の出現が 1 つでもあればその表層の全出現が入る (サーバ側で計算済み)。
     """
     return {tuple(s) for s in analysis_json["auto_selection"]}
@@ -578,7 +578,7 @@ def _auto_mask_spans(analysis_json: dict) -> set[tuple[int, int]]:
 def _doc_status(client: MaskClient, content_hash_: str) -> dict:
     """サーバの文書メタ (ner_models / llm_versions 等) を取得する。未接続・未取込は空 dict。
 
-    NER/LLM タブと状態ヘッダの「キャッシュ済みか」の判定に使う (設計 B：状態はサーバの
+    NER/LLM タブと状態ヘッダの「キャッシュ済みか」の判定に使う (状態はサーバの
     get_document 由来にし、UI はローカルの cache.db を直接見ない)。取得失敗は空 dict＝
     「キャッシュ無し」扱いにして UI を落とさない (各操作側でエラー表示する前提)。
     """
@@ -594,7 +594,7 @@ def _doc_missing_on_server(client: MaskClient, content_hash_: str) -> bool:
     マスキングの結果は入力方法ごとのセッションスロットに永続化され、別モード (🗂 キャッシュ等) へ
     往復しても保たれる (利便性のための設計)。だが永続化は「その文書がサーバにまだある」前提で、
     🗂 で削除されると UI は消えた content_hash を指したまま＝各タブがサーバへ投げて 404 になる。
-    パイプライン入口でこの関数を使い、消えていれば読み込み直しを促す (真実はサーバ側＝設計 B)。
+    パイプライン入口でこの関数を使い、消えていれば読み込み直しを促す (真実はサーバ側)。
 
     404 以外 (接続不能・その他エラー) は「不明」＝False にする。一時的な不通でセッションの
     作業結果を捨てないため (実操作でのエラーは各タブ側が個別に表示する)。
@@ -860,7 +860,7 @@ def _render_by_occurrence(groups, confidences, sel, ver, stored, text):
 def render_dict_editor() -> None:
     """マスク辞書の確認・追加・編集・保存 UI (独立タブ)。
 
-    辞書ファイルはサーバが所有する (設計 B)。読み書きは API 経由で行い、
+    辞書ファイルはサーバが所有する。読み書きは API 経由で行い、
     行を編集/追加/削除して保存すると PUT /dictionary でサーバへ書き出す。
     「置換」列に値を入れると、その実体のマスク後の伏せ字を固定できる (空なら自動採番)。
     """
@@ -1089,7 +1089,7 @@ def render_cache_view() -> None:
 def render_allowlist_editor() -> None:
     """除外リストの確認・追加・編集・保存 UI (独立タブ)。
 
-    除外リストファイルはサーバが所有する (設計 B)。読み書きは API 経由で行い、
+    除外リストファイルはサーバが所有する。読み書きは API 経由で行い、
     行を編集/追加/削除して保存すると PUT /allowlist でサーバへ書き出す。
     1 列 (除外語) だけのフラットなリスト。
     """
@@ -1413,8 +1413,8 @@ def render_masking_result(stored: dict) -> None:
 def _render_state_header(stored: dict) -> None:
     """選択ソースのパイプライン状態 (冒頭設計図のミニ版)。
 
-    ✅=本セッションで実行済み / 📂=キャッシュ有 (表示は一瞬) / ⬜=未。状態はサーバ由来
-    (get_document の ner_models / llm_versions、get_draft の手動差分) から導出する (設計 B)。
+    ✅=本セッションで実行済み / 📂=キャッシュ有 (表示は一瞬) / ⬜=未。
+    状態はサーバ由来 (get_document の ner_models / llm_versions、get_draft の手動差分) から導出する。
     """
     chash = content_hash(stored["chunks"])
     client = _mask_client(MASK_API_URL)
@@ -1506,7 +1506,7 @@ def _render_detect_buttons(
 def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
     """NER検出タブ (独立経路)：サーバの `/analyze`(detection="ner") で候補を集約して表示する。
 
-    重い GiNZA 解析はサーバ側で実行・キャッシュされる (設計 B＝UI はエンジンを内包しない)。
+    重い GiNZA 解析はサーバ側で実行・キャッシュされる (UI はエンジンを内包しない)。
     キャッシュ状態は get_document の ner_models から判定し、実行 / 表示＋再実行 を出し分ける。
     """
     client = _mask_client(MASK_API_URL)
@@ -1592,7 +1592,7 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
-    """LLM検出タブ (独立経路・出口1)：サーバの `/analyze`(detection="llm") で LLM 検出を表示する。
+    """LLM検出タブ (独立経路)：サーバの `/analyze`(detection="llm") で LLM 検出を表示する。
 
     LLM 検出 (pii-masker/Azure) はサーバ側で実行・キャッシュされる (Azure 認証も serve 側)。
     ⑥b で API 化した際、ENE type / 一致方法 / 理由 / 未特定件数は簡略化した (groups の
@@ -1649,7 +1649,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
             icon="✅",
         )
     st.caption(
-        f"LLM 由来の候補 {len(llm_groups)} 実体（出口1・独立ビュー）。確信度の確定はマージ&確信度タブで。"
+        f"LLM 由来の候補 {len(llm_groups)} 実体 (独立ビュー)。確信度の確定はマージ&確信度タブで。"
     )
     if not llm_groups:
         st.write("LLM の検出はありませんでした。")
@@ -1697,7 +1697,7 @@ def _show_analyze_error(e: MaskApiError, detection: str) -> None:
 
 
 def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
-    """マージ&確信度タブ (出口2)：サーバの `/analyze` で候補を集約・確信度づけしてレビューする。
+    """マージ&確信度タブ：サーバの `/analyze` で候補を集約・確信度づけしてレビューする。
 
     detection は「**現行版の LLM キャッシュがある or LLM検出タブを実行済み**なら both、なければ ner」で
     自動判定する (LLM を勝手に走らせない＝Azure を強制しない・現状の振る舞いを踏襲)。サーバが辞書＋
@@ -1754,7 +1754,7 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
         "合流したチャネル: 辞書＋正規表現"
         + ("＋NER" if used.get("ner") else "")
         + ("＋LLM" if used.get("llm") else "")
-        + "　— 確信度＝特別カテゴリを出した系統数（NER∧LLM=強／片方=中）。LLM 単独は『🤖 LLM検出』タブ（出口1）。"
+        + "　— 確信度＝特別カテゴリを出した系統数 (NER∧LLM=強／片方=中)。LLM 単独は『🤖 LLM検出』タブ。"
     )
 
     # 📒 マスク辞書 / 🚫 除外リスト をエディタで編集しても、この結果は保存済み (セッション) の
@@ -1794,7 +1794,7 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_pipeline(stored: dict, flatten_tables: bool) -> None:
-    """1ソース＝1パイプライン：状態ヘッダー＋ステージ選択 (§12)。
+    """1ソース＝1パイプライン：状態ヘッダー＋ステージ選択。
 
     ステージは **st.radio (key で選択状態を保持) ** で切り替える。`st.tabs` は各ステージの実行ボタンや
     マスク反映が起こす rerun のたびに先頭タブへ戻ってしまうため使わない (選択が保持できる radio にする)。
@@ -1849,7 +1849,7 @@ def main() -> None:
         render_cache_view()
         return
     # --- マスク辞書モード (文書入力なし。辞書の確認・編集・保存だけ) ---
-    # 辞書ファイルはサーバ所有 (設計 B) ＝パスはクライアントで指定しない。
+    # 辞書ファイルはサーバ所有 ＝パスはクライアントで指定しない。
     if dict_mode:
         with st.sidebar:
             st.header("⚙️ 設定")
@@ -1862,7 +1862,7 @@ def main() -> None:
         return
 
     # --- 除外リストモード (文書入力なし。除外語の確認・編集・保存だけ) ---
-    # 除外リストファイルもサーバ所有 (設計 B) ＝パスはクライアントで指定しない。
+    # 除外リストファイルもサーバ所有 ＝パスはクライアントで指定しない。
     if allowlist_mode:
         with st.sidebar:
             st.header("⚙️ 設定")
@@ -1878,11 +1878,11 @@ def main() -> None:
     # --- サイドバー (マスキングの設定) ---
     with st.sidebar:
         st.header("⚙️ 設定")
-        # モデルはサーバが起動時に固定ロードする (設計 B)。UI は選ばず、ロード済みを
+        # モデルはサーバが起動時に固定ロードする。UI は選ばず、ロード済みを
         # そのまま使う (API はリクエストごとのモデル部分指定に未対応)。ロード済みモデル名は
         # サイドバー上部の接続状態に出るので、ここでは重ねて表示しない。
         models = _loaded_models()
-        # 辞書・除外リストはサーバ所有 (設計 B)。編集は 📒 マスク辞書 / 🚫 除外リスト タブで行う
+        # 辞書・除外リストはサーバ所有。編集は 📒 マスク辞書 / 🚫 除外リスト タブで行う
         # (UI はファイルパスを持たない)。
         flatten_tables = st.toggle(
             "テーブルを平文化して検出",
@@ -1984,7 +1984,7 @@ def main() -> None:
                 chunks = None
             if chunks:
                 # パイプラインは「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
-                # 文書メタ＋チャンクの記録はサーバが取込 (ingest_document) 時に行う (設計 B)。
+                # 文書メタ＋チャンクの記録はサーバが取込 (ingest_document) 時に行う。
                 # text/file/kb は get_chunks 内でサーバへ取り込み済み (cache は既に登録済み)。
                 st.session_state[slot] = {
                     "settings_sig": settings_sig,
@@ -2006,7 +2006,7 @@ def main() -> None:
 
     # 永続化したスロットが指す文書がサーバにまだあるか確認する。🗂 で削除された等で消えていれば、
     # 古いセッション結果を捨てて読み込み直しを促す (消えた content_hash を各タブがサーバへ投げて
-    # 404 になるのを入口で一括して防ぐ)。真実はサーバ側＝設計 B。
+    # 404 になるのを入口で一括して防ぐ)。真実はサーバ側。
     if _doc_missing_on_server(
         _mask_client(MASK_API_URL), content_hash(stored["chunks"])
     ):
@@ -2031,7 +2031,7 @@ def main() -> None:
                 "（マスキングは再読み込みで各タブの結果がリセットされます）。"
             )
 
-        # 1ソース＝1パイプライン：平文/NER検出/LLM検出/マージ&確信度 のタブで見せる (§12)。
+        # 1ソース＝1パイプライン：平文/NER検出/LLM検出/マージ&確信度 のタブで見せる。
         #   平文はタブ内に置くので、ここでの inline 表示はしない。
         _render_pipeline(stored, flatten_tables)
 

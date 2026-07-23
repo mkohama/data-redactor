@@ -5,7 +5,7 @@
     MaskResult / Candidate / MaskEntry : 結果の型
     MaskDictionary : マスク辞書 (社名・商標・人名の登録リスト)
 
-**遅延ロード (設計 B) **：``MaskingEngine`` / ``NerCache`` などエンジン系は spaCy (→torch) を
+**遅延ロード **：``MaskingEngine`` / ``NerCache`` などエンジン系は spaCy (→torch) を
 引くため、パッケージ import 時には**読み込まない**。UI (純クライアント) は ``content_hash`` や
 ``dict_sort_key`` など軽いシンボルだけを使い、spaCy 無しで ``import src.masking`` できる。
 エンジン系は初アクセス時に :func:`__getattr__` が遅延 import する (型検査は TYPE_CHECKING 経由)。

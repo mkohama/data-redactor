@@ -1,4 +1,4 @@
-"""pii-masker (git submodule, §8 の B2) を import 可能にする path-injection。
+"""pii-masker (git submodule) を import 可能にする path-injection。
 
 **副作用 import**：このモジュールを import すると ``external/pii-masker/src`` を ``sys.path`` に通す
 (``import pii_masker`` を解決可能にする)。pii-masker は ``[build-system]`` を持たない PoC で
@@ -6,7 +6,7 @@ pip/uv インストールできないため、editable でなく path-injection 
 
 submodule 未取得 (``external/pii-masker`` が無い) なら何もしない＝pii-masker を使わず
 スタブで開発・テストする環境でも無害。将来 ``src/pii_masker`` として本体へ統合しても、
-``src`` を path に置く前提が同じなのでアダプタの import 文は不変 (§8 前方互換)。
+``src`` を path に置く前提が同じなのでアダプタの import 文は不変。
 """
 
 from __future__ import annotations

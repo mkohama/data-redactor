@@ -301,7 +301,7 @@ class NerEngine:
 
         本文系 (``text``/``original_text``/``offset_map``) は **spaCy 非依存**なので
         :func:`~src.ner.preprocess.build_body` と同じ :func:`~src.ner.preprocess._body_from_pieces`
-        で組む (＝LLM 検出層と本文座標を共有する。接続点 (J1))。本メソッドはそれに
+        で組む (＝LLM 検出層と本文座標を共有する)。本メソッドはそれに
         ``tokens``/``entities`` を doc から足すだけ。
         """
         pieces = _prepare_pieces(chunks, flatten_tables=flatten_tables)
@@ -390,7 +390,7 @@ def _sudachi_tokenizer() -> Any:
 def sudachi_analyze_chunks(
     chunks: Iterable[str], *, flatten_tables: bool = False
 ) -> Analysis:
-    """GiNZA NER を回さず **SudachiPy 単体**でトークン化のみ行う軽量解析 (§13 ③)。
+    """GiNZA NER を回さず **SudachiPy 単体**でトークン化のみ行う軽量解析。
 
     ``text``/``original_text``/``offset_map`` は :func:`~src.ner.preprocess.build_body` と同一
     (spaCy 非依存)。``tokens`` は Sudachi 形態素 (surface/品詞/オフセット)、``entities`` は空

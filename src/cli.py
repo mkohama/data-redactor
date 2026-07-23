@@ -192,7 +192,7 @@ def ui(streamlit_args: tuple[str, ...]) -> None:
 def serve(host: str, port: int, reload_: bool, uvicorn_args: tuple[str, ...]) -> None:
     """マスキング HTTP API を起動する (`uvicorn src.api.app:app` のラッパ)。
 
-    起動時に GiNZA モデルを 1 回ロードし、`data/cache.db` を単一所有する (設計 B)。
+    起動時に GiNZA モデルを 1 回ロードし、`data/cache.db` を単一所有する。
     既定ポートは 8509 (kb-mcp の既定 8000 と衝突させないため。UI の MASK_API_URL 既定も 8509・
     Docker では compose の api サービスも 8509、UI は 8508)。
     追加引数はそのまま uvicorn に渡す。例: `data-redactor serve --port 8510`
@@ -293,7 +293,7 @@ def dev(host: str, api_port: int, ui_port: int, reload_: bool) -> None:
     """API サーバと Streamlit UI を 1 コマンドでまとめて起動する (ローカル開発用)。
 
     `data-redactor serve` (API) をバックグラウンドで、`data-redactor ui` (UI) を
-    フォアグラウンドで起動する。UI は環境変数 `MASK_API_URL` でこの API を指す (設計 B)。
+    フォアグラウンドで起動する。UI は環境変数 `MASK_API_URL` でこの API を指す。
     Ctrl+C で UI を止めると、API も後片付けで停止する。
 
     **API の /health が応答する (GiNZA ロード完了) まで待ってから UI を起動する**。UI が先に出て

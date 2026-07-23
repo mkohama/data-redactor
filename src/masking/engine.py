@@ -3,7 +3,7 @@
 候補生成 (NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書) → 確信度づけ → 選択された候補で
 マスク適用 (文書内収集で全出現に展開)。設計の背景は docs-dev/対策仮説.md を参照。
 
-確信度 (**NER×LLM の2系統合議**で決める＝§13)。NER と LLM は対等な2系統で、
+確信度 (NER×LLM の2系統合議で決める)。NER と LLM は対等な2系統で、
 NER の中の sudachi/electra/ja_ginza は「票」でなく系統内入力 (NER は内部で何チャネル一致しても
 外に出す意見は 1 つ)。フラット集計だと NER の3チャネルが LLM の1票を圧殺するため等分にする：
 - カテゴリ … 各系統を 1 カテゴリへ畳み (特別=人名/社名/商標 が地名/その他に勝つ・重い特別が勝つ)、
@@ -18,7 +18,7 @@ NER の中の sudachi/electra/ja_ginza は「票」でなく系統内入力 (NER
   既定で非表示・自動マスク外 (データには残す＝取りこぼさない)。確定/強 (辞書・連絡先・2系統一致・
   昇格) は対象外。漢字 1 文字は実在姓 (林・森 等) があるので保護＝微弱にしない。
 
-昇格 (session) ＝ phase1 で強になった語を「確認済み」として phase2 に再注入したもの (§ analyze)。
+昇格 (session) ＝ phase1 で強になった語を「確認済み」として phase2 に再注入したもの。
 実辞書 (dict) とは別チャネルにし、**確定でなく強**に留める (確定＝名簿、強＝検出/確認済み、の区別を保つ)。
 各票は自分のカテゴリにそのまま入れる (特例なし)。Sudachi 固有名詞-一般 は「その他」のまま扱い、
 NER 社名票で社名へ昇格させたりしない (未知の英字トークン＝Reject 等の汎用語を強にしないため)。
@@ -104,8 +104,8 @@ _NER_LABEL_CATEGORY: dict[str, str] = {
     # 連絡先 (Phone_Number/Email/URL) は意図的に含めない (上のコメント参照。正規表現に委ねる)。
 }
 
-# LLM (pii-masker) の ENE type → data-redactor の6カテゴリ (§7-④。内部語彙は6カテゴリに畳む)。
-# 生 ene_type は LlmSpan 側に温存し、出口1 で細分表示する (merge 語彙は汚さない)。
+# LLM (pii-masker) の ENE type → data-redactor の6カテゴリ (内部語彙は6カテゴリに畳む)。
+# 生 ene_type は LlmSpan 側に温存し、LLM 検出ビューで細分表示する (merge 語彙は汚さない)。
 _ENE_TO_CATEGORY: dict[str, str] = {
     "Person": "人名",
     "Company": "社名",
@@ -126,11 +126,11 @@ _ENE_TO_CATEGORY: dict[str, str] = {
 
 # 「その他」へ畳むので確信度は**弱固定**。ただし LLM が付けたこれらは _looks_like_code による
 # 微弱降格を**免除**する (`7-410` 型の社員番号等が消えると recall 漏れ＝致命的)。
-# ＝弱のままレビューに必ず残す (既定で自動マスクはされないが、候補から消えずデータにも残る。§7-④)。
+# ＝弱のままレビューに必ず残す (既定で自動マスクはされないが、候補から消えずデータにも残る)。
 _LLM_IDENTIFIER_TYPES = frozenset({"Employee_ID", "Account", "IP_Address"})
 
 # 連絡先 (category=連絡先) の正規表現。NER は @ や数字に過剰発火して不安定なので、
-# 「形」が決まっている連絡先は決定的な正規表現で拾う (§ docs-dev/マスキング設計.md §10)。
+# 「形」が決まっている連絡先は決定的な正規表現で拾う (詳細は docs-dev/マスキング設計.md 参照)。
 # まずは Email のみ。URL・電話番号は同じ仕組みでここに追加する (すべて連絡先カテゴリ)。
 # メールはドメインに辞書社名 (exmotion 等) を内包するため、**1 件まるごと**を 1 候補にして
 # 辞書による部分マスク (`x@[社名].co.jp` の体裁崩れ) を防ぐ (_contact_candidates で他候補を退ける)。
@@ -153,7 +153,7 @@ _EMAIL_RE = re.compile(
 _CONTACT_PATTERNS: tuple[re.Pattern[str], ...] = (_EMAIL_RE,)
 
 # 「コードらしさ」判定用。実在の人名・社名には現れない特徴を持つ語＝NER の誤ラベル (社内コード/
-# 変数名/列挙子) とみなし、中/弱 の候補を **微弱** (既定で非表示・自動マスク外) へ落とす (§ analyze)。
+# 変数名/列挙子) とみなし、中/弱 の候補を **微弱** (既定で非表示・自動マスク外) へ落とす。
 # 確定/強 (辞書・連絡先・2系統一致・昇格) は対象にしない＝確信度の根拠があるものは守る。
 _CODE_MARKER_RE = re.compile(
     r"[_@~\[\]{}=!<>;|\\]|::"
@@ -306,7 +306,7 @@ class MaskResult:
 
 @dataclass(frozen=True)
 class BundleEntry:
-    """バンドル (複数パート) で共有する対応表 1 件。設計 §3-1 の ``mapping[]``。
+    """バンドル (複数パート) で共有する対応表 1 件 (mapping[] の 1 要素)。
 
     ``occurrences`` は ``(part_index, start, end)`` の列 (各パートの**原文座標**)。同じ
     プレースホルダが複数パート・複数箇所に出るため、どのパートのどこかを保持する (監査・再現用)。
@@ -332,7 +332,7 @@ class BundleMaskResult:
 
 
 def unmask(text: str, mapping: Iterable[MaskEntry]) -> str:
-    """マスク済み (＝LLM が返した) テキストを復元する。設計 §3-2。
+    """マスク済み (＝LLM が返した) テキストを復元する。
 
     - ``placeholder`` → ``canonical`` (無ければ ``surfaces[0]``) へ置換。
     - **長いプレースホルダ優先** (``[社1]`` が ``[社10]`` を巻き込まないように)。
@@ -410,7 +410,7 @@ def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
 
     確信度・カテゴリの**決定**は :func:`_merge` の2系統合議 (NER 系統 / LLM 系統) で行う＝
     この関数は決定には使わない。フラット集計だと NER の3チャネルが LLM の1票を圧殺するため
-    (§13「NER と LLM は対等な2系統」。NER の中の sudachi/electra/ja_ginza は票でなく系統内入力)。
+    (NER と LLM は対等な2系統。NER の中の sudachi/electra/ja_ginza は票でなく系統内入力)。
     票＝チャネル (同一チャネルの複数形態素＝姓+名 等は 1 票に畳む)。Sudachi 固有名詞-一般 は
     「その他」のまま (未知の英字トークンを社名に水増ししない＝Reject 等の汎用語を強にしない)。
     """
@@ -434,7 +434,7 @@ def _system_category(
 
     NER 系統＝``dict``/``session``/``regex``/``llm`` 以外の全チャネル (sudachi・各 GiNZA モデル)。
     系統内では **特別 (人名/社名/商標) が地名/その他に勝ち、重い特別が勝つ**＝``_CAT_PRIORITY``
-    最上位を採る (NER が何チャネル一致しても外に出す意見は 1 つ＝§13)。票が無ければ None。
+    最上位を採る (NER が何チャネル一致しても外に出す意見は 1 つ)。票が無ければ None。
 
     **Stage 1 (NER 限定・surface で特別票を弱める) **：ja_ginza 等が英字/コードを社名・人名へ
     誤爆するため、NER の特別票を surface で「その他」に落とし、**コードノイズが LLM と組んで
@@ -554,12 +554,12 @@ class MaskingEngine:
             if progress is not None:
                 progress(n_models, n_stages, "候補を集約・確信度づけ中")
             base = per_model[0][1]
-            # NLP (NER) チャネルの票＝Sudachi 品詞 ∪ GiNZA NER (§13。A 案: Sudachi 票は NER 実行時のみ)。
+            # NLP (NER) チャネルの票＝Sudachi 品詞 ∪ GiNZA NER (Sudachi 票は NER 実行時のみ)。
             other_raw = _sudachi_raw(base.tokens, base.text) + _ner_raw(
                 per_model, base.text
             )
         else:
-            # 軽量経路 (§13 ③)：GiNZA を回さず SudachiPy 単体でトークンのみ (辞書照合用)。
+            # 軽量経路：GiNZA を回さず SudachiPy 単体でトークンのみ (辞書照合用)。
             #   Sudachi 品詞票・NER 票は出さない (A 案)。ルールベース＋LLM のみで候補を作る。
             if progress is not None:
                 progress(0, 1, "候補を集約・確信度づけ中（NER なし）")
@@ -569,8 +569,8 @@ class MaskingEngine:
         tokens = base.tokens
         surfaces = [t.surface for t in tokens]
 
-        # LLM (pii-masker) 検出を `llm` チャネルの票として合流 (J2)。新カテゴリ・新確信度は作らず、
-        #   2系統合議に **LLM 系統**として流すだけ＝単独→中／NER 系統と相乗り→強／確定は名簿のみ (§7-②)。
+        # LLM (pii-masker) 検出を `llm` チャネルの票として合流する。新カテゴリ・新確信度は作らず、
+        #   2系統合議に LLM 系統として流すだけ＝単独→中／NER 系統と相乗り→強／確定は名簿のみ。
         if llm_detection is not None:
             other_raw.extend(_llm_raw(llm_detection, text))
 
@@ -699,7 +699,7 @@ class MaskingEngine:
     ) -> BundleMaskResult:
         """複数パート (プロンプト＋複数ファイル等) を**バンドルで共有する 1 つの対応表**でマスクする。
 
-        設計 §3-1 の ``POST /mask`` の核。各パートは独立に解析済み (``MaskAnalysis`` と選択候補) を
+        ``POST /mask`` の核。各パートは独立に解析済み (``MaskAnalysis`` と選択候補) を
         渡す。同じ canonical (表記ゆれ含む) は**全パートで同じプレースホルダ** (``[社1]`` は
         どのパートでも ``[社1]``) に採番する＝LLM の誤解と unmask の曖昧を防ぐ。
 
@@ -775,7 +775,7 @@ def _raw(
 
 
 def _llm_raw(detection: LlmDetection, text: str) -> list[Candidate]:
-    """LLM 検出 (``LlmDetection``) の各スパンを ``llm`` チャネルの生票に変換する (Stage B)。
+    """LLM 検出 (``LlmDetection``) の各スパンを ``llm`` チャネルの生票に変換する。
 
     票のラベルは生 ENE type (``vote_category`` が ``_ENE_TO_CATEGORY`` で6カテゴリへ写す)。
     生成段階のカテゴリは仮 (最終カテゴリは _merge の2系統合議が決める) が、未投票時の保険として写像値を入れる。
@@ -796,7 +796,7 @@ def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
     """中/弱 の低価値検出を微弱へ落とす (既定で非表示・自動マスク外。データは残す)。
 
     確定/強 (辞書・連絡先・2系統一致・昇格) は守る＝中/弱 のみ対象。例外：LLM が識別子
-    (社員番号/アカウント/IP) と判定したものは免除＝レビューに残す (§7-④。`7-410` 型でも消さない)。
+    (社員番号/アカウント/IP) と判定したものは免除＝レビューに残す (`7-410` 型でも消さない)。
 
     対象は次のいずれか (LLM 識別子は上記のとおり免除)：
     - **コードらしき表層** (:func:`_looks_like_code`。`Em_NoYes`/`16D`/`AP・` 等)。
@@ -847,7 +847,7 @@ def _split_on_separators(text: str, start: int, end: int) -> list[tuple[int, int
 
 
 # --------------------------------------------------------------------------- #
-# チャネル別の票生成 (§13 のチャネル分離)。各関数は「生候補 (confidence 未確定)」の列を返す。
+# チャネル別の票生成 (チャネル分離)。各関数は「生候補 (confidence 未確定)」の列を返す。
 # 集約 (_cluster/_merge の2系統合議) はチャネル非依存なので、ここを足し引きするだけで
 # 「走ったチャネルだけ集計」が表現できる (NER 任意化＝④ の土台)。
 # --------------------------------------------------------------------------- #
@@ -1227,7 +1227,7 @@ def _resolve_cluster(
 
 
 def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candidate:
-    """重なる票群を 1 候補へ。種別・確信度は **NER×LLM の2系統合議**で決める (§13)。
+    """重なる票群を 1 候補へ。種別・確信度は NER×LLM の2系統合議で決める。
 
     ① 種別＝特別 (人名/社名/商標) が地名/その他に勝つ・両系統が別の特別なら重い方 (_CAT_PRIORITY)。
     ② 確信度＝「特別 (隠すべき)」と言った**系統数**：2系統=強／1系統=中 (floor) ／特別なし=弱。
@@ -1431,7 +1431,7 @@ _NON_SYSTEM_CHANNELS = frozenset({"dict", "session", "regex", "collected"})
 
 
 def _decided_by(votes: tuple[tuple[str, str], ...]) -> str:
-    """票集合から「決め手」を1語で返す (設計 §3-1 の ``mapping[].decided_by``)。
+    """票集合から「決め手」を1語で返す (``mapping[].decided_by``)。
 
     優先順：辞書 (名簿) ＞連絡先 regex ＞ NER∧LLM の合議 (``consensus``) ＞ LLM 単独 ＞ 昇格
     (session) ＞ NER 単独。``collected`` (展開) 票しか無い＝他所で確定した実体の全出現展開なので

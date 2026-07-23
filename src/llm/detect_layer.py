@@ -1,10 +1,10 @@
-"""Stage A: LLM 検出層 (薄いアダプタ)。
+"""LLM 検出層 (薄いアダプタ)。
 
-J1 本文 ``text`` を窓に切り、各窓で **pii-masker** の ``detect`` / ``locate_all`` を呼び、
+本文 ``text`` を窓に切り、各窓で **pii-masker** の ``detect`` / ``locate_all`` を呼び、
 窓内スパンに ``window_start`` を足して全文 (merge) 座標の :class:`~src.llm.schema.LlmDetection` を作る。
 LLM 検出の本体 (プロンプト・Azure・locate) は pii-masker 側。ここはオーケストレーションのみ。
 
-実機では ``pii_masker`` を依存 (git submodule + path-injection, §8) として呼ぶ。開発・テストでは
+実機では ``pii_masker`` を依存 (git submodule + path-injection) として呼ぶ。開発・テストでは
 ``detect_fn`` / ``locate_fn`` を差し替えて pii-masker・Azure・GiNZA 無しで検証できる。
 """
 
@@ -145,7 +145,7 @@ def detect_document(
     locate_fn: LocateFn | None = None,
     progress: ProgressFn | None = None,
 ) -> LlmDetection:
-    """J1 本文 ``text`` に対し LLM 検出を行い :class:`LlmDetection` (全文座標) を返す。
+    """本文 ``text`` に対し LLM 検出を行い :class:`LlmDetection` (全文座標) を返す。
 
     手順: ``iter_windows`` で窓化 → 各窓 ``w=text[ws:we]`` で ``detect_fn(w)`` →
     ``locate_fn(w, ents)`` で窓内スパン → ``+ws`` で全文座標へ → 全窓を集約し重なりを解消。
