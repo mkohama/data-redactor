@@ -3,7 +3,9 @@
 低レベルな ``uv run main.py ...`` / ``uv run streamlit run src/ui/app.py`` の代わりに、
 1 つのエントリポイント ``data-redactor`` にサブコマンドをぶら下げる。
 
-    uv run data-redactor ui                 # Streamlit UI を起動
+    uv run data-redactor serve              # マスキング HTTP API を起動
+    uv run data-redactor ui                 # Streamlit UI を起動（API のクライアント）
+    uv run data-redactor dev                # API＋UI を 1 コマンドで起動（ローカル開発）
     uv run data-redactor ner <file>         # ファイル/テキストを NER → HTML 表示
     uv run data-redactor debug <file>       # トークンの品詞 / NER ラベルを観察
     uv run data-redactor check              # 品質ゲート（ruff + mypy）
@@ -14,8 +16,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import webbrowser
@@ -206,6 +210,103 @@ def serve(host: str, port: int, reload_: bool, uvicorn_args: tuple[str, ...]) ->
         code = subprocess.call(cmd)
     except KeyboardInterrupt:
         code = 0  # Ctrl+C はサーバ停止の通常手順。正常終了として扱う。
+    raise SystemExit(code)
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """バックグラウンドの子プロセス（とその子）を確実に止める。
+
+    ``--reload`` の uvicorn はリローダ＋ワーカーの複数プロセスになり、親だけ terminate すると
+    ワーカーがポートを掴んだまま孤児化しうる。プロセスツリーごと落とす：Windows は
+    ``taskkill /T``、POSIX は起動時に切ったセッション（プロセスグループ）へ SIGTERM。
+    """
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.call(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        # killpg / getpgid は POSIX 専用（この分岐も POSIX のみ）。Windows で解析する mypy が
+        # 欠落属性として誤検出するので型無視で抑える。
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # type: ignore[attr-defined]
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+@cli.command()
+@click.option(
+    "--host", default="127.0.0.1", show_default=True, help="API の待受ホスト。"
+)
+@click.option(
+    "--api-port", default=8509, show_default=True, type=int, help="API の待受ポート。"
+)
+@click.option(
+    "--ui-port",
+    default=8501,
+    show_default=True,
+    type=int,
+    help="Streamlit UI のポート。",
+)
+@click.option(
+    "--reload",
+    "reload_",
+    is_flag=True,
+    help="API をコード変更でホットリロード（開発用）。",
+)
+def dev(host: str, api_port: int, ui_port: int, reload_: bool) -> None:
+    """API サーバと Streamlit UI を 1 コマンドでまとめて起動する（ローカル開発用）。
+
+    `data-redactor serve`（API）をバックグラウンドで、`data-redactor ui`（UI）を
+    フォアグラウンドで起動する。UI は環境変数 `MASK_API_URL` でこの API を指す（設計 B）。
+    Ctrl+C で UI を止めると、API も後片付けで停止する。GiNZA のロードに少し時間がかかるので、
+    起動直後の UI は「モデルロード中」と出ることがある（数秒〜十数秒で解消）。
+    """
+    app = _ROOT / "src" / "ui" / "app.py"
+    api_url = f"http://{host}:{api_port}"
+
+    api_cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "src.api.app:app",
+        "--host",
+        host,
+        "--port",
+        str(api_port),
+        *(["--reload"] if reload_ else []),
+    ]
+    ui_cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app),
+        "--server.port",
+        str(ui_port),
+    ]
+    # UI（別プロセス）へ接続先を渡す。POSIX は API を別セッションにして、Ctrl+C は
+    # フォアグラウンドの UI だけに届かせ、API は finally の後片付けで確実に落とす。
+    ui_env = {**os.environ, "MASK_API_URL": api_url}
+    popen_kw: dict = {} if os.name == "nt" else {"start_new_session": True}
+
+    click.echo(f"API を起動中: {api_url}（GiNZA ロードに少し時間がかかります）")
+    api = subprocess.Popen(api_cmd, cwd=_ROOT, **popen_kw)
+    try:
+        click.echo(f"UI を起動中: http://{host}:{ui_port}（MASK_API_URL={api_url}）")
+        code = subprocess.call(ui_cmd, cwd=_ROOT, env=ui_env)
+    except KeyboardInterrupt:
+        code = 0  # Ctrl+C は停止の通常手順。正常終了として扱う。
+    finally:
+        click.echo("API を停止しています ...")
+        _terminate(api)
     raise SystemExit(code)
 
 

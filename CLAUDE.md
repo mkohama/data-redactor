@@ -22,7 +22,11 @@ data-redactor — GiNZA (spaCy) による日本語固有表現抽出（NER）ツ
 ## 開発ワークフロー
 
 - 実行は統一サブコマンド **`data-redactor`**（`[project.scripts]`、実体は `src/cli.py`。click ベース）:
-  - `uv run data-redactor ui` … Streamlit UI を起動（`streamlit run src/ui/app.py` のラッパ）
+  - `uv run data-redactor serve [--host/--port/--reload]` … マスキング HTTP API を起動（`uvicorn` のラッパ）
+  - `uv run data-redactor ui` … Streamlit UI を起動（`streamlit run src/ui/app.py` のラッパ。API のクライアント）
+  - `uv run data-redactor dev [--host/--api-port/--ui-port/--reload]` … API＋UI を 1 コマンドで起動
+    （ローカル開発用。API をバックグラウンド・UI をフォアグラウンドで起動し、UI へ `MASK_API_URL` を渡す。
+    Ctrl+C で両方停止）
   - `uv run data-redactor ner <file> [--open/--serve/--model/--labels/--flatten]` … NER → HTML 表示
   - `uv run data-redactor debug <file> [--both-models/--all-tokens/--flatten/--out]` …
     各トークンの SudachiPy 品詞 / NER ラベルを並べて recall の穴を観察
