@@ -268,3 +268,49 @@ def test_case_sensitive_yaml_roundtrip(tmp_path) -> None:
     d = MaskDictionary.load(p)
     assert [m.canonical for m in d.match(_surfaces("STS"))] == ["STS"]
     assert d.match(_surfaces("sts")) == []
+
+
+# --------------------------------------------------------------------------- #
+# 融合トークン内部の CJK 部分一致（Sudachi が複合カタカナを 1 トークンに融合する穴埋め）。
+# 例：`エクスモーションオリジナル` が 1 トークンでも、登録語 `エクスモーション` を拾う。
+# --------------------------------------------------------------------------- #
+
+
+def _spans(d: MaskDictionary, text: str) -> list[str]:
+    """cjk_substring_matches が拾った部分文字列（元テキストのスライス）を返す。"""
+    return [text[s:e] for s, e, *_ in d.cjk_substring_matches(_toks(text))]
+
+
+def test_cjk_substring_inside_merged_token() -> None:
+    """融合カタカナトークン内部の登録語を拾う（エクスモーション in エクスモーションオリジナル）。"""
+    d = _whole({normalize("エクスモーション"): ("エクスモーション", "社名")})
+    # Sudachi はこれを 1 トークンに融合する＝match では拾えないが substring では拾う。
+    assert _spans(d, "エクスモーションオリジナルの要素") == ["エクスモーション"]
+    assert _spans(d, "エクスモーションオリジナル") == ["エクスモーション"]
+
+
+def test_cjk_substring_no_duplicate_when_whole_token() -> None:
+    """トークン全体一致は match() の担当＝内部照合では emit しない（重複回避）。"""
+    d = _whole({normalize("エクスモーション"): ("エクスモーション", "社名")})
+    # `エクスモーションの要素` は エクス/モーション に割れ、match が境界一致で拾う。
+    # 内部照合は各トークン全体一致を除くので、ここでは何も足さない。
+    assert _spans(d, "エクスモーションの要素") == []
+
+
+def test_cjk_substring_ignores_latin_fragments() -> None:
+    """ラテン英数の断片は内部照合の対象外（従来どおり 部分一致: true の opt-in）。"""
+    d = _whole({normalize("CB"): ("CB", "商標")})
+    assert _spans(d, "ECBType") == []
+    assert _spans(d, "CBMark") == []
+
+
+def test_cjk_substring_single_char_skipped() -> None:
+    """1 文字辞書語は雑音になりやすいので内部照合しない（match は従来どおり境界で拾う）。"""
+    d = _whole({normalize("本"): ("本", "商標")})
+    assert _spans(d, "日本語") == []
+
+
+def test_cjk_substring_kanji_inside_token() -> None:
+    """漢字の登録語も融合トークン内部で拾う（recall 優先の割り切り＝過剰マスクは安全側）。"""
+    d = _whole({normalize("日本"): ("日本", "社名")})
+    assert _spans(d, "日本語") == ["日本"]

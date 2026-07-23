@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -272,6 +272,33 @@ class MaskDictionary:
                 j += 1
         return out
 
+    def cjk_substring_matches(
+        self, tokens: Sequence[tuple[str, int, int]]
+    ) -> list[tuple[int, int, str, str]]:
+        """辞書語を、**単一トークン内部の CJK/かな連なりの部分文字列**として拾う。
+
+        Sudachi は複合カタカナ（``エクスモーションオリジナル``）を 1 トークンに融合することがあり、
+        トークン境界単位の :meth:`match` では内部の登録語（``エクスモーション``）を取りこぼす。
+        LLM が拾える語を、確定の砦である辞書が漏らすのは redactor として不可なので、この穴を
+        埋める（recall 優先）。一致部分が **CJK/かな（＋長音符）だけ**のときに限る＝ラテン英数の
+        断片一致（``ECBType`` の ``CB``）は従来どおり対象外（``部分一致: true`` の opt-in のまま）。
+
+        入力 ``tokens`` は ``(surface, text_start, text_end)``。大小無視（``_map``）・大小区別
+        （``_cs_map``）の両方を見る。返り値 ``(text_start, text_end, canonical, category)``。
+        トークン全体が登録語の分は :meth:`match` が拾うので emit しない（重複回避）。
+        """
+        if not self._map and not self._cs_map:
+            return []
+        out: list[tuple[int, int, str, str]] = []
+        for surface, tstart, _tend in tokens:
+            if self._map:
+                norm, offs = _norm_chars_with_offsets(surface, normalize)
+                _emit_cjk_substrings(norm, offs, tstart, self._map, out)
+            if self._cs_map:
+                norm_cs, offs_cs = _norm_chars_with_offsets(surface, normalize_cs)
+                _emit_cjk_substrings(norm_cs, offs_cs, tstart, self._cs_map, out)
+        return out
+
     def match(
         self,
         token_surfaces: Sequence[str],
@@ -394,6 +421,76 @@ def _partial_atoms(
             prev = b
         emit_gap(prev, len(surface))
     return atoms
+
+
+def _is_cjk(ch: str) -> bool:
+    """かな/漢字（＋長音符）か。融合トークン内部の部分一致を CJK 連なりだけに限るために使う。
+
+    ラテン英数の断片一致（``ECBType`` の ``CB`` 等）は誤検出源なので内部照合の対象外にする
+    （それは従来どおり ``部分一致: true`` の opt-in）。正規化後（NFKC）は半角カナも全角に寄るので
+    全角の範囲だけ見れば足りる。
+    """
+    o = ord(ch)
+    return (
+        0x3040 <= o <= 0x30FF  # ひらがな + カタカナ（長音符 ー=0x30FC を含む）
+        or 0x3400 <= o <= 0x9FFF  # CJK 統合漢字（拡張 A 含む）
+        or 0xF900 <= o <= 0xFAFF  # CJK 互換漢字
+    )
+
+
+def _norm_chars_with_offsets(
+    surface: str, normalizer: Callable[[str], str]
+) -> tuple[str, list[int]]:
+    """``surface`` を 1 文字ずつ ``normalizer`` で正規化して連結した文字列と、正規化後 i 文字目
+    → ``surface`` の元 index の対応表を返す。空白は正規化で消える＝連結にも対応表にも含めない。
+
+    融合トークン内部の部分文字列一致（:meth:`MaskDictionary.cjk_substring_matches`）が、命中位置を
+    元テキストのオフセットへ戻すために使う。かな/漢字は NFKC・casefold で 1:1（長さ不変）なので、
+    対象を CJK に絞る本用途では素直に対応づく。
+    """
+    chars: list[str] = []
+    offs: list[int] = []
+    for i, ch in enumerate(surface):
+        for nc in normalizer(ch):
+            chars.append(nc)
+            offs.append(i)
+    return "".join(chars), offs
+
+
+def _emit_cjk_substrings(
+    norm: str,
+    offs: list[int],
+    tstart: int,
+    keymap: dict[str, tuple[str, str]],
+    out: list[tuple[int, int, str, str]],
+) -> None:
+    """``norm``（正規化済みトークン文字列）中に現れる ``keymap`` の登録語を、**CJK/かなの部分
+    文字列**として拾って ``out`` に足す（全文オフセットは ``offs`` で戻す）。
+
+    トークン全体が登録語のとき（``match`` が拾う）は重複回避で emit しない。1 文字語は雑音に
+    なりやすいので内部照合しない（``match`` は従来どおりトークン境界で拾う）。
+    """
+    n = len(norm)
+    for key, (canonical, category) in keymap.items():
+        if len(key) < 2:
+            continue
+        start = 0
+        while True:
+            idx = norm.find(key, start)
+            if idx < 0:
+                break
+            end = idx + len(key)
+            whole_token = idx == 0 and end == n  # トークン全体一致は match() の担当
+            if not whole_token and all(_is_cjk(norm[k]) for k in range(idx, end)):
+                out.append(
+                    (
+                        tstart + offs[idx],
+                        tstart + offs[end - 1] + 1,
+                        canonical,
+                        category,
+                    )
+                )
+            start = idx + 1
 
 
 def contains_partial(

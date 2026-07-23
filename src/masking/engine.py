@@ -574,9 +574,13 @@ class MaskingEngine:
         if llm_detection is not None:
             other_raw.extend(_llm_raw(llm_detection, text))
 
-        # 実辞書の票（確定の根拠）＋ `部分一致: true` の境界内包照合。両フェーズで共通。
+        # 実辞書の票（確定の根拠）＝トークン境界一致＋融合トークン内部の CJK 部分一致
+        #   ＋ `部分一致: true` の境界内包照合。両フェーズで共通。
         dict_raw = _dict_matches_raw(
             self.dictionary, tokens, surfaces, text, "dict", "(辞書)"
+        )
+        dict_raw += _dict_substring_raw(
+            self.dictionary, tokens, text, "dict", "(辞書·内包)"
         )
         partial_raw = _partial_raw(self.dictionary, tokens, text)
 
@@ -866,6 +870,26 @@ def _dict_matches_raw(
         out.append(
             _raw(start, end, text, m.category, (channel, f"{m.category}{suffix}"))
         )
+    return out
+
+
+def _dict_substring_raw(
+    dictionary: MaskDictionary,
+    tokens: tuple[AnalyzedToken, ...],
+    text: str,
+    channel: str,
+    suffix: str,
+) -> list[Candidate]:
+    """辞書語が**融合トークン内部の CJK/かな部分文字列**として現れた分を ``channel`` 票にする。
+
+    Sudachi が複合カタカナを 1 トークンに融合したときの取りこぼし（``エクスモーション`` in
+    ``エクスモーションオリジナル``）を埋める。channel は :func:`_dict_matches_raw` と同じ
+    （dict→確定 / session→強）。命中は一致した部分だけを span にする。
+    """
+    tok_tuples = [(t.surface, t.start, t.end) for t in tokens]
+    out: list[Candidate] = []
+    for start, end, _canon, category in dictionary.cjk_substring_matches(tok_tuples):
+        out.append(_raw(start, end, text, category, (channel, f"{category}{suffix}")))
     return out
 
 
