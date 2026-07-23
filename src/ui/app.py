@@ -29,7 +29,6 @@ from src.masking import (
 from src.detector import detector_version as _detector_version
 from src.llm.detect_layer import DEFAULT_MODEL as LLM_MODEL
 from src.ner import (
-    AVAILABLE_MODELS,
     DEFAULT_COLOR,
     MASKING_CATEGORY_COLORS,
     render_masking_html,
@@ -46,14 +45,6 @@ suppress_async_generator_errors()
 
 # アップロード可能な拡張子 (DocumentLoader が対応する形式)
 SUPPORTED_EXTENSIONS = sorted(e[1:] for e in DocumentLoader.SUPPORTED_EXTENSIONS)
-
-# モデル選択肢（AVAILABLE_MODELS と同順）と説明
-MODELS = list(AVAILABLE_MODELS)
-MODEL_DESCRIPTIONS = {
-    "ja_ginza_electra": "高精度・低速 (ELECTRA / Transformer ベース)",
-    "ja_ginza": "軽量・高速 (CNN/Sudachi ベース)",
-}
-
 
 # マスキング API（サーバ）の接続先。UI は純クライアント（設計 B）＝エンジンを内包せず、
 # この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve（既定 localhost:8509。
@@ -89,7 +80,7 @@ def _render_connection_status() -> bool:
         st.caption(f"詳細: {e}")
         return False
     if health.get("models_ready"):
-        loaded = ", ".join(_short_models(tuple(health.get("models_loaded", []))))
+        loaded = _short_models(tuple(health.get("models_loaded", [])))
         st.success(f"✅ API 接続 OK（{MASK_API_URL}）")
         st.caption(f"モデル: {loaded or '—'}")
     else:
@@ -104,6 +95,20 @@ def _short_models(models: tuple[str, ...]) -> str:
     """NER モデル名を短い別名に（一覧表示用）。"""
     names = {"ja_ginza_electra": "electra", "ja_ginza": "ginza"}
     return ", ".join(names.get(m, m) for m in models)
+
+
+def _loaded_models() -> list[str]:
+    """サーバが現在ロードしているモデル名（health の models_loaded）。未接続・ロード前は空。
+
+    設計 B：モデルの所有者はサーバで、起動時に固定ロードする。UI は選ばず、この
+    ロード済み集合をそのまま解析に使う（API はリクエストごとのモデル部分指定に未対応＝
+    部分集合を送ると 422 になる。全ロード集合をそのまま渡すので一致して通る）。
+    """
+    try:
+        health = _mask_client(MASK_API_URL).health()
+    except (MaskApiError, httpx.HTTPError):
+        return []
+    return list(health.get("models_loaded", []))
 
 
 def _kb_doc_label(meta: dict) -> str:
@@ -555,6 +560,26 @@ def _doc_status(client: MaskClient, content_hash_: str) -> dict:
         return client.get_document(content_hash_)
     except (MaskApiError, httpx.HTTPError):
         return {}
+
+
+def _doc_missing_on_server(client: MaskClient, content_hash_: str) -> bool:
+    """解析対象の文書がサーバのキャッシュから消えているか（404 のときだけ True）。
+
+    マスキングの結果は入力方法ごとのセッションスロットに永続化され、別モード（🗂 キャッシュ等）へ
+    往復しても保たれる（利便性のための設計）。だが永続化は「その文書がサーバにまだある」前提で、
+    🗂 で削除されると UI は消えた content_hash を指したまま＝各タブがサーバへ投げて 404 になる。
+    パイプライン入口でこの関数を使い、消えていれば読み込み直しを促す（真実はサーバ側＝設計 B）。
+
+    404 以外（接続不能・その他エラー）は「不明」＝False にする。一時的な不通でセッションの
+    作業結果を捨てないため（実操作でのエラーは各タブ側が個別に表示する）。
+    """
+    try:
+        client.get_document(content_hash_)
+        return False
+    except MaskApiError as e:
+        return e.status_code == 404
+    except httpx.HTTPError:
+        return False
 
 
 def _status_has_llm(status: dict) -> bool:
@@ -1705,6 +1730,40 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
         + ("＋LLM" if used.get("llm") else "")
         + "　— 確信度＝特別カテゴリを出した系統数（NER∧LLM=強／片方=中）。LLM 単独は『🤖 LLM検出』タブ（出口1）。"
     )
+
+    # 📒 マスク辞書 / 🚫 除外リスト をエディタで編集しても、この結果は保存済み（セッション）の
+    # ままで自動更新されない。外部編集を反映するための再適用ボタンを常設する。辞書＋正規表現＋
+    # 除外だけ掛け直す軽い再解析で、重い NER/LLM はサーバのキャッシュを再利用する（refresh しない）。
+    if st.button(
+        "🔄 再適用（辞書・除外の変更を反映）",
+        key="reapply_merge",
+        help="📒 マスク辞書 / 🚫 除外リスト の編集をこの結果に反映します。"
+        "重い NER/LLM はサーバのキャッシュを再利用するので軽い再解析です。",
+    ):
+        try:
+            with st.spinner(
+                "辞書・除外を反映して再解析中 ...（NER/LLM はサーバのキャッシュ再利用）"
+            ):
+                stored["analysis_json"] = client.analyze_document(
+                    chash,
+                    detection=stored.get("analysis_detection", detection),
+                    mask_level="strong",
+                    flatten_tables=flatten_tables,
+                    models=models,
+                )
+        except MaskApiError as e:
+            _show_analyze_error(e, detection)
+            return
+        except httpx.HTTPError as e:
+            st.error(f"マスキング API に接続できません: {e}")
+            return
+        # auto 選択が変わり得る（辞書追加＝確定増／除外＝候補減）。手動差分（draft）から
+        # 作り直すため mask_sel を捨てて render 側で再構築させる。
+        stored.pop("mask_sel", None)
+        stored["mask_ver"] = stored.get("mask_ver", 0) + 1
+        st.success("辞書・除外の変更を反映しました。")
+        st.rerun()
+
     render_masking_result(stored)
 
 
@@ -1793,12 +1852,10 @@ def main() -> None:
     # --- サイドバー（マスキングの設定） ---
     with st.sidebar:
         st.header("⚙️ 設定")
-        models = st.multiselect(
-            "モデル（併用推奨）",
-            options=MODELS,
-            default=MODELS,
-            format_func=lambda m: f"{m}（{MODEL_DESCRIPTIONS.get(m, '')}）",
-        )
+        # モデルはサーバが起動時に固定ロードする（設計 B）。UI は選ばず、ロード済みを
+        # そのまま使う（API はリクエストごとのモデル部分指定に未対応）。ロード済みモデル名は
+        # サイドバー上部の接続状態に出るので、ここでは重ねて表示しない。
+        models = _loaded_models()
         # 辞書・除外リストはサーバ所有（設計 B）。編集は 📒 マスク辞書 / 🚫 除外リスト タブで行う
         # （UI はファイルパスを持たない）。
         flatten_tables = st.toggle(
@@ -1841,7 +1898,10 @@ def main() -> None:
 
     # --- 解析ボタン（テキスト/ファイル/kb-mcp 共通。押したときだけ重い解析が走る） ---
     if not models:
-        st.warning("モデルを 1 つ以上選択してください。")
+        st.warning(
+            "サーバに NER モデルがロードされていません"
+            "（未接続 or ロード中）。サイドバー上部の接続状態を確認してください。"
+        )
     stored = st.session_state.get(slot)
 
     # 新しい入力があればそれを解析する（can_fresh）。
@@ -1861,9 +1921,11 @@ def main() -> None:
     # 「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
     action_label = "📥 読み込む"
     clicked = st.button(action_label, type="primary", disabled=not can_analyze)
-    if not can_analyze:  # なぜ押せないかを明示（モデル未選択 / 入力未指定）
+    if not can_analyze:  # なぜ押せないかを明示（モデル未ロード / 入力未指定）
         if not models:
-            st.caption("⚠ サイドバーでモデルを 1 つ以上選択してください。")
+            st.caption(
+                "⚠ サーバに NER モデルがロードされていません（接続状態を確認）。"
+            )
         else:
             st.caption("⚠ 入力（テキスト／ファイル／kb-mcp）を指定すると押せます。")
 
@@ -1914,6 +1976,20 @@ def main() -> None:
         # クリック時はハンドラ側が案内（未選択）やエラーを output に表示済み。上書きしない。
         if not clicked:
             output.info(f"入力を指定して [{action_label}] を押してください。")
+        return
+
+    # 永続化したスロットが指す文書がサーバにまだあるか確認する。🗂 で削除された等で消えていれば、
+    # 古いセッション結果を捨てて読み込み直しを促す（消えた content_hash を各タブがサーバへ投げて
+    # 404 になるのを入口で一括して防ぐ）。真実はサーバ側＝設計 B。
+    if _doc_missing_on_server(
+        _mask_client(MASK_API_URL), content_hash(stored["chunks"])
+    ):
+        st.session_state.pop(slot, None)
+        output.warning(
+            "⚠ 解析対象の文書がサーバのキャッシュから見つかりません"
+            "（🗂 キャッシュで削除された可能性があります）。"
+            f"もう一度 [{action_label}] を押して読み込み直してください。"
+        )
         return
 
     # 解析結果は placeholder の中に描く（クリック時はスピナー表示を結果で置き換える）。
