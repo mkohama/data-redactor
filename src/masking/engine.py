@@ -1399,7 +1399,10 @@ def _assign_placeholders(
         # (例: eXmotion→[社1] / エクスモーション→[社2]。同じ表記の繰り返しは同一)。
         # 例外: 辞書に固定の置換語 (mask:) がある実体は、その 1 文字列へ寄せたいので canonical でまとめる。
         custom = dictionary.custom_placeholder(canonical) if canonical else None
-        key = normalize(canonical) if (canonical and custom) else normalize(sp.surface)
+        # 表記が違えば別プレースホルダにするため、キーは**完全一致の表記 (surface)** にする
+        # (大小・全半角も区別＝SONY と Sony は別)。同じ表記の繰り返しだけまとまる。
+        # 例外: 固定の置換語 (mask:) 指定がある実体は canonical でまとめて 1 文字列へ寄せる。
+        key = normalize(canonical) if (canonical and custom) else sp.surface
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -1480,11 +1483,9 @@ def _assign_bundle_entries(
             # 表記 (surface) ごとに別プレースホルダ。復元で元の表記へ正確に戻すため。
             # 例外: 固定の置換語 (辞書 mask:) がある実体は canonical でまとめる。
             custom = dictionary.custom_placeholder(canonical) if canonical else None
-            key = (
-                normalize(canonical)
-                if (canonical and custom)
-                else normalize(sp.surface)
-            )
+            # 表記が違えば別プレースホルダ (完全一致の surface をキーに)。固定の置換語がある
+            # 実体だけ canonical でまとめる。
+            key = normalize(canonical) if (canonical and custom) else sp.surface
             if key not in groups:
                 groups[key] = []
                 order.append(key)

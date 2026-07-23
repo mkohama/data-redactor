@@ -233,3 +233,25 @@ def test_custom_mask_still_unifies_surfaces() -> None:
     restored = unmask(res.masked_text, res.mapping)
     assert "eXmotion" not in restored
     assert restored.count("エクスモーション") == 2
+
+
+def test_case_variants_distinct_and_spans_exclude_whitespace() -> None:
+    """英語の大小違い (SONY / Sony) も別プレースホルダ＝完全一致で復元。
+
+    かつ辞書一致のスパンが前後の空白を飲み込まない (surface は語だけ・マスク後の空白が保たれる)。
+    """
+    from src.masking import unmask
+
+    d = MaskDictionary({normalize("SONY"): ("SONY", "社名")})
+    eng = MaskingEngine(dictionary=d, models=[])
+    text = "SONY と Sony は同じ会社"
+    a = eng.analyze([text], run_ner=False)
+    groups = eng.group_candidates(a.candidates)
+    sel = [m for g in groups if g.confidence in ("確定", "強") for m in g.members]
+    res = eng.apply(a, sel)
+
+    assert len({e.placeholder for e in res.mapping}) == 2  # SONY と Sony は別
+    # surface は前後の空白を含まない (過剰捕捉しない)。
+    assert all(s == s.strip() for e in res.mapping for s in e.surfaces)
+    # 完全一致で復元 (空白も保たれる)。
+    assert unmask(res.masked_text, res.mapping) == text

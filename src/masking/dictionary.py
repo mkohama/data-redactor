@@ -335,8 +335,16 @@ class MaskDictionary:
                         hit = DictMatch(i, i + length, canonical, category)
                         break
             if hit is not None:
-                matches.append(hit)
-                i = hit.end_token
+                # 一致スパンの前後にある空白トークン (正規化すると空) を除き、語だけの範囲にする。
+                # longest-match は空白トークン (normalize で "") も飲み込むため、放置すると
+                # `SONY ` のように末尾スペース込みで捕捉され、復元テキストがずれる。
+                s, e = hit.start_token, hit.end_token
+                while s < e and not ci[s]:
+                    s += 1
+                while e > s and not ci[e - 1]:
+                    e -= 1
+                matches.append(DictMatch(s, e, hit.canonical, hit.category))
+                i = hit.end_token  # 進める位置は元の末尾 (飲み込んだ空白を再走査しない)
             else:
                 i += 1
         return matches
