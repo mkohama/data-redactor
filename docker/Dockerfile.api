@@ -1,15 +1,17 @@
 # =============================================================================
-# data-redactor UI Dockerfile
-# Streamlit ベースの UI コンテナ（マルチステージビルド）
+# data-redactor API イメージ（マルチステージビルド・重）
 #
-# data-redactor 固有の注意（spec-summarizer の型からの差分）:
+# 設計 B：エンジン（GiNZA・cache.db）を所有する HTTP API（uvicorn src.api.app:app）。
+# torch・spaCy・GiNZA・pii-masker・Azure CLI を含む。UI は別イメージ（docker/Dockerfile.ui・軽）で、
+# この API を MASK_API_URL で参照する純クライアント。
+#
+# data-redactor 固有の注意:
 #   - Python は 3.11 固定（ja-ginza-electra の tokenizers 制約。3.12 だと wheel 無し）。
 #   - pii-masker は git submodule（pip 非インストール）。external/pii-masker/src を COPY し
 #     PYTHONPATH=/app 経由の path-injection（src/llm/_paths.py）で import を解決する。
-#   - app.py / main.py はルート直下スクリプト。wheel には入らない（packages=["src"]）ので
-#     プロジェクトを site-packages にインストールせず（--no-install-project）、ソースツリーを
-#     /app へ COPY し PYTHONPATH=/app で `import src` を解決する。これにより _paths.py の
-#     parents[2] が /app を指し、/app/external/pii-masker/src を sys.path に通せる。
+#   - API 実体は src.api.app:app。wheel には入らない（packages=["src"]）ので、プロジェクトを
+#     site-packages にインストールせず（--no-install-project）、ソースツリーを /app へ COPY し
+#     PYTHONPATH=/app で `import src` を解決する（_paths.py の parents[2] が /app を指す）。
 #   - ja_ginza_electra は初回 nlp ロードで torch＋ELECTRA 重みを DL する。ビルド時に prewarm
 #     してイメージに焼く（実行時ネット不要・recall 既定を担保）。appuser で実行し重みを 644 で
 #     置くので、任意の実行 UID でも読める（再帰 chmod は不要・打つと venv が複製され肥大する）。
@@ -29,8 +31,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# 依存のみ先にインストール（レイヤキャッシュ効率化）。本プロジェクトに optional-deps は無いので
-# --extra は不要。app.py/main.py を wheel に含めないため --no-install-project（ソース直実行）。
+# 依存のみ先にインストール（レイヤキャッシュ効率化）。app.py/main.py を wheel に含めないため
+# --no-install-project（ソース直実行）。
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
@@ -54,9 +56,8 @@ RUN uv pip install --reinstall-package torch --no-cache \
 # 不要なビルドアーティファクトを削除してイメージサイズを削減。
 # - __pycache__ / *.pyc / *.pyo: バイトコード（prewarm 後に必要分は再生成される）。
 # - tests: 各パッケージのテストスイート（numpy/pandas/transformers/spacy 等。実行時不要）。
-#   ★ ディレクトリ名が "tests" のものだけ消す。numpy.testing / pandas._testing / streamlit.testing は
-#     実モジュールなので消さない（名前が異なるのでマッチしない）。
-# - share/jupyter: pydeck の Jupyter nbextension（~23MB）。Streamlit 実行には不要。
+#   ★ ディレクトリ名が "tests" のものだけ消す。numpy.testing / pandas._testing は実モジュールなので残る。
+# - share/jupyter: pydeck の Jupyter nbextension（~23MB）。実行には不要。
 RUN find /app/.venv -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true && \
     find /app/.venv -type f -name "*.pyc" -delete 2>/dev/null || true && \
     find /app/.venv -type f -name "*.pyo" -delete 2>/dev/null || true && \
@@ -105,26 +106,19 @@ USER appuser
 # 重みは appuser 所有・既定パーミッション 644（他 UID からも読める）＝再帰 chmod は不要。
 # ★ 再帰 chmod/chown は絶対に打たない: venv を丸ごと別レイヤに複製してイメージが数倍になる。
 # ★ ソース COPY より前に置く: prewarm は .venv（依存）にのみ依存する。pii-masker submodule や
-#   app/src を更新しても、依存が変わらない限りこの重い層はキャッシュ再利用される（再 DL されない）。
-#   依存（pyproject/uv.lock）を変えたときだけ builder の uv sync ともども再実行される＝正しい挙動。
+#   src を更新しても、依存が変わらない限りこの重い層はキャッシュ再利用される（再 DL されない）。
 RUN python -c "import spacy; spacy.load('ja_ginza_electra')"
 
 # アプリのソースツリーを COPY（wheel に含まれないルートスクリプトと submodule）。--chown で所有権を付与。
-# pii-masker 更新で最初に invalidate されるのはここ。以降は処理が無いので再ビルドが速い。
-#   - app.py / main.py        : エントリ（streamlit run app.py）
-#   - src/                    : エンジン・マスキング・LLM アダプタ（config.py も src 配下）
+#   - main.py                 : 後方互換 CLI シム（小さいので同梱）
+#   - src/                    : エンジン・マスキング・LLM アダプタ・API（config.py も src 配下）
 #   - external/pii-masker/src : path-injection で import する pii-masker 本体
-COPY --chown=appuser:appuser app.py main.py ./
+COPY --chown=appuser:appuser main.py ./
 COPY --chown=appuser:appuser src/ src/
 COPY --chown=appuser:appuser external/pii-masker/src/ external/pii-masker/src/
 
-# Streamlit 設定
-ENV STREAMLIT_SERVER_PORT=8501
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
-ENV STREAMLIT_SERVER_HEADLESS=true
-ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-
-EXPOSE 8501
+# API=8509（EXPOSE は文書化目的。実際の公開は compose の ports で行う）。
+EXPOSE 8509
 
 # USER は prewarm 直前で appuser に切替済み（ここでの再指定は不要）。
-CMD ["streamlit", "run", "/app/app.py"]
+CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8509"]

@@ -1,0 +1,17 @@
+# UI（Streamlit）イメージ専用の最小依存（設計 B：UI は純クライアント）。
+#
+# これは **Docker の UI イメージをビルドするときだけ** 使う（`docker/Dockerfile.ui`）。
+# ローカル開発は従来どおり `uv sync`（pyproject / uv.lock）で全依存が入る＝この一覧は無関係。
+#
+# ここには spaCy / torch / GiNZA / transformers / langchain / openai / tiktoken を **入れない**
+# （UI は import しない＝エンジンはサーバ側 API が持つ）。UI が実際に import する src の連鎖から
+# 必要になるサードパーティだけを、ローカルの検証時と同じバージョンに固定する。
+#
+# ★ UI に新しい import（新パッケージ）を足したら、ここにも追記すること。忘れると
+#   「ローカルは動くが UI コンテナだけ ModuleNotFound」になる（Dockerfile.ui のビルド時スモークで検知）。
+#   バージョンを上げるときは pyproject / uv.lock 側と揃える。
+streamlit==1.58.0
+pandas==3.0.3
+httpx==0.28.1
+mcp==1.27.2
+pyyaml==6.0.3

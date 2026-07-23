@@ -91,6 +91,7 @@ clean:
 	@echo "Done."
 
 clean-images:
-	@echo "Removing data-redactor image..."
+	@echo "Removing data-redactor images (api / ui)..."
+	-docker rmi data-redactor-api:latest 2>/dev/null || true
 	-docker rmi data-redactor-ui:latest 2>/dev/null || true
 	@echo "Done."

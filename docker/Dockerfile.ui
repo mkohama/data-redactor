@@ -1,0 +1,80 @@
+# =============================================================================
+# data-redactor UI イメージ（Streamlit・軽）
+#
+# 設計 B：UI は純クライアント。検出・マスク・キャッシュ（GiNZA・cache.db）はサーバ側 API が所有し、
+# UI は MASK_API_URL 越しに HTTP で問い合わせるだけ。したがって **spaCy・torch・GiNZA・
+# transformers・langchain・openai・Azure CLI は一切入れない**（API イメージ側だけが持つ）。
+#
+# 依存は docker/requirements-ui.txt の最小セット（UI が実際に import する分だけ）。pyproject /
+# uv.lock は使わない（それだと engine 系まで入って肥大する）。ローカル開発は従来どおり `uv sync`
+# で全依存が入る＝この最小セットは Docker の UI イメージ専用。
+# =============================================================================
+
+ARG APP_UID=1000
+ARG APP_GID=1000
+
+# -----------------------------------------------------------------------------
+# Stage 1: Builder — UI 最小依存だけを venv に入れる
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+# UI の最小依存のみインストール（engine 系は含めない＝軽い）。
+COPY docker/requirements-ui.txt ./
+RUN uv venv /app/.venv && \
+    uv pip install --python /app/.venv --no-cache -r requirements-ui.txt
+
+# バイトコード・各パッケージ tests を削除してサイズ削減（numpy.testing 等の実モジュールは名前が違い残る）。
+RUN find /app/.venv -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/.venv -type f -name "*.pyc" -delete 2>/dev/null || true && \
+    find /app/.venv -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf /app/.venv/share/jupyter 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime — 最終的な実行イメージ
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ARG APP_UID
+ARG APP_GID
+RUN groupadd -g ${APP_GID} appuser && \
+    useradd -u ${APP_UID} -g ${APP_GID} --create-home appuser
+
+COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app"
+
+# UI が参照する src のみ COPY（engine 系や external/pii-masker は不要＝設計 B の純クライアント）。
+# 遅延 import により engine 系モジュールのファイルは読み込まれない（存在しても import されない）。
+COPY --chown=appuser:appuser src/ src/
+
+# 依存整合スモーク（drift 検知）: UI が engine 抜きで import でき、かつ spaCy/torch/langchain/openai を
+# 引かないことをビルド時に保証する。requirements-ui.txt に載せ忘れた新依存や、UI へのエンジン混入は
+# ここでビルド失敗する（＝実行時の ModuleNotFound を前倒しで検知）。
+RUN python - <<'PY'
+import importlib, sys
+importlib.import_module("src.ui.app")  # UI モジュールのトップレベル import を実行
+leaked = [m for m in ("torch", "spacy", "transformers", "openai", "langchain_community")
+          if m in sys.modules]
+if leaked:
+    raise SystemExit(f"heavy deps leaked into the UI image: {leaked}")
+print("UI import OK (engine-free)")
+PY
+
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_SERVER_HEADLESS=true
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+USER appuser
+
+EXPOSE 8501
+
+# MASK_API_URL（接続先 API）は compose で渡す（既定は 127.0.0.1:8509＝コンテナ単体では要上書き）。
+CMD ["streamlit", "run", "src/ui/app.py"]

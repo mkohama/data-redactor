@@ -220,7 +220,10 @@ UI で URL（既定 `http://localhost:8000/mcp`）を指定し、「文書リス
 
 ## Docker で起動
 
-Streamlit UI をコンテナで動かします。`make` は `id -u` を使うため **Git Bash / WSL 等の POSIX シェル**から実行してください。
+設計 B に沿って **API（エンジン）と UI（純クライアント）を別コンテナ・別イメージ**で動かします
+（`data-redactor-api` = torch/GiNZA を持つ重イメージ、`data-redactor-ui` = spaCy/torch を含まない軽イメージ）。
+UI は `MASK_API_URL=http://data-redactor-api:8509` で API を参照します。`make` は `id -u` を使うため
+**Git Bash / WSL 等の POSIX シェル**から実行してください。
 
 ```bash
 # 1) ビルド前提: submodule（pii-masker）を取得しておく（イメージに COPY されます）
@@ -230,8 +233,9 @@ git submodule update --init
 #    RESOURCE_NAME_GPT41_MINI / DEFAULT_LLM_MODEL / KB_MCP_URL / LLM_WINDOW_* / LLM_DETECT_TARGET を設定
 cp .env.example .env
 
-# 3) 起動（ビルド＋デタッチ）。初回ビルドは torch＋ELECTRA 重みの DL で時間がかかります
-make docker-up        # → http://localhost:8508（ホスト 8508 → コンテナ 8501）
+# 3) 起動（ビルド＋デタッチ）。初回は api の torch＋ELECTRA 重み prewarm で時間がかかります
+#    api（:8509）が healthy になってから ui（:8508）が起動します（depends_on: service_healthy）
+make docker-up        # UI → http://localhost:8508（ホスト 8508 → コンテナ 8501）/ API → :8509
 
 make docker-logs      # ログ追従
 make docker-down      # 停止・削除
@@ -266,10 +270,17 @@ make docker-sync-build PII_REF=<commit/tag/branch>
 >
 > perl を使うのは `sed -i` が CRLF を LF に潰すのを避けるため（Git Bash 同梱の perl は改行を保持する）。
 
-成果物: [docker/Dockerfile](docker/Dockerfile)・[.dockerignore](.dockerignore)・[compose.yaml](compose.yaml)・[Makefile](Makefile)。
+成果物: [docker/Dockerfile.api](docker/Dockerfile.api)・[docker/Dockerfile.ui](docker/Dockerfile.ui)・
+[docker/requirements-ui.txt](docker/requirements-ui.txt)・[.dockerignore](.dockerignore)・
+[compose.yaml](compose.yaml)・[Makefile](Makefile)。
 
 ポイント（data-redactor 固有）:
 
+- **2 イメージ（設計 B）**：`Dockerfile.api` はエンジン（torch/spaCy/GiNZA/pii-masker/Azure CLI）を持つ重
+  イメージ、`Dockerfile.ui` は UI が実際に import する分だけ（`requirements-ui.txt`＝streamlit/pandas/httpx/
+  mcp/pyyaml）の軽イメージで **spaCy/torch/langchain/openai を含まない**。UI イメージのビルド時スモークで
+  「UI が engine 抜きで import でき、重依存が混入しない」ことを保証する（新 UI 依存の載せ忘れをビルドで検知）。
+  UI 依存は Docker 専用の最小リストで、ローカル開発（`uv sync`）には影響しない。
 - **Python 3.11 固定**（ja-ginza-electra の制約）。イメージは `python:3.11-slim`。
 - **`ja_ginza_electra` はビルド時に prewarm**（torch＋ELECTRA 重みをイメージに焼く）。実行時はネット不要・
   recall 既定（electra）を担保。代償にイメージは数 GB。軽量運用に振るなら別途 `ja_ginza` 既定化を検討。

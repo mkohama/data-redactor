@@ -29,6 +29,9 @@ docs-dev/
 tests/
 examples/
 docker/
+# ただし UI イメージのビルドで COPY する最小依存リストだけは context に含める
+# （Dockerfile 本体は BuildKit が直接読むので context 除外で問題ない）。
+!docker/requirements-ui.txt
 
 # submodule 内の不要物（src/ だけが必要。テスト・スクリプト・ロックは除外）
 external/pii-masker/tests/
