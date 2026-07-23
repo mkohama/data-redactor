@@ -302,7 +302,11 @@ make docker-sync-build PII_REF=<commit/tag/branch>
 統一コマンド `data-redactor`（実体は [src/cli.py](src/cli.py)。`uv run main.py <サブコマンド>` でも可）。
 
 ```powershell
-# Streamlit UI を起動
+# API サーバ＋Streamlit UI をまとめて起動（ローカル開発向け）。
+# API が起動して healthy（GiNZA ロード完了）になってから UI が開くので、初回の接続エラーが出ない。
+uv run data-redactor dev
+
+# Streamlit UI だけを起動（API のクライアント。別ターミナルで serve が動いている前提）。
 uv run data-redactor ui
 
 # マスキング（ファイル or --text）。既定で data/mask_dict.yaml を自動読込
