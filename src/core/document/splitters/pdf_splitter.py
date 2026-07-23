@@ -1,7 +1,7 @@
 """
 PDFSplitter - PDF専用のテキスト分割器
 
-PDF特有のノイズ（改行の乱れ等）を除去してから分割する。
+PDF特有のノイズ (改行の乱れ等) を除去してから分割する。
 """
 
 import re
@@ -60,10 +60,10 @@ class PDFSplitter(BaseSplitter):
     def _restore_paragraphs(self, text: str) -> str:
         """文脈を考慮して段落を復元"""
 
-        # 文末記号（。！？.!?）で終わらない単一改行はスペースに置換
+        # 文末記号 (。！？.!?) で終わらない単一改行はスペースに置換
         text = re.sub(r"(?<![。！？.!?])\n(?!\n)", " ", text)
 
-        # 複数改行は段落として保持（\n\nに正規化）
+        # 複数改行は段落として保持 (\n\nに正規化)
         text = re.sub(r"\n{2,}", "\n\n", text)
 
         return text
@@ -71,10 +71,10 @@ class PDFSplitter(BaseSplitter):
     def _normalize_lists(self, text: str) -> str:
         """箇条書きや番号付きリストの構造を統一"""
 
-        # 箇条書きの先頭（•, -, –）にスペースを挿入
+        # 箇条書きの先頭 (•, -, –) にスペースを挿入
         text = re.sub(r"\n([•\-–])\s*", r"\n\1 ", text)
 
-        # 数字付きリスト（例: 1.1., 2.）を一行にまとめる
+        # 数字付きリスト (例: 1.1., 2.) を一行にまとめる
         text = re.sub(r"\n(\d+(?:\.\d+)*\.)\s*", r"\n\1 ", text)
 
         return text
@@ -95,7 +95,7 @@ class PDFSplitter(BaseSplitter):
             separators = [
                 r"\n\n\n",       # 複数改行
                 r"\n\n",         # 二重改行
-                r"(?<=[。！？])", # 日本語句読点（肯定後読み）
+                r"(?<=[。！？])", # 日本語句読点 (肯定後読み)
                 r"\. ",          # 句点 + space
                 r"! ",           # 感嘆符 + space
                 r"\? ",          # 疑問符 + space

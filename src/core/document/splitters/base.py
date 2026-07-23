@@ -48,7 +48,7 @@ class BaseSplitter(ABC):
         このSplitterが対応するファイルタイプを返す
 
         Returns:
-            ファイルタイプ文字列（例: "md", "pdf"）
+            ファイルタイプ文字列 (例: "md", "pdf")
         """
         # デフォルトはクラス名から推測
         class_name = self.__class__.__name__
@@ -63,7 +63,7 @@ class BaseSplitter(ABC):
         RecursiveCharacterTextSplitter を作成するヘルパーメソッド
 
         Args:
-            file_type: ファイルタイプ（設定取得用）
+            file_type: ファイルタイプ (設定取得用)
             separators: 区切り文字のリスト
             is_separator_regex: 区切り文字を正規表現として扱うか
 

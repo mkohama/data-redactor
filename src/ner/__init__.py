@@ -1,12 +1,12 @@
-"""固有表現抽出エンジン（UI 非依存）。
+"""固有表現抽出エンジン (UI 非依存)。
 
 公開 API:
     NerEngine        : 固有表現抽出エンジン
     Entity           : 抽出された 1 件の固有表現
-    ExtractionResult : 抽出結果（カテゴリ絞り込み用の filter / labels を持つ）
+    ExtractionResult : 抽出結果 (カテゴリ絞り込み用の filter / labels を持つ)
     AVAILABLE_MODELS, DEFAULT_MODEL
     prepare_for_ner, flatten_markdown_tables : 前処理
-    ENT_COLORS, build_color_map, render_html, to_displacy_data : 表示（displaCy）
+    ENT_COLORS, build_color_map, render_html, to_displacy_data : 表示 (displaCy)
 """
 
 from src.ner.engine import (

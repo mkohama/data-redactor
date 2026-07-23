@@ -1,10 +1,10 @@
-"""機密情報マスキング Streamlit UI（薄い表示層・純クライアント）。
+"""機密情報マスキング Streamlit UI (薄い表示層・純クライアント)。
 
-検出・マスク・キャッシュ（GiNZA / cache.db）はすべてサーバ（data-redactor serve）が所有し、
-本ファイルは src.client.MaskClient 越しに HTTP で問い合わせる（設計 B）。入力 UI・表示のみを行う。
+検出・マスク・キャッシュ (GiNZA / cache.db) はすべてサーバ (data-redactor serve) が所有し、
+本ファイルは src.client.MaskClient 越しに HTTP で問い合わせる (設計 B)。入力 UI・表示のみを行う。
 
 起動:
-    uv run data-redactor ui   （＝ streamlit run src/ui/app.py）
+    uv run data-redactor ui   (＝ streamlit run src/ui/app.py)
 """
 
 from __future__ import annotations
@@ -39,19 +39,19 @@ from src.ui.render import (
     render_masking_html,
 )
 
-# 設計 B：UI は純クライアント。エンジン系（spaCy/torch/GiNZA）・検出器の版・LLM モデル名・
-# 対応拡張子は API から取るか、依存の軽いモジュール（src.constants / src.ui.render /
-# src.masking の軽シンボル）から取る。src.ner / src.llm.detect_layer / document_loader は
-# import しない（＝UI に spaCy/torch/langchain/openai を持ち込まない）。
+# 設計 B：UI は純クライアント。エンジン系 (spaCy/torch/GiNZA) ・検出器の版・LLM モデル名・
+# 対応拡張子は API から取るか、依存の軽いモジュール (src.constants / src.ui.render /
+# src.masking の軽シンボル) から取る。src.ner / src.llm.detect_layer / document_loader は
+# import しない (＝UI に spaCy/torch/langchain/openai を持ち込まない)。
 
 suppress_async_generator_errors()
 
-# アップロード可能な拡張子（サーバの DocumentLoader が対応する形式。定義元は src.constants で依存が軽い）。
+# アップロード可能な拡張子 (サーバの DocumentLoader が対応する形式。定義元は src.constants で依存が軽い)。
 SUPPORTED_EXTENSIONS = sorted(e[1:] for e in SUPPORTED_DOCUMENT_EXTENSIONS)
 
-# マスキング API（サーバ）の接続先。UI は純クライアント（設計 B）＝エンジンを内包せず、
-# この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve（既定 localhost:8509。
-# kb-mcp の既定 8000 と衝突させないため 8509）。Docker は MASK_API_URL=http://api:8509 を渡す。
+# マスキング API (サーバ) の接続先。UI は純クライアント (設計 B) ＝エンジンを内包せず、
+# この URL のサーバへ HTTP で問い合わせる。ローカルは data-redactor serve (既定 localhost:8509。
+# kb-mcp の既定 8000 と衝突させないため 8509)。Docker は MASK_API_URL=http://api:8509 を渡す。
 MASK_API_URL = os.environ.get("MASK_API_URL", "http://127.0.0.1:8509")
 
 
@@ -59,18 +59,18 @@ MASK_API_URL = os.environ.get("MASK_API_URL", "http://127.0.0.1:8509")
 def _mask_client(base_url: str) -> MaskClient:
     """マスキング API のクライアントを生成・共有する。
 
-    内部で httpx 接続を 1 本持つので、プロセス内で使い回す（cache_resource）。
-    base_url を引数（キャッシュ鍵）にしているので、接続先を変えれば作り直される。
+    内部で httpx 接続を 1 本持つので、プロセス内で使い回す (cache_resource)。
+    base_url を引数 (キャッシュ鍵) にしているので、接続先を変えれば作り直される。
     """
     return MaskClient(base_url)
 
 
 def _server_config() -> dict:
-    """サーバの ``/config``（既定値・検出器の版・LLM モデル名など）。未接続時は空 dict。
+    """サーバの ``/config`` (既定値・検出器の版・LLM モデル名など)。未接続時は空 dict。
 
-    設計 B：検出器の版（``detector_version``）や LLM モデル名（``llm_model``）は**サーバが正本**。
-    UI はローカルで計算せず、ここから取る（未接続時は空 dict＝各表示は既定にフォールバック）。
-    localhost への軽い GET なので都度呼ぶ（描画ごとに数回程度＝無視できるコスト）。
+    設計 B：検出器の版 (``detector_version``) や LLM モデル名 (``llm_model``) は**サーバが正本**。
+    UI はローカルで計算せず、ここから取る (未接続時は空 dict＝各表示は既定にフォールバック)。
+    localhost への軽い GET なので都度呼ぶ (描画ごとに数回程度＝無視できるコスト)。
     """
     try:
         return _mask_client(MASK_API_URL).config()
@@ -79,19 +79,19 @@ def _server_config() -> dict:
 
 
 def _detector_version() -> str:
-    """サーバの現行 detector_version（LLM 検出キャッシュの版判定に使う）。未接続時は空文字。"""
+    """サーバの現行 detector_version (LLM 検出キャッシュの版判定に使う)。未接続時は空文字。"""
     return str(_server_config().get("detector_version", ""))
 
 
 def _llm_model_name() -> str:
-    """サーバが LLM 検出に使うモデル名（表示用）。未接続時は総称 'LLM'。"""
+    """サーバが LLM 検出に使うモデル名 (表示用)。未接続時は総称 'LLM'。"""
     return str(_server_config().get("llm_model") or "LLM")
 
 
 def _render_connection_status() -> bool:
     """サイドバー上部に API サーバの接続状態を表示し、接続できているかを返す。
 
-    ✅ 接続 OK（NER モデルのロード状態も併記）／❌ 未接続（起動方法を明示）。
+    ✅ 接続 OK (NER モデルのロード状態も併記) ／❌ 未接続 (起動方法を明示)。
     未接続でも UI は落とさず、各操作側でエラーを握ってメッセージを出す前提。
     """
     client = _mask_client(MASK_API_URL)
@@ -118,17 +118,17 @@ def _render_connection_status() -> bool:
 
 
 def _short_models(models: tuple[str, ...]) -> str:
-    """NER モデル名を短い別名に（一覧表示用）。"""
+    """NER モデル名を短い別名に (一覧表示用)。"""
     names = {"ja_ginza_electra": "electra", "ja_ginza": "ginza"}
     return ", ".join(names.get(m, m) for m in models)
 
 
 def _loaded_models() -> list[str]:
-    """サーバが現在ロードしているモデル名（health の models_loaded）。未接続・ロード前は空。
+    """サーバが現在ロードしているモデル名 (health の models_loaded)。未接続・ロード前は空。
 
     設計 B：モデルの所有者はサーバで、起動時に固定ロードする。UI は選ばず、この
-    ロード済み集合をそのまま解析に使う（API はリクエストごとのモデル部分指定に未対応＝
-    部分集合を送ると 422 になる。全ロード集合をそのまま渡すので一致して通る）。
+    ロード済み集合をそのまま解析に使う (API はリクエストごとのモデル部分指定に未対応＝
+    部分集合を送ると 422 になる。全ロード集合をそのまま渡すので一致して通る)。
     """
     try:
         health = _mask_client(MASK_API_URL).health()
@@ -154,13 +154,13 @@ def _select_table_fragment(
     caption: str,
     column_config: dict | None = None,
 ) -> None:
-    """1 行クリックで単一選択するテーブル（``st.fragment`` で再描画を局所化）。
+    """1 行クリックで単一選択するテーブル (``st.fragment`` で再描画を局所化)。
 
-    行をクリックすると **このテーブルだけ** 再実行され（画面全体は再描画しない＝チラつき/
-    スクロール飛びを抑える）。選んだ行の識別子 ``ids[row]`` を ``st.session_state[sel_key]`` に
-    書く（未選択は ``None``）。単一選択なので前の選択は自動で置き換わる（チェック残り無し）。
+    行をクリックすると **このテーブルだけ** 再実行され (画面全体は再描画しない＝チラつき/
+    スクロール飛びを抑える)。選んだ行の識別子 ``ids[row]`` を ``st.session_state[sel_key]`` に
+    書く (未選択は ``None``)。単一選択なので前の選択は自動で置き換わる (チェック残り無し)。
     位置選択だが、呼び出し側が安定順で渡し ``ids`` で解決するので並び替えの取り違えは起きない。
-    列見出しクリックで表示の並べ替えも可能（選択には影響しない）。
+    列見出しクリックで表示の並べ替えも可能 (選択には影響しない)。
     """
     st.caption(caption)
     event = st.dataframe(
@@ -179,9 +179,9 @@ def _select_table_fragment(
 def _llm_cache_status(llm_versions: list[str]) -> str:
     """🗂 ピッカー用の LLM キャッシュ状態。``✓``=現行版で有効 / ``⚠ 要更新``=旧版のみ / ``—``=無し。
 
-    サーバの get_document/list_documents が返す ``llm_versions``（保存済み detector_version の一覧）に
-    現行 detector_version が含まれれば「✓」、あるが含まれなければ「⚠ 要更新」（窓ポリシー等が変わった＝
-    再検出が要る）、空なら「—」。render_cache_view の LLM 列と同じ判定（flatten 文脈は持たない）。
+    サーバの get_document/list_documents が返す ``llm_versions`` (保存済み detector_version の一覧) に
+    現行 detector_version が含まれれば「✓」、あるが含まれなければ「⚠ 要更新」 (窓ポリシー等が変わった＝
+    再検出が要る)、空なら「—」。render_cache_view の LLM 列と同じ判定 (flatten 文脈は持たない)。
     """
     if not llm_versions:
         return "—"
@@ -190,13 +190,13 @@ def _llm_cache_status(llm_versions: list[str]) -> str:
 
 @st.fragment
 def _cache_picker_fragment(docs: list) -> None:
-    """🗂 キャッシュ選択の UI 一式（テーブル＋選択依存の操作）を 1 つの fragment にまとめる。
+    """🗂 キャッシュ選択の UI 一式 (テーブル＋選択依存の操作) を 1 つの fragment にまとめる。
 
     行クリックは **この fragment だけ** 再実行され、画面全体は再描画しない。
-    選択した content_hash を ``st.session_state["cache_sel"]`` に入れる（``render_input`` が読む）。
-    ``docs`` はサーバの ``list_documents``（dict のリスト）を呼び出し側がソース名で安定ソート済み
-    （並び替えで取り違えない）。NER のやり直し（キャッシュ無視）は読み込み時でなく
-    **🔍 NER検出 タブ**で行う（パイプライン化に伴う移設）。
+    選択した content_hash を ``st.session_state["cache_sel"]`` に入れる (``render_input`` が読む)。
+    ``docs`` はサーバの ``list_documents`` (dict のリスト) を呼び出し側がソース名で安定ソート済み
+    (並び替えで取り違えない)。NER のやり直し (キャッシュ無視) は読み込み時でなく
+    **🔍 NER検出 タブ**で行う (パイプライン化に伴う移設)。
     """
     client = _mask_client(MASK_API_URL)
     df = pd.DataFrame(
@@ -252,19 +252,19 @@ def render_input(
 ) -> tuple[tuple | None, str, str, Callable[[], list[str]] | None]:
     """入力ウィジェットを描画し、解析に必要な情報を返す。
 
-    重い取込（サーバへの送信・kb からのダウンロード・テキスト化）は**ここでは行わず**、
-    ``get_chunks`` 呼び出しに遅延させる（実際に走るのは「読み込む」ボタンが押されたときだけ）。
+    重い取込 (サーバへの送信・kb からのダウンロード・テキスト化) は**ここでは行わず**、
+    ``get_chunks`` 呼び出しに遅延させる (実際に走るのは「読み込む」ボタンが押されたときだけ)。
 
     text/file/kb は ``get_chunks`` の中で ``MaskClient.ingest_document`` を呼んでサーバへ取り込み
-    （テキスト化・チャンク化の所有者はサーバ＝設計 B）、返るチャンクを解析に使う。kb は kb-mcp
-    から元ファイルを取得して file として取り込む（cache＝キャッシュ選択は取込済みチャンクを返す）。
+    (テキスト化・チャンク化の所有者はサーバ＝設計 B)、返るチャンクを解析に使う。kb は kb-mcp
+    から元ファイルを取得して file として取り込む (cache＝キャッシュ選択は取込済みチャンクを返す)。
 
     戻り値 ``(input_id, input_kind, source_label, get_chunks)``：
-      - ``input_id``  … 入力の同一性を表すハッシュ可能なタプル（署名に使う）。
-                        入力未確定なら ``None``（解析不可）。
-      - ``input_kind``… ``"text" / "file" / "kb" / "cache"``（平文プレビューの要否判定に使う）。
+      - ``input_id``  … 入力の同一性を表すハッシュ可能なタプル (署名に使う)。
+                        入力未確定なら ``None`` (解析不可)。
+      - ``input_kind``… ``"text" / "file" / "kb" / "cache"`` (平文プレビューの要否判定に使う)。
       - ``source_label``… 結果見出しに出す表示名。
-      - ``get_chunks``… 呼ぶとチャンク列を返す callable（未確定なら ``None``）。
+      - ``get_chunks``… 呼ぶとチャンク列を返す callable (未確定なら ``None``)。
     """
     if input_mode.startswith("📄"):
         uploaded_file = st.file_uploader(
@@ -276,7 +276,7 @@ def render_input(
 
             def get_file_chunks(f=uploaded_file) -> list[str]:
                 # ファイル本体をサーバへ送り、サーバが DocumentLoader で抽出・チャンク化する
-                # （テキスト化・チャンク化の所有者はサーバ＝設計 B）。返るチャンクを解析に使う。
+                # (テキスト化・チャンク化の所有者はサーバ＝設計 B)。返るチャンクを解析に使う。
                 with st.spinner(
                     "ファイルをサーバへ送信してテキスト化・チャンク化中 ..."
                 ):
@@ -312,10 +312,10 @@ def render_input(
             st.warning("kb-mcp に登録された文書がありません。")
             return None, "kb", "", None
 
-        # 取込済み（＝サーバのキャッシュに file として取り込んだ kb 文書）に「📦」を付ける目安。
+        # 取込済み (＝サーバのキャッシュに file として取り込んだ kb 文書) に「📦」を付ける目安。
         # kb 文書は元ファイルを取得して file 取込するので source_kind は "file"。取込時に
-        # source_name へ kb 文書ラベル（_kb_doc_label）を刻むので、それと突き合わせる（案A）。
-        # API 未接続なら印だけ出さない（一覧自体は kb-mcp 直取得なので表示できる）。
+        # source_name へ kb 文書ラベル (_kb_doc_label) を刻むので、それと突き合わせる (案A)。
+        # API 未接続なら印だけ出さない (一覧自体は kb-mcp 直取得なので表示できる)。
         try:
             imported = {
                 d["source_name"]
@@ -325,8 +325,8 @@ def render_input(
         except (MaskApiError, httpx.HTTPError):
             imported = set()
 
-        # 1 行クリックで選ぶテーブル（fragment で再描画局所化）。📦＝取込済みの目安。
-        # チャンク数は kb-mcp の一覧メタ（knowledge://documents の chunk_count）をそのまま表示。
+        # 1 行クリックで選ぶテーブル (fragment で再描画局所化)。📦＝取込済みの目安。
+        # チャンク数は kb-mcp の一覧メタ (knowledge://documents の chunk_count) をそのまま表示。
         kb_df = pd.DataFrame(
             [
                 {
@@ -363,8 +363,8 @@ def render_input(
 
         def get_kb_chunks(u=url, d=doc_id, name=label) -> list[str]:
             # kb-mcp から「元ファイル」を取得し、それをサーバへ送って file として取り込む
-            # （格納チャンクは overlap 付き＝使わない。サーバが overlap 0 で再抽出）。
-            # source_name に kb 文書ラベルを刻んで一覧の「📦 取込済み」判定に使う（案A）。
+            # (格納チャンクは overlap 付き＝使わない。サーバが overlap 0 で再抽出)。
+            # source_name に kb 文書ラベルを刻んで一覧の「📦 取込済み」判定に使う (案A)。
             with st.spinner("kb-mcp から元ファイルを取得してサーバへ送信中 ..."):
                 filename, blob = download_document_sync(d, u)
                 client = _mask_client(MASK_API_URL)
@@ -389,13 +389,13 @@ def render_input(
                 "ここから入力元に選べるようになります。"
             )
             return None, "cache", "", None
-        # 選択 UI 一式（テーブル＋案内）は 1 つの fragment 内で描く。
-        # **ソース名で安定ソート**して渡すので、解析（created_at 更新）で行が動かず選択がズレない。
+        # 選択 UI 一式 (テーブル＋案内) は 1 つの fragment 内で描く。
+        # **ソース名で安定ソート**して渡すので、解析 (created_at 更新) で行が動かず選択がズレない。
         docs = sorted(docs, key=lambda d: d["source_name"])
         _cache_picker_fragment(docs)
 
-        # fragment が session_state に書いた選択を読んで get_chunks を組む（ここでは選択依存の
-        # ウィジェットを描かない＝行クリックで再描画されない外側に widget を置かない）。
+        # fragment が session_state に書いた選択を読んで get_chunks を組む (ここでは選択依存の
+        # ウィジェットを描かない＝行クリックで再描画されない外側に widget を置かない)。
         sel_hash = st.session_state.get("cache_sel")
         matches = [x for x in docs if x["content_hash"] == sel_hash]
         if not matches:
@@ -405,11 +405,11 @@ def render_input(
             cached_chunks = client.get_document(d["content_hash"])["chunks"]
         except (MaskApiError, httpx.HTTPError):
             cached_chunks = []
-        if not cached_chunks:  # 警告は fragment 内で表示済み（古いエントリ）
+        if not cached_chunks:  # 警告は fragment 内で表示済み (古いエントリ)
             return None, "cache", d["source_name"], None
 
-        # 読み込みは保存チャンクを返すだけ（NER は回さない）。NER のやり直し（キャッシュ無視）は
-        # NER検出 タブで行う（パイプライン化に伴い読み込み時の強制再解析は廃止）。
+        # 読み込みは保存チャンクを返すだけ (NER は回さない)。NER のやり直し (キャッシュ無視) は
+        # NER検出 タブで行う (パイプライン化に伴い読み込み時の強制再解析は廃止)。
         def get_cache_chunks(c=cached_chunks) -> list[str]:
             return c
 
@@ -420,12 +420,12 @@ def render_input(
             get_cache_chunks,
         )
 
-    # テキスト入力（単一チャンクとして扱う。長文でもエンジン側で安全分割される）
+    # テキスト入力 (単一チャンクとして扱う。長文でもエンジン側で安全分割される)
     input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
     if input_text.strip():
 
         def get_text_chunks(t=input_text) -> list[str]:
-            # サーバへ取り込んで cache.db に登録する（一覧・再利用の対象になる）。
+            # サーバへ取り込んで cache.db に登録する (一覧・再利用の対象になる)。
             client = _mask_client(MASK_API_URL)
             info = client.ingest_document(text=t, source_name="入力テキスト")
             return client.get_document(info["content_hash"])["chunks"]
@@ -435,9 +435,9 @@ def render_input(
 
 
 def _masking_settings_sig(models: list[str], flatten_tables: bool) -> tuple:
-    """マスキングの設定署名（モデル / 平文化）。再解析バナー（入力/設定が変わったか）の判定に使う。
+    """マスキングの設定署名 (モデル / 平文化)。再解析バナー (入力/設定が変わったか) の判定に使う。
 
-    辞書・除外リストはサーバ所有（設計 B）で UI はファイルを持たないため署名には含めない。
+    辞書・除外リストはサーバ所有 (設計 B) で UI はファイルを持たないため署名には含めない。
     辞書/除外の変更はマージタブの登録/除外ボタンで即再解析されるか、エディタ編集後に
     [📥 読み込む] で再取得される。
     """
@@ -450,8 +450,8 @@ def _readable_text_block(
     """読み取り専用テキストを、グレーアウトしない読める div にする HTML を返す。
 
     `st.text_area(disabled=True)` は背景・文字ともグレーで編集不可カーソルになり読みにくい。
-    代わりに通常色・選択可・改行保持の div で表示する。``placeholders``（プレースホルダ→
-    カテゴリ）を渡すと、マスク後の伏せ字をカテゴリ色で強調し「どこが変わったか」を見せる。
+    代わりに通常色・選択可・改行保持の div で表示する。``placeholders`` (プレースホルダ→
+    カテゴリ) を渡すと、マスク後の伏せ字をカテゴリ色で強調し「どこが変わったか」を見せる。
     """
     escaped = html.escape(text)
     if placeholders:
@@ -477,10 +477,10 @@ def _readable_text_block(
 
 
 def _render_extracted_text(chunks: list[str]) -> None:
-    """テキスト化された平文（チャンク連結）を確認用に表示する。
+    """テキスト化された平文 (チャンク連結) を確認用に表示する。
 
     ファイルや kb-mcp は元がバイナリ/外部なので、何が抽出されたかを目視・ダウンロードできるようにする。
-    チャンク境界は ``--- チャンク境界 ---`` で示す（解析単位の確認用）。
+    チャンク境界は ``--- チャンク境界 ---`` で示す (解析単位の確認用)。
     """
     text = "\n\n".join(chunks)
     boundary = "\n\n----- チャンク境界 -----\n\n"
@@ -499,7 +499,7 @@ def _render_extracted_text(chunks: list[str]) -> None:
 
 
 def _context(text: str, start: int, end: int, width: int = 20) -> str:
-    """出現箇所の前後文脈スニペット（対象を《》で囲む）。"""
+    """出現箇所の前後文脈スニペット (対象を《》で囲む)。"""
     s = max(0, start - width)
     e = min(len(text), end + width)
     head = "…" if s > 0 else ""
@@ -507,23 +507,23 @@ def _context(text: str, start: int, end: int, width: int = 20) -> str:
     return f"{head}{text[s:start]}《{text[start:end]}》{text[end:e]}{tail}"
 
 
-# 確信度の並び順（確定→強→中→弱→微弱→除外）。文字列順だと崩れるので明示する。
+# 確信度の並び順 (確定→強→中→弱→微弱→除外)。文字列順だと崩れるので明示する。
 _CONFIDENCE_ORDER = {"確定": 0, "強": 1, "中": 2, "弱": 3, "微弱": 4, "除外": 5}
-# 確信度フィルタの選択肢と既定（微弱＝コードらしき誤検出・除外＝allowlist は既定で非表示）。
+# 確信度フィルタの選択肢と既定 (微弱＝コードらしき誤検出・除外＝allowlist は既定で非表示)。
 _CONFIDENCE_LEVELS = ["確定", "強", "中", "弱", "微弱", "除外"]
 _CONFIDENCE_DEFAULT = ["確定", "強", "中", "弱"]
 
 
 def _confidence_label(confidence: str) -> str:
-    """並び順の番号を前置した表示用ラベル（例 '1 : 確定'）。
+    """並び順の番号を前置した表示用ラベル (例 '1 : 確定')。
 
     列ヘッダで文字列ソートしても 確定→強→中→弱 の順になるようにする
-    （番号なしだと文字コード順で「中→確定」になってしまう）。1=確定 … 4=弱。
+    (番号なしだと文字コード順で「中→確定」になってしまう)。1=確定 … 4=弱。
     """
     return f"{_CONFIDENCE_ORDER.get(confidence, 9) + 1} : {confidence}"
 
 
-# API の確信度は wire（ASCII）。UI は日本語表示なのでここで対応づける（設計 §1-A）。
+# API の確信度は wire (ASCII)。UI は日本語表示なのでここで対応づける (設計 §1-A)。
 _WIRE_TO_JP = {
     "certain": "確定",
     "strong": "強",
@@ -535,21 +535,21 @@ _WIRE_TO_JP = {
 
 
 def _conf_jp(wire: str) -> str:
-    """確信度の wire（ASCII）→ 日本語表示。未知値はそのまま返す。"""
+    """確信度の wire (ASCII) → 日本語表示。未知値はそのまま返す。"""
     return _WIRE_TO_JP.get(wire, wire)
 
 
 def _group_spans(group: dict) -> set[tuple[int, int]]:
-    """API の実体グループ（dict）の全出現 span を集合で返す。"""
+    """API の実体グループ (dict) の全出現 span を集合で返す。"""
     return {tuple(o["span"]) for o in group["occurrences"]}
 
 
 def _sorted_by_confidence(items, *, key, mask_rank=None, conf_key=None):
-    """（あれば）マスク状態 → 確信度 降順（確定→強→中→弱）→ 第2キー（表層）昇順で並べる。
+    """(あれば) マスク状態 → 確信度 降順 (確定→強→中→弱) → 第2キー (表層) 昇順で並べる。
 
-    ``conf_key`` は ``it -> 確信度（日本語）`` を返す関数（既定は属性 ``.confidence``）。
+    ``conf_key`` は ``it -> 確信度 (日本語) `` を返す関数 (既定は属性 ``.confidence``)。
     API の dict を並べるときは ``conf_key=lambda g: _conf_jp(g["confidence"])`` を渡す。
-    ``mask_rank`` は ``it -> int``（小さいほど上）。指定すると**マスク中の行が先頭**に来る。
+    ``mask_rank`` は ``it -> int`` (小さいほど上)。指定すると**マスク中の行が先頭**に来る。
     """
     if conf_key is None:
 
@@ -567,20 +567,20 @@ def _sorted_by_confidence(items, *, key, mask_rank=None, conf_key=None):
 
 
 def _auto_mask_spans(analysis_json: dict) -> set[tuple[int, int]]:
-    """既定でマスクする出現の span 集合（共有選択 ``mask_sel`` の初期値）。
+    """既定でマスクする出現の span 集合 (共有選択 ``mask_sel`` の初期値)。
 
-    API `/analyze` の ``auto_selection``（mask_level に基づく実体単位の既定選択・案2）をそのまま
-    集合にする。ある表層に 確定/強 の出現が 1 つでもあればその表層の全出現が入る（サーバ側で計算済み）。
+    API `/analyze` の ``auto_selection`` (mask_level に基づく実体単位の既定選択・案2) をそのまま
+    集合にする。ある表層に 確定/強 の出現が 1 つでもあればその表層の全出現が入る (サーバ側で計算済み)。
     """
     return {tuple(s) for s in analysis_json["auto_selection"]}
 
 
 def _doc_status(client: MaskClient, content_hash_: str) -> dict:
-    """サーバの文書メタ（ner_models / llm_versions 等）を取得する。未接続・未取込は空 dict。
+    """サーバの文書メタ (ner_models / llm_versions 等) を取得する。未接続・未取込は空 dict。
 
-    NER/LLM タブと状態ヘッダの「キャッシュ済みか」の判定に使う（設計 B：状態はサーバの
-    get_document 由来にし、UI はローカルの cache.db を直接見ない）。取得失敗は空 dict＝
-    「キャッシュ無し」扱いにして UI を落とさない（各操作側でエラー表示する前提）。
+    NER/LLM タブと状態ヘッダの「キャッシュ済みか」の判定に使う (設計 B：状態はサーバの
+    get_document 由来にし、UI はローカルの cache.db を直接見ない)。取得失敗は空 dict＝
+    「キャッシュ無し」扱いにして UI を落とさない (各操作側でエラー表示する前提)。
     """
     try:
         return client.get_document(content_hash_)
@@ -589,15 +589,15 @@ def _doc_status(client: MaskClient, content_hash_: str) -> dict:
 
 
 def _doc_missing_on_server(client: MaskClient, content_hash_: str) -> bool:
-    """解析対象の文書がサーバのキャッシュから消えているか（404 のときだけ True）。
+    """解析対象の文書がサーバのキャッシュから消えているか (404 のときだけ True)。
 
-    マスキングの結果は入力方法ごとのセッションスロットに永続化され、別モード（🗂 キャッシュ等）へ
-    往復しても保たれる（利便性のための設計）。だが永続化は「その文書がサーバにまだある」前提で、
+    マスキングの結果は入力方法ごとのセッションスロットに永続化され、別モード (🗂 キャッシュ等) へ
+    往復しても保たれる (利便性のための設計)。だが永続化は「その文書がサーバにまだある」前提で、
     🗂 で削除されると UI は消えた content_hash を指したまま＝各タブがサーバへ投げて 404 になる。
-    パイプライン入口でこの関数を使い、消えていれば読み込み直しを促す（真実はサーバ側＝設計 B）。
+    パイプライン入口でこの関数を使い、消えていれば読み込み直しを促す (真実はサーバ側＝設計 B)。
 
-    404 以外（接続不能・その他エラー）は「不明」＝False にする。一時的な不通でセッションの
-    作業結果を捨てないため（実操作でのエラーは各タブ側が個別に表示する）。
+    404 以外 (接続不能・その他エラー) は「不明」＝False にする。一時的な不通でセッションの
+    作業結果を捨てないため (実操作でのエラーは各タブ側が個別に表示する)。
     """
     try:
         client.get_document(content_hash_)
@@ -611,27 +611,27 @@ def _doc_missing_on_server(client: MaskClient, content_hash_: str) -> bool:
 def _status_has_llm(status: dict) -> bool:
     """get_document の結果に現行版の LLM 検出キャッシュがあるか。
 
-    llm_versions（キャッシュ済み detector_version の一覧）に現行 detector_version を含む項目が
-    あれば True。空・未接続などは False（＝LLM を強制しない＝NER のみ集約）。
+    llm_versions (キャッシュ済み detector_version の一覧) に現行 detector_version を含む項目が
+    あれば True。空・未接続などは False (＝LLM を強制しない＝NER のみ集約)。
     """
     dv = _detector_version()
     return any(dv in v for v in status.get("llm_versions", []))
 
 
 def _llm_available(client: MaskClient, content_hash_: str, flatten: bool) -> bool:
-    """この文書に現行版の LLM 検出キャッシュがサーバにあるか（マージの detection 自動判定用）。"""
+    """この文書に現行版の LLM 検出キャッシュがサーバにあるか (マージの detection 自動判定用)。"""
     return _status_has_llm(_doc_status(client, content_hash_))
 
 
 def _render_by_entity(groups, confidences, sel, ver, stored):
     """実体ごと：同じ語は文書内の全出現を一括マスク。``confidences`` で表示する確信度を絞る。
 
-    ``groups`` は API `/analyze` の実体グループ（dict）のリスト。
+    ``groups`` は API `/analyze` の実体グループ (dict) のリスト。
     """
 
     def _group_mask_rank(g: dict) -> int:
         spans = _group_spans(g)
-        if spans <= sel:  # 全出現が選択＝マスク（チェック ON）
+        if spans <= sel:  # 全出現が選択＝マスク (チェック ON)
             return 0
         return 1 if spans & sel else 2  # 一部選択 / 未選択
 
@@ -694,7 +694,7 @@ def _render_by_entity(groups, confidences, sel, ver, stored):
     table = pd.DataFrame(rows)
     st.caption("チェックしてから **[✅ マスクを反映]** を押すと反映されます。")
     # st.form で囲む：チェックのたびに再実行せず、ボタン押下時だけまとめて適用する
-    # （data_editor は編集ごとに rerun し画面が先頭へ飛ぶため。フォームで抑止）。
+    # (data_editor は編集ごとに rerun し画面が先頭へ飛ぶため。フォームで抑止)。
     # data_editor の鍵に ver を含める＝共有選択 sel が変わったら貼り直し、古い編集状態を残さない。
     with st.form("mask_entity_form"):
         edited = st.data_editor(
@@ -725,16 +725,16 @@ def _render_by_entity(groups, confidences, sel, ver, stored):
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
     registers = edited["辞書登録"].tolist()
-    if applied:  # **変化したチェックだけ**反映（出現ごとの部分選択を壊さない）
+    if applied:  # **変化したチェックだけ**反映 (出現ごとの部分選択を壊さない)
         new_sel = set(sel)
         for g, on, ex in zip(shown, masks, excludes):
             spans = _group_spans(g)
-            was_on = spans <= sel  # 表示時のチェック状態（全出現選択済み＝ON）
+            was_on = spans <= sel  # 表示時のチェック状態 (全出現選択済み＝ON)
             if ex or (was_on and not on):  # 除外 or チェックを外した → 全出現を削除
                 new_sel -= spans
             elif on and not was_on:  # 新たにチェック → 全出現を追加
                 new_sel |= spans
-            # 変化なし（was_on == on）→ そのまま（部分選択を保持）
+            # 変化なし (was_on == on) → そのまま (部分選択を保持)
         stored["mask_sel"] = new_sel
         stored["mask_ver"] = ver + 1
         st.rerun()
@@ -748,7 +748,7 @@ def _render_by_entity(groups, confidences, sel, ver, stored):
 def _render_by_occurrence(groups, confidences, sel, ver, stored, text):
     """出現ごと：各出現を個別にマスク。チェックは共有選択 sel を読み書きする。
 
-    ``groups`` は API の実体グループ（dict）。各グループの occurrences を平坦化して 1 出現 1 行にする。
+    ``groups`` は API の実体グループ (dict)。各グループの occurrences を平坦化して 1 出現 1 行にする。
     出現の確信度は occurrence 側、カテゴリ/表層/votes はグループ側の値を使う。``text`` は文脈表示用。
     """
     occs = [
@@ -840,7 +840,7 @@ def _render_by_occurrence(groups, confidences, sel, ver, stored, text):
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
     registers = edited["辞書登録"].tolist()
-    if applied:  # 表示中の出現について sel を更新（ON=その span を追加／OFF=削除）
+    if applied:  # 表示中の出現について sel を更新 (ON=その span を追加／OFF=削除)
         new_sel = set(sel)
         for o, on, ex in zip(cands, masks, excludes):
             if on and not ex:
@@ -858,11 +858,11 @@ def _render_by_occurrence(groups, confidences, sel, ver, stored, text):
 
 
 def render_dict_editor() -> None:
-    """マスク辞書の確認・追加・編集・保存 UI（独立タブ）。
+    """マスク辞書の確認・追加・編集・保存 UI (独立タブ)。
 
-    辞書ファイルはサーバが所有する（設計 B）。読み書きは API 経由で行い、
+    辞書ファイルはサーバが所有する (設計 B)。読み書きは API 経由で行い、
     行を編集/追加/削除して保存すると PUT /dictionary でサーバへ書き出す。
-    「置換」列に値を入れると、その実体のマスク後の伏せ字を固定できる（空なら自動採番）。
+    「置換」列に値を入れると、その実体のマスク後の伏せ字を固定できる (空なら自動採番)。
     """
     st.caption(
         "カテゴリ / 代表表記 / 別名（カンマ区切り）/ 置換（任意。空なら `[社1]` 等を自動採番）。"
@@ -882,7 +882,7 @@ def render_dict_editor() -> None:
         )
         st.caption(f"詳細: {e}")
         return
-    # 既定でセクション順（社名→商標→人名→その他）＋各内を代表表記の辞書順に表示（保存も同順）。
+    # 既定でセクション順 (社名→商標→人名→その他) ＋各内を代表表記の辞書順に表示 (保存も同順)。
     _section_rank = {"社名": 0, "商標": 1, "人名": 2}
     entries = sorted(
         entries,
@@ -937,7 +937,7 @@ def render_dict_editor() -> None:
     if st.button("💾 辞書を保存", type="primary", key="dict_save"):
 
         def cell(value: object) -> str:
-            # data_editor の空セルは NaN（float）。`nan or ""` は nan が truthy で
+            # data_editor の空セルは NaN (float)。`nan or ""` は nan が truthy で
             # すり抜けて "nan" になるので、明示的に空文字へ落とす。
             return "" if pd.isna(value) else str(value).strip()
 
@@ -967,10 +967,10 @@ def render_dict_editor() -> None:
 
 
 def render_cache_view() -> None:
-    """キャッシュ済み文書の一覧・削除（🗂 キャッシュ モード）。
+    """キャッシュ済み文書の一覧・削除 (🗂 キャッシュ モード)。
 
-    文書一覧・削除・種別更新はサーバ所有のキャッシュ（cache.db）に対して API 経由で行う。
-    各文書は API の DocumentInfo（dict）で、キー content_hash / source_kind / source_name /
+    文書一覧・削除・種別更新はサーバ所有のキャッシュ (cache.db) に対して API 経由で行う。
+    各文書は API の DocumentInfo (dict) で、キー content_hash / source_kind / source_name /
     char_count / chunk_count / created_at / ner_models / llm_versions を持つ。
     """
     client = _mask_client(MASK_API_URL)
@@ -995,8 +995,8 @@ def render_cache_view() -> None:
         "編集後は [💾 種別の変更を保存] を押す）"
         "　LLM 列: **✓**=現行 detector_version で有効／**⚠ 要更新**=旧版のキャッシュのみ（窓ポリシー等が変わった）／**—**=無し。"
     )
-    # 旧方式（kb-mcp の格納チャンクを直接取り込んだ）文書が残っている場合の再取込促し。
-    # 新方式では kb 文書は元ファイルを取得して file として取り込む（overlap 0 で再抽出）ため、
+    # 旧方式 (kb-mcp の格納チャンクを直接取り込んだ) 文書が残っている場合の再取込促し。
+    # 新方式では kb 文書は元ファイルを取得して file として取り込む (overlap 0 で再抽出) ため、
     # source_kind=="kb" の行は旧方式の遺物＝content_hash が変わり新経路ではヒットしない。
     if any(d["source_kind"] == "kb" for d in docs):
         st.warning(
@@ -1006,8 +1006,8 @@ def render_cache_view() -> None:
             "更新されます。旧エントリが不要なら削除してください。"
         )
     current_ver = _detector_version()
-    # 実在する種別（text/file）＋既存データに残る種別の和。旧経路の遺物（"kb"＝旧チャンク取込、
-    # "cache"＝再解析で出所が潰れた行）が残っていても表示・修正でき、消えれば選択肢から自然に
+    # 実在する種別 (text/file) ＋既存データに残る種別の和。旧経路の遺物 ("kb"＝旧チャンク取込、
+    # "cache"＝再解析で出所が潰れた行) が残っていても表示・修正でき、消えれば選択肢から自然に
     # 消える。SelectboxColumn は現在値が options に無いとエラーになるので和にする。
     kind_options = sorted({"text", "file"} | {d["source_kind"] for d in docs})
 
@@ -1048,7 +1048,7 @@ def render_cache_view() -> None:
         key="cache_view",
     )
 
-    # 種別の変更（出所の手動修正）を検出して保存する。
+    # 種別の変更 (出所の手動修正) を検出して保存する。
     kind_changes = [
         (d["content_hash"], new_kind)
         for d, new_kind in zip(docs, edited["種別"].tolist())
@@ -1065,8 +1065,8 @@ def render_cache_view() -> None:
             st.caption(f"詳細: {e}")
             return
         # data_editor の編集状態を破棄してから再描画する。表の行が変わった後も古い編集
-        # （チェック行のインデックス）が残ると、行数の減った新しい表へ再適用される際に
-        # bool 列へ NaN が入り、pandas 3.x が TypeError を投げるため（静的キーの罠）。
+        # (チェック行のインデックス) が残ると、行数の減った新しい表へ再適用される際に
+        # bool 列へ NaN が入り、pandas 3.x が TypeError を投げるため (静的キーの罠)。
         st.session_state.pop("cache_view", None)
         st.success(f"種別を更新しました（{len(kind_changes)} 件）。")
         st.rerun()
@@ -1087,11 +1087,11 @@ def render_cache_view() -> None:
 
 
 def render_allowlist_editor() -> None:
-    """除外リストの確認・追加・編集・保存 UI（独立タブ）。
+    """除外リストの確認・追加・編集・保存 UI (独立タブ)。
 
-    除外リストファイルはサーバが所有する（設計 B）。読み書きは API 経由で行い、
+    除外リストファイルはサーバが所有する (設計 B)。読み書きは API 経由で行い、
     行を編集/追加/削除して保存すると PUT /allowlist でサーバへ書き出す。
-    1 列（除外語）だけのフラットなリスト。
+    1 列 (除外語) だけのフラットなリスト。
     """
     st.caption(
         "📝 **追加**＝一番下の空行に語を入力。"
@@ -1110,9 +1110,9 @@ def render_allowlist_editor() -> None:
         return
     entries = sorted(
         entries, key=lambda e: allowlist_sort_key(e["surface"])
-    )  # 既定で辞書順表示（保存も同順）
-    # dtype を明示：空（entries=[]）だと既定で float64 列になり data_editor が数値入力欄を出して
-    # **文字を打てない**（＝新規登録できない）バグになる。TextColumn/CheckboxColumn でも固定。
+    )  # 既定で辞書順表示 (保存も同順)
+    # dtype を明示：空 (entries=[]) だと既定で float64 列になり data_editor が数値入力欄を出して
+    # **文字を打てない** (＝新規登録できない) バグになる。TextColumn/CheckboxColumn でも固定。
     df = pd.DataFrame(
         {
             "除外語": pd.Series([e["surface"] for e in entries], dtype="string"),
@@ -1167,9 +1167,9 @@ def render_allowlist_editor() -> None:
 
 
 def render_masking_result(stored: dict) -> None:
-    """マスキングの結果表示（サーバの解析 JSON から。候補選択・表示切替は再解析しない）。
+    """マスキングの結果表示 (サーバの解析 JSON から。候補選択・表示切替は再解析しない)。
 
-    ``stored["analysis_json"]`` は API `/analyze` の応答（groups / auto_selection / text）。
+    ``stored["analysis_json"]`` は API `/analyze` の応答 (groups / auto_selection / text)。
     選択反映は `/apply`、手動選択差分は `/draft`、除外/辞書登録は `/allowlist`・`/dictionary`＋再 `/analyze`。
     """
     models = stored["models"]
@@ -1184,7 +1184,7 @@ def render_masking_result(stored: dict) -> None:
     client = _mask_client(MASK_API_URL)
     chash = content_hash(chunks)
 
-    # 再解析（除外/辞書の反映）に使う共通引数。auto 選択は mask_level=strong（確定/強）。
+    # 再解析 (除外/辞書の反映) に使う共通引数。auto 選択は mask_level=strong (確定/強)。
     def _reanalyze() -> dict:
         return client.analyze_document(
             chash,
@@ -1219,7 +1219,7 @@ def render_masking_result(stored: dict) -> None:
         )
     by_entity = unit.startswith("実体")
 
-    # 共有選択（マスクする span 集合）＝ auto（確定/強）＋ 保存済みドラフト（手動の差分）。
+    # 共有選択 (マスクする span 集合) ＝ auto (確定/強) ＋ 保存済みドラフト (手動の差分)。
     # ドラフトは content_hash 単位でサーバ側 DB に永続化＝**再起動・再解析でも手動選択が消えない**。
     # 実体ごと/出現ごとの両ビューがこの 1 つの集合を読み書きするので、切替で選択が消えない。
     auto = _auto_mask_spans(analysis)
@@ -1244,11 +1244,11 @@ def render_masking_result(stored: dict) -> None:
             groups, confidences, sel, ver, stored, text
         )
 
-    # 「除外」チェックを除外リスト（サーバ所有）へ追記し、再解析して即反映する。
+    # 「除外」チェックを除外リスト (サーバ所有) へ追記し、再解析して即反映する。
     if excl_clicked and to_exclude:
         current = client.get_allowlist()["entries"]
         existing = {e["surface"] for e in current}
-        # UI から送る除外は完全一致（部分一致=False・大小無視）。細かい指定は除外リストエディタで行う。
+        # UI から送る除外は完全一致 (部分一致=False・大小無視)。細かい指定は除外リストエディタで行う。
         merged = current + [
             {"surface": s, "partial": False, "case_sensitive": False}
             for s in to_exclude
@@ -1257,7 +1257,7 @@ def render_masking_result(stored: dict) -> None:
         added_n = len(merged) - len(current)
         client.put_allowlist(merged)  # サーバは PUT 後に allowlist を再ロード
         stored["analysis_json"] = _reanalyze()
-        # 除外（confidence=excluded）になった span を共有選択から外す（他の手動選択は保持）。
+        # 除外 (confidence=excluded) になった span を共有選択から外す (他の手動選択は保持)。
         excluded = {
             tuple(o["span"])
             for g in stored["analysis_json"]["groups"]
@@ -1271,8 +1271,8 @@ def render_masking_result(stored: dict) -> None:
         )
         st.rerun()
 
-    # 「辞書登録」チェックを辞書（サーバ所有）へ追記し、再解析して即反映する。辞書一致は確定になり、
-    # その語の全出現が自動マスク対象になる（→ 選択に加える）。GiNZA/LLM はサーバのキャッシュ再利用。
+    # 「辞書登録」チェックを辞書 (サーバ所有) へ追記し、再解析して即反映する。辞書一致は確定になり、
+    # その語の全出現が自動マスク対象になる (→ 選択に加える)。GiNZA/LLM はサーバのキャッシュ再利用。
     if reg_clicked and to_register:
         current = client.get_dictionary()["entries"]
         existing = {e["canonical"] for e in current}
@@ -1303,7 +1303,7 @@ def render_masking_result(stored: dict) -> None:
                 "辞書を反映して再解析中 ...（GiNZA/LLM はサーバのキャッシュ）"
             ):
                 stored["analysis_json"] = _reanalyze()
-            # 新たに確定になった語（辞書一致）を共有選択に加える（他の手動選択は保持）。
+            # 新たに確定になった語 (辞書一致) を共有選択に加える (他の手動選択は保持)。
             stored["mask_sel"] = set(sel) | _auto_mask_spans(stored["analysis_json"])
             stored["mask_ver"] = ver + 1
             msg = f"辞書に {len(add)} 件登録し、再解析して反映しました（確定＝自動マスク）。"
@@ -1323,7 +1323,7 @@ def render_masking_result(stored: dict) -> None:
         else:
             st.info("選択した語はすでに辞書に登録済みです。")
 
-    # 手動選択（auto からの差分）をサーバの draft に永続化（変化時のみ）。再起動/再解析で復元される。
+    # 手動選択 (auto からの差分) をサーバの draft に永続化 (変化時のみ)。再起動/再解析で復元される。
     if stored.get("_draft_saved") != stored["mask_sel"]:
         client.save_draft(
             chash,
@@ -1332,7 +1332,7 @@ def render_masking_result(stored: dict) -> None:
         )
         stored["_draft_saved"] = set(stored["mask_sel"])
 
-    # 共有選択から結果を作る（サーバ /apply。sel の span だけをマスク＝ビュー切替で広がらない）。
+    # 共有選択から結果を作る (サーバ /apply。sel の span だけをマスク＝ビュー切替で広がらない)。
     try:
         applied = client.apply_selection(
             chash,
@@ -1350,13 +1350,13 @@ def render_masking_result(stored: dict) -> None:
     masked_text = applied["masked_text"]
     mapping = applied["mapping"]
 
-    # 色付き（元文）表示用：選択中 span → カテゴリ（groups から引く。text は解析座標）。
+    # 色付き (元文) 表示用：選択中 span → カテゴリ (groups から引く。text は解析座標)。
     span_cat = {
         tuple(o["span"]): g["category"] for g in groups for o in g["occurrences"]
     }
     total_occ = sum(g["count"] for g in groups)
 
-    # --- 結果（色付き表示 / マスク済み / 元テキスト） ---
+    # --- 結果 (色付き表示 / マスク済み / 元テキスト) ---
     col_main, col_side = st.columns([3, 1])
     with col_side:
         st.caption(f"モデル: {', '.join(models)}")
@@ -1411,10 +1411,10 @@ def render_masking_result(stored: dict) -> None:
 
 
 def _render_state_header(stored: dict) -> None:
-    """選択ソースのパイプライン状態（冒頭設計図のミニ版）。
+    """選択ソースのパイプライン状態 (冒頭設計図のミニ版)。
 
-    ✅=本セッションで実行済み / 📂=キャッシュ有（表示は一瞬） / ⬜=未。状態はサーバ由来
-    （get_document の ner_models / llm_versions、get_draft の手動差分）から導出する（設計 B）。
+    ✅=本セッションで実行済み / 📂=キャッシュ有 (表示は一瞬) / ⬜=未。状態はサーバ由来
+    (get_document の ner_models / llm_versions、get_draft の手動差分) から導出する (設計 B)。
     """
     chash = content_hash(stored["chunks"])
     client = _mask_client(MASK_API_URL)
@@ -1443,10 +1443,10 @@ def _render_state_header(stored: dict) -> None:
 
 
 def _ner_view_groups(analysis_json: dict) -> list[dict]:
-    """`/analyze` の groups のうち NER（GiNZA）由来の票を持つものだけ返す（NER検出タブ用）。
+    """`/analyze` の groups のうち NER (GiNZA) 由来の票を持つものだけ返す (NER検出タブ用)。
 
     votes に ja_ginza / ja_ginza_electra いずれかのラベルがあれば NER 由来とみなす
-    （辞書・正規表現のみで拾った候補は NER タブには出さない＝GiNZA の効きを見るビュー）。
+    (辞書・正規表現のみで拾った候補は NER タブには出さない＝GiNZA の効きを見るビュー)。
     """
     return [
         g
@@ -1456,7 +1456,7 @@ def _ner_view_groups(analysis_json: dict) -> list[dict]:
 
 
 def _render_group_html(text: str, groups: list[dict], *, height: int = 360) -> None:
-    """実体グループ（dict）の全出現を text 上でカテゴリ色ハイライトして表示する。"""
+    """実体グループ (dict) の全出現を text 上でカテゴリ色ハイライトして表示する。"""
     spans = [
         (o["span"][0], o["span"][1], g["category"])
         for g in groups
@@ -1482,7 +1482,7 @@ def _render_detect_buttons(
 ) -> None:
     """NER/LLM タブ共通：実行済み / キャッシュ済み / 未 の 3 状態でボタンを出し分ける。
 
-    ``run(refresh)`` を押下時に呼ぶ（refresh=True でサーバのキャッシュを無視して再解析）。
+    ``run(refresh)`` を押下時に呼ぶ (refresh=True でサーバのキャッシュを無視して再解析)。
     """
     if in_session:
         st.caption(f"{label} 状態: ✅ 実行済み（このセッション）")
@@ -1504,9 +1504,9 @@ def _render_detect_buttons(
 
 
 def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
-    """NER検出タブ（独立経路）：サーバの `/analyze`(detection="ner") で候補を集約して表示する。
+    """NER検出タブ (独立経路)：サーバの `/analyze`(detection="ner") で候補を集約して表示する。
 
-    重い GiNZA 解析はサーバ側で実行・キャッシュされる（設計 B＝UI はエンジンを内包しない）。
+    重い GiNZA 解析はサーバ側で実行・キャッシュされる (設計 B＝UI はエンジンを内包しない)。
     キャッシュ状態は get_document の ner_models から判定し、実行 / 表示＋再実行 を出し分ける。
     """
     client = _mask_client(MASK_API_URL)
@@ -1537,7 +1537,7 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
         except httpx.HTTPError as e:
             st.error(f"マスキング API に接続できません: {e}")
             return
-        # マージは NER 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
+        # マージは NER 票込みで作り直す必要があるので無効化 (マージタブで再実行を促す)。
         stored.pop("analysis_json", None)
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
@@ -1592,11 +1592,11 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
-    """LLM検出タブ（独立経路・出口1）：サーバの `/analyze`(detection="llm") で LLM 検出を表示する。
+    """LLM検出タブ (独立経路・出口1)：サーバの `/analyze`(detection="llm") で LLM 検出を表示する。
 
-    LLM 検出（pii-masker/Azure）はサーバ側で実行・キャッシュされる（Azure 認証も serve 側）。
-    ⑥b で API 化した際、ENE type / 一致方法 / 理由 / 未特定件数は簡略化した（groups の
-    surface / category / confidence / LLM 票のみ表示。必要になれば `/analyze` 応答に追加する）。
+    LLM 検出 (pii-masker/Azure) はサーバ側で実行・キャッシュされる (Azure 認証も serve 側)。
+    ⑥b で API 化した際、ENE type / 一致方法 / 理由 / 未特定件数は簡略化した (groups の
+    surface / category / confidence / LLM 票のみ表示。必要になれば `/analyze` 応答に追加する)。
     """
     client = _mask_client(MASK_API_URL)
     chash = content_hash(stored["chunks"])
@@ -1624,7 +1624,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
         except httpx.HTTPError as e:
             st.error(f"マスキング API に接続できません: {e}")
             return
-        # マージは LLM 票込みで作り直す必要があるので無効化（マージタブで再実行を促す）。
+        # マージは LLM 票込みで作り直す必要があるので無効化 (マージタブで再実行を促す)。
         stored.pop("analysis_json", None)
         stored.pop("mask_sel", None)
         stored.pop("_draft_saved", None)
@@ -1673,7 +1673,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _show_analyze_error(e: MaskApiError, detection: str) -> None:
-    """`/analyze`（や `/apply`）の MaskApiError をユーザ向けメッセージにして表示する。"""
+    """`/analyze` (や `/apply`) の MaskApiError をユーザ向けメッセージにして表示する。"""
     code = e.status_code
     if code == 502 and detection in ("llm", "both"):
         st.error(
@@ -1697,11 +1697,11 @@ def _show_analyze_error(e: MaskApiError, detection: str) -> None:
 
 
 def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
-    """マージ&確信度タブ（出口2）：サーバの `/analyze` で候補を集約・確信度づけしてレビューする。
+    """マージ&確信度タブ (出口2)：サーバの `/analyze` で候補を集約・確信度づけしてレビューする。
 
     detection は「**現行版の LLM キャッシュがある or LLM検出タブを実行済み**なら both、なければ ner」で
-    自動判定する（LLM を勝手に走らせない＝Azure を強制しない・現状の振る舞いを踏襲）。サーバが辞書＋
-    正規表現＋NER（＋LLM）を集約する。重い NER/LLM はサーバ側でキャッシュ再利用される。
+    自動判定する (LLM を勝手に走らせない＝Azure を強制しない・現状の振る舞いを踏襲)。サーバが辞書＋
+    正規表現＋NER (＋LLM) を集約する。重い NER/LLM はサーバ側でキャッシュ再利用される。
     """
     client = _mask_client(MASK_API_URL)
     chash = content_hash(stored["chunks"])
@@ -1757,9 +1757,9 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
         + "　— 確信度＝特別カテゴリを出した系統数（NER∧LLM=強／片方=中）。LLM 単独は『🤖 LLM検出』タブ（出口1）。"
     )
 
-    # 📒 マスク辞書 / 🚫 除外リスト をエディタで編集しても、この結果は保存済み（セッション）の
+    # 📒 マスク辞書 / 🚫 除外リスト をエディタで編集しても、この結果は保存済み (セッション) の
     # ままで自動更新されない。外部編集を反映するための再適用ボタンを常設する。辞書＋正規表現＋
-    # 除外だけ掛け直す軽い再解析で、重い NER/LLM はサーバのキャッシュを再利用する（refresh しない）。
+    # 除外だけ掛け直す軽い再解析で、重い NER/LLM はサーバのキャッシュを再利用する (refresh しない)。
     if st.button(
         "🔄 再適用（辞書・除外の変更を反映）",
         key="reapply_merge",
@@ -1783,7 +1783,7 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
         except httpx.HTTPError as e:
             st.error(f"マスキング API に接続できません: {e}")
             return
-        # auto 選択が変わり得る（辞書追加＝確定増／除外＝候補減）。手動差分（draft）から
+        # auto 選択が変わり得る (辞書追加＝確定増／除外＝候補減)。手動差分 (draft) から
         # 作り直すため mask_sel を捨てて render 側で再構築させる。
         stored.pop("mask_sel", None)
         stored["mask_ver"] = stored.get("mask_ver", 0) + 1
@@ -1794,10 +1794,10 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _render_pipeline(stored: dict, flatten_tables: bool) -> None:
-    """1ソース＝1パイプライン：状態ヘッダー＋ステージ選択（§12）。
+    """1ソース＝1パイプライン：状態ヘッダー＋ステージ選択 (§12)。
 
-    ステージは **st.radio（key で選択状態を保持）** で切り替える。`st.tabs` は各ステージの実行ボタンや
-    マスク反映が起こす rerun のたびに先頭タブへ戻ってしまうため使わない（選択が保持できる radio にする）。
+    ステージは **st.radio (key で選択状態を保持) ** で切り替える。`st.tabs` は各ステージの実行ボタンや
+    マスク反映が起こす rerun のたびに先頭タブへ戻ってしまうため使わない (選択が保持できる radio にする)。
     NER検出/LLM検出 は対等な独立経路、マージ&確信度 が合流。
     """
     _render_state_header(stored)
@@ -1837,7 +1837,7 @@ def main() -> None:
     dict_mode = mode.startswith("📒")
     allowlist_mode = mode.startswith("🚫")
 
-    # --- キャッシュ一覧モード（解析済み文書の確認・削除） ---
+    # --- キャッシュ一覧モード (解析済み文書の確認・削除) ---
     if cache_mode:
         with st.sidebar:
             st.header("⚙️ 設定")
@@ -1848,8 +1848,8 @@ def main() -> None:
         )
         render_cache_view()
         return
-    # --- マスク辞書モード（文書入力なし。辞書の確認・編集・保存だけ） ---
-    # 辞書ファイルはサーバ所有（設計 B）＝パスはクライアントで指定しない。
+    # --- マスク辞書モード (文書入力なし。辞書の確認・編集・保存だけ) ---
+    # 辞書ファイルはサーバ所有 (設計 B) ＝パスはクライアントで指定しない。
     if dict_mode:
         with st.sidebar:
             st.header("⚙️ 設定")
@@ -1861,8 +1861,8 @@ def main() -> None:
         render_dict_editor()
         return
 
-    # --- 除外リストモード（文書入力なし。除外語の確認・編集・保存だけ） ---
-    # 除外リストファイルもサーバ所有（設計 B）＝パスはクライアントで指定しない。
+    # --- 除外リストモード (文書入力なし。除外語の確認・編集・保存だけ) ---
+    # 除外リストファイルもサーバ所有 (設計 B) ＝パスはクライアントで指定しない。
     if allowlist_mode:
         with st.sidebar:
             st.header("⚙️ 設定")
@@ -1875,15 +1875,15 @@ def main() -> None:
         render_allowlist_editor()
         return
 
-    # --- サイドバー（マスキングの設定） ---
+    # --- サイドバー (マスキングの設定) ---
     with st.sidebar:
         st.header("⚙️ 設定")
-        # モデルはサーバが起動時に固定ロードする（設計 B）。UI は選ばず、ロード済みを
-        # そのまま使う（API はリクエストごとのモデル部分指定に未対応）。ロード済みモデル名は
+        # モデルはサーバが起動時に固定ロードする (設計 B)。UI は選ばず、ロード済みを
+        # そのまま使う (API はリクエストごとのモデル部分指定に未対応)。ロード済みモデル名は
         # サイドバー上部の接続状態に出るので、ここでは重ねて表示しない。
         models = _loaded_models()
-        # 辞書・除外リストはサーバ所有（設計 B）。編集は 📒 マスク辞書 / 🚫 除外リスト タブで行う
-        # （UI はファイルパスを持たない）。
+        # 辞書・除外リストはサーバ所有 (設計 B)。編集は 📒 マスク辞書 / 🚫 除外リスト タブで行う
+        # (UI はファイルパスを持たない)。
         flatten_tables = st.toggle(
             "テーブルを平文化して検出",
             value=True,
@@ -1898,7 +1898,7 @@ def main() -> None:
         "機密情報（人名・社名・商標など）を検出してマスクします。"
     )
 
-    # --- 入力（ここでは描画だけ。解析はボタン押下時のみ） ---
+    # --- 入力 (ここでは描画だけ。解析はボタン押下時のみ) ---
     input_mode = st.radio(
         "入力方法",
         [
@@ -1912,17 +1912,17 @@ def main() -> None:
     input_id, input_kind, source_label, get_chunks = render_input(input_mode)
 
     # 結果は入力方法ごとに別スロットへ保存する。入力方法を切り替えるとその方法の最後の結果
-    # （無ければ案内）が出て、別タブから戻れば元の結果が復元される（テキストで解析→ファイルへ
-    # 切替えてもテキストの結果が残り続ける、を防ぐ）。
+    # (無ければ案内) が出て、別タブから戻れば元の結果が復元される (テキストで解析→ファイルへ
+    # 切替えてもテキストの結果が残り続ける、を防ぐ)。
     slot = f"masking:{input_kind}"
 
     # 再解析が必要かは「設定署名」と「入力署名」の 2 本で見る。
-    #  - 設定署名（モデル/平文化）は**入力が無くても**算出できる（別タブから戻って file_uploader が
-    #    ファイルを失っても、モデル/平文化の変更は検知できる）。
-    #  - 入力署名（input_id）は入力が確定しているときだけ比較する。
+    #  - 設定署名 (モデル/平文化) は**入力が無くても**算出できる (別タブから戻って file_uploader が
+    #    ファイルを失っても、モデル/平文化の変更は検知できる)。
+    #  - 入力署名 (input_id) は入力が確定しているときだけ比較する。
     settings_sig = _masking_settings_sig(models, flatten_tables)
 
-    # --- 解析ボタン（テキスト/ファイル/kb-mcp 共通。押したときだけ重い解析が走る） ---
+    # --- 解析ボタン (テキスト/ファイル/kb-mcp 共通。押したときだけ重い解析が走る) ---
     if not models:
         st.warning(
             "サーバに NER モデルがロードされていません"
@@ -1930,24 +1930,24 @@ def main() -> None:
         )
     stored = st.session_state.get(slot)
 
-    # 新しい入力があればそれを解析する（can_fresh）。
-    # stored フォールバック（テキスト化済み stored["chunks"] で再解析）は **ファイル入力専用**：
+    # 新しい入力があればそれを解析する (can_fresh)。
+    # stored フォールバック (テキスト化済み stored["chunks"] で再解析) は **ファイル入力専用**：
     #   file_uploader だけが別タブ往復で中身を失うため、辞書だけ変えた再解析等で上げ直さずに済む。
-    # cache/kb は **選択を fragment 内で行う**ため、行クリックでは外側（このボタン）が再実行されず
+    # cache/kb は **選択を fragment 内で行う**ため、行クリックでは外側 (このボタン) が再実行されず
     #   選択が反映されない。そこでボタンを選択に依存させず、モデルさえあれば押せるようにし、
-    #   未選択のクリックは下のハンドラで案内する（stored への誤フォールバックはしない）。
+    #   未選択のクリックは下のハンドラで案内する (stored への誤フォールバックはしない)。
     models_ok = bool(models)
     can_fresh = get_chunks is not None and models_ok
     can_reuse_stored = input_kind == "file" and stored is not None and models_ok
-    # cache/kb は選択を fragment 内で行う＝行クリックでは外側（このボタン）が再実行されず選択が
-    # 反映されない。ので選択に依存させず、モデルがあれば押せるようにする（クリック＝本体再実行で
-    # 選択が解決される）。未選択のままのクリックは下のハンドラで案内する。
+    # cache/kb は選択を fragment 内で行う＝行クリックでは外側 (このボタン) が再実行されず選択が
+    # 反映されない。ので選択に依存させず、モデルがあれば押せるようにする (クリック＝本体再実行で
+    # 選択が解決される)。未選択のままのクリックは下のハンドラで案内する。
     can_select_list = input_kind in ("cache", "kb") and models_ok
     can_analyze = can_fresh or can_reuse_stored or can_select_list
     # 「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
     action_label = "📥 読み込む"
     clicked = st.button(action_label, type="primary", disabled=not can_analyze)
-    if not can_analyze:  # なぜ押せないかを明示（モデル未ロード / 入力未指定）
+    if not can_analyze:  # なぜ押せないかを明示 (モデル未ロード / 入力未指定)
         if not models:
             st.caption(
                 "⚠ サーバに NER モデルがロードされていません（接続状態を確認）。"
@@ -1955,15 +1955,15 @@ def main() -> None:
         else:
             st.caption("⚠ 入力（テキスト／ファイル／kb-mcp）を指定すると押せます。")
 
-    # ボタン下の出力（案内 / スピナー / 結果）は 1 つの placeholder に集約する。
+    # ボタン下の出力 (案内 / スピナー / 結果) は 1 つの placeholder に集約する。
     # クリック時にここを描き替えてから解析に入るので、モデルロード等で処理が止まっても
-    # 前フレームの「…を押してください」が裏に残って透ける現象が起きない（同一スロットを差し替え）。
+    # 前フレームの「…を押してください」が裏に残って透ける現象が起きない (同一スロットを差し替え)。
     output = st.empty()
 
     if clicked:
         with (
             output.container()
-        ):  # 旧フレームの内容を即座に置換（スピナーをこの位置に出す）
+        ):  # 旧フレームの内容を即座に置換 (スピナーをこの位置に出す)
             src_label, in_kind, in_sig = source_label, input_kind, input_id
             if can_fresh:
                 try:
@@ -1972,20 +1972,20 @@ def main() -> None:
                     st.error(f"入力の取得に失敗しました: {e}")
                     chunks = None
             elif can_reuse_stored:
-                # ファイル入力で file_uploader が空（別タブ往復でクリア）。同じファイルの
-                # テキスト化済みチャンク（stored）を再解析する（file 限定＝別文書の誤解析を防ぐ）。
+                # ファイル入力で file_uploader が空 (別タブ往復でクリア)。同じファイルの
+                # テキスト化済みチャンク (stored) を再解析する (file 限定＝別文書の誤解析を防ぐ)。
                 src_label = stored["source_label"]  # type: ignore[index]
                 in_kind = stored["input_kind"]  # type: ignore[index]
                 in_sig = stored["input_sig"]  # type: ignore[index]
                 chunks = stored["chunks"]  # type: ignore[index]
             else:
-                # cache/kb で未選択のままクリック（選択は一覧の行クリックで行う）。
+                # cache/kb で未選択のままクリック (選択は一覧の行クリックで行う)。
                 st.warning("一覧から行をクリックして文書を選択してください。")
                 chunks = None
             if chunks:
                 # パイプラインは「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
-                # 文書メタ＋チャンクの記録はサーバが取込（ingest_document）時に行う（設計 B）。
-                # text/file/kb は get_chunks 内でサーバへ取り込み済み（cache は既に登録済み）。
+                # 文書メタ＋チャンクの記録はサーバが取込 (ingest_document) 時に行う (設計 B)。
+                # text/file/kb は get_chunks 内でサーバへ取り込み済み (cache は既に登録済み)。
                 st.session_state[slot] = {
                     "settings_sig": settings_sig,
                     "input_sig": in_sig,
@@ -1999,14 +1999,14 @@ def main() -> None:
 
     stored = st.session_state.get(slot)  # クリックで更新された可能性があるので取り直す
     if not stored:
-        # クリック時はハンドラ側が案内（未選択）やエラーを output に表示済み。上書きしない。
+        # クリック時はハンドラ側が案内 (未選択) やエラーを output に表示済み。上書きしない。
         if not clicked:
             output.info(f"入力を指定して [{action_label}] を押してください。")
         return
 
     # 永続化したスロットが指す文書がサーバにまだあるか確認する。🗂 で削除された等で消えていれば、
-    # 古いセッション結果を捨てて読み込み直しを促す（消えた content_hash を各タブがサーバへ投げて
-    # 404 になるのを入口で一括して防ぐ）。真実はサーバ側＝設計 B。
+    # 古いセッション結果を捨てて読み込み直しを促す (消えた content_hash を各タブがサーバへ投げて
+    # 404 になるのを入口で一括して防ぐ)。真実はサーバ側＝設計 B。
     if _doc_missing_on_server(
         _mask_client(MASK_API_URL), content_hash(stored["chunks"])
     ):
@@ -2018,10 +2018,10 @@ def main() -> None:
         )
         return
 
-    # 解析結果は placeholder の中に描く（クリック時はスピナー表示を結果で置き換える）。
+    # 解析結果は placeholder の中に描く (クリック時はスピナー表示を結果で置き換える)。
     with output.container():
-        # 保存時から設定（辞書/モデル/平文化）か入力が変わっていれば、古い結果を残したまま
-        # 再解析を促す。設定は入力が無くても比較できる（辞書保存→別タブ往復で検知できる）。
+        # 保存時から設定 (辞書/モデル/平文化) か入力が変わっていれば、古い結果を残したまま
+        # 再解析を促す。設定は入力が無くても比較できる (辞書保存→別タブ往復で検知できる)。
         # 入力が消えていても stored のチャンクで再解析できるので、ボタンは押せる前提でよい。
         settings_changed = stored.get("settings_sig") != settings_sig
         input_changed = input_id is not None and input_id != stored.get("input_sig")
@@ -2031,7 +2031,7 @@ def main() -> None:
                 "（マスキングは再読み込みで各タブの結果がリセットされます）。"
             )
 
-        # 1ソース＝1パイプライン：平文/NER検出/LLM検出/マージ&確信度 のタブで見せる（§12）。
+        # 1ソース＝1パイプライン：平文/NER検出/LLM検出/マージ&確信度 のタブで見せる (§12)。
         #   平文はタブ内に置くので、ここでの inline 表示はしない。
         _render_pipeline(stored, flatten_tables)
 

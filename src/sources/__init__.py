@@ -1,14 +1,14 @@
-"""入力ソース（アダプタ）。
+"""入力ソース (アダプタ)。
 
 固有表現抽出エンジンに渡すテキストを、各種ソースから取得する層。
-- files       : ローカルファイル（DocumentLoader 経由）
+- files       : ローカルファイル (DocumentLoader 経由)
 - kb_mcp      : kb-mcp サーバ
-- sample      : 動作確認用の組み込みサンプル文（SAMPLE_TEXT）
+- sample      : 動作確認用の組み込みサンプル文 (SAMPLE_TEXT)
 
-**遅延ロード（設計 B）**：``files`` は DocumentLoader（→ langchain → transformers/torch）を引くため、
-パッケージ import 時には読み込まない。UI（純クライアント）は ``SAMPLE_TEXT`` と ``kb_mcp`` だけを使い、
+**遅延ロード (設計 B) **：``files`` は DocumentLoader (→ langchain → transformers/torch) を引くため、
+パッケージ import 時には読み込まない。UI (純クライアント) は ``SAMPLE_TEXT`` と ``kb_mcp`` だけを使い、
 langchain 無しで ``import src.sources`` できる。``load_chunks_from_file`` などは初アクセス時に
-:func:`__getattr__` が遅延 import する（テキスト化・チャンク化の所有者はサーバ＝設計 B）。
+:func:`__getattr__` が遅延 import する (テキスト化・チャンク化の所有者はサーバ＝設計 B)。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ _LAZY: dict[str, str] = {
 
 
 def __getattr__(name: str) -> Any:
-    """``files`` 系（langchain 依存）を初アクセス時に遅延 import する（PEP 562）。"""
+    """``files`` 系 (langchain 依存) を初アクセス時に遅延 import する (PEP 562)。"""
     sub = _LAZY.get(name)
     if sub is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

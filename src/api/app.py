@@ -1,33 +1,33 @@
-"""マスキング HTTP API（FastAPI）。設計 [docs-dev/mask-http-api設計.md] の B 案・最小面。
+"""マスキング HTTP API (FastAPI)。設計 [docs-dev/mask-http-api設計.md] の B 案・最小面。
 
-エンジン（GiNZA モデル）と ``data/cache.db`` の**所有者をこの 1 プロセスに集約**する
-（設計 B：Streamlit も外部アプリも HTTP クライアント）。エンドポイント：
+エンジン (GiNZA モデル) と ``data/cache.db`` の**所有者をこの 1 プロセスに集約**する
+(設計 B：Streamlit も外部アプリも HTTP クライアント)。エンドポイント：
 
-    最小面（M2）:
+    最小面 (M2):
       GET  /health           死活・モデルロード状態
       GET  /config           既定モデル・detector_version・選択肢・対応拡張子
-      POST /mask             parts（text / content_hash 参照 / 同梱ファイル）→ 共有対応表でマスク
+      POST /mask             parts (text / content_hash 参照 / 同梱ファイル) → 共有対応表でマスク
       POST /unmask           text＋mapping → 復元テキスト
-    全体面（M5・Streamlit クライアント用。stateful）:
-      POST   /documents              入力取込 → content_hash 発行（JSON=text / multipart=file）
+    全体面 (M5・Streamlit クライアント用。stateful):
+      POST   /documents              入力取込 → content_hash 発行 (JSON=text / multipart=file)
       GET    /documents              取込済み一覧
       GET    /documents/{h}          メタ＋チャンク
-      DELETE /documents/{h}          削除（?layer=ner で NER 層のみ）
-      PATCH  /documents/{h}          メタ更新（source_kind）
+      DELETE /documents/{h}          削除 (?layer=ner で NER 層のみ)
+      PATCH  /documents/{h}          メタ更新 (source_kind)
       POST   /documents/{h}/analyze  候補一覧＋既定選択
       POST   /documents/{h}/apply    選択 span → masked_text＋mapping
       GET/PUT /documents/{h}/draft   手動選択差分
-      GET/PUT /allowlist             除外リスト（エディタ・保存後は即反映）
-      GET/PUT /dictionary            マスク辞書（エディタ・保存後は即反映）
+      GET/PUT /allowlist             除外リスト (エディタ・保存後は即反映)
+      GET/PUT /dictionary            マスク辞書 (エディタ・保存後は即反映)
 
-    サーバは入力ソースに依存しない（text か file を受け取ってマスクするだけ）。kb-mcp
-    のような文書ソースからの取得はクライアント（UI）の責務＝クライアントが元ファイルを
-    取得して multipart/file で送る（設計 §4・2026-07-21 の設計見直し）。
+    サーバは入力ソースに依存しない (text か file を受け取ってマスクするだけ)。kb-mcp
+    のような文書ソースからの取得はクライアント (UI) の責務＝クライアントが元ファイルを
+    取得して multipart/file で送る (設計 §4・2026-07-21 の設計見直し)。
 
-起動時にモデルを 1 回ロードする（lifespan、エンジン singleton）。残るは M5e（Streamlit を
-このAPIのクライアントへ移行・data-redactor dev 合体コマンド）。
+起動時にモデルを 1 回ロードする (lifespan、エンジン singleton)。残るは M5e (Streamlit を
+このAPIのクライアントへ移行・data-redactor dev 合体コマンド)。
 
-起動：``uv run data-redactor serve``（uvicorn ラッパ）。テストは ``create_app(ctx=...)`` に
+起動：``uv run data-redactor serve`` (uvicorn ラッパ)。テストは ``create_app(ctx=...)`` に
 軽量な :class:`~src.api.service.ApiContext` を注入して GiNZA の実ロードを避ける。
 """
 
@@ -89,8 +89,8 @@ from src.detector import LLM_MODEL, detector_version
 from src.masking import MaskAllowlist, MaskDictionary, MaskingEngine, NerCache
 from src.ner import AVAILABLE_MODELS
 
-# 既定パス（app.py＝Streamlit と同じ data/ を共有する＝cache.db を 2 つ持たない。設計 B）。
-#   Docker/実機では env で差し替える（名前付きボリューム共有・書き込みは api のみ）。
+# 既定パス (app.py＝Streamlit と同じ data/ を共有する＝cache.db を 2 つ持たない。設計 B)。
+#   Docker/実機では env で差し替える (名前付きボリューム共有・書き込みは api のみ)。
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_CACHE_DB = os.getenv(
     "DATA_REDACTOR_CACHE_DB", str(_ROOT / "data" / "cache.db")
@@ -102,9 +102,9 @@ _DEFAULT_ALLOWLIST = os.getenv(
 
 
 def _load_context() -> ApiContext:
-    """サーバ資源（エンジン＝モデル1回ロード・cache.db・辞書・除外）を組み立てる。
+    """サーバ資源 (エンジン＝モデル1回ロード・cache.db・辞書・除外) を組み立てる。
 
-    モデルロードに失敗しても API 自体は起動する（``models_ready=False``＝NER 要求は 503）。
+    モデルロードに失敗しても API 自体は起動する (``models_ready=False``＝NER 要求は 503)。
     ``/unmask`` や既に解析済みの content_hash 参照はモデル無しでも動くため。
     """
     cache = NerCache(_DEFAULT_CACHE_DB)
@@ -123,10 +123,10 @@ def _load_context() -> ApiContext:
     models_ready = True
     try:
         for e in engine.engines:
-            _ = e.nlp  # 起動時に 1 回ロード（以降の解析を高速化）
+            _ = e.nlp  # 起動時に 1 回ロード (以降の解析を高速化)
     except (
         Exception
-    ):  # noqa: BLE001 - ロード失敗でも起動は続ける（/health で可視化・NER は 503）
+    ):  # noqa: BLE001 - ロード失敗でも起動は続ける (/health で可視化・NER は 503)
         models_ready = False
     return ApiContext(
         engine=engine,
@@ -140,17 +140,17 @@ def _load_context() -> ApiContext:
 
 
 def create_app(ctx: ApiContext | None = None) -> FastAPI:
-    """FastAPI アプリを生成する。``ctx`` を渡すと起動時ロードを省く（テスト用の注入）。"""
+    """FastAPI アプリを生成する。``ctx`` を渡すと起動時ロードを省く (テスト用の注入)。"""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # 注入 ctx（テスト）は create_app で即セット済み。未設定（本番）のみ起動時にロードする。
+        # 注入 ctx (テスト) は create_app で即セット済み。未設定 (本番) のみ起動時にロードする。
         if getattr(app.state, "ctx", None) is None:
             app.state.ctx = _load_context()
         yield
 
     app = FastAPI(title="data-redactor mask API", version="0.1.0", lifespan=lifespan)
-    # 注入 ctx はこの時点でセットする（TestClient を with 無しで使ってもルートが動くように）。
+    # 注入 ctx はこの時点でセットする (TestClient を with 無しで使ってもルートが動くように)。
     app.state.ctx = ctx
 
     @app.get("/health")
@@ -179,7 +179,7 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
 
     @app.post("/mask", response_model=MaskResponse)
     async def mask(request: Request) -> MaskResponse:
-        """parts をマスク。JSON（text/content_hash）または multipart（同梱ファイル）で受ける。"""
+        """parts をマスク。JSON (text/content_hash) または multipart (同梱ファイル) で受ける。"""
         ctype = request.headers.get("content-type", "")
         files: dict[str, tuple[str, bytes]] = {}
         try:
@@ -207,16 +207,16 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
         return run_unmask(req)
 
     # ----------------------------------------------------------------- #
-    # 全体面：/documents 系（設計 §2-B）。取込→content_hash 発行（D1）。
+    # 全体面：/documents 系 (設計 §2-B)。取込→content_hash 発行 (D1)。
     # ----------------------------------------------------------------- #
     @app.post("/documents", response_model=DocumentInfo)
     async def documents_ingest(request: Request) -> DocumentInfo:
         """入力を取り込み content_hash を発行する。
 
-        JSON（application/json）＝テキスト取込、multipart/form-data＝ファイル取込
-        （``file`` にファイル本体、任意で ``source_name``）を content-type で分岐する。
+        JSON (application/json) ＝テキスト取込、multipart/form-data＝ファイル取込
+        (``file`` にファイル本体、任意で ``source_name``) を content-type で分岐する。
         サーバはソース非依存＝kb-mcp 等からの取得はクライアントが行い、ファイルは
-        multipart/file で送る（設計 §4）。
+        multipart/file で送る (設計 §4)。
         """
         ctype = request.headers.get("content-type", "")
         try:
@@ -256,7 +256,7 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
 
     @app.delete("/documents/{content_hash}", status_code=204)
     def documents_delete(content_hash: str, layer: str | None = None) -> None:
-        """文書を削除。``?layer=ner`` で NER キャッシュだけ破棄（本文・LLM・draft は残す）。"""
+        """文書を削除。``?layer=ner`` で NER キャッシュだけ破棄 (本文・LLM・draft は残す)。"""
         delete_document(app.state.ctx, content_hash, layer)
 
     @app.patch("/documents/{content_hash}", response_model=DocumentInfo)
@@ -280,7 +280,7 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
         return save_document_draft(app.state.ctx, content_hash, body)
 
     # ----------------------------------------------------------------- #
-    # 全体面：/allowlist・/dictionary（設計 §3-5・エディタ）。書き込みは api のみ。
+    # 全体面：/allowlist・/dictionary (設計 §3-5・エディタ)。書き込みは api のみ。
     # ----------------------------------------------------------------- #
     @app.get("/allowlist", response_model=AllowlistBody)
     def allowlist_get() -> AllowlistBody:
@@ -301,5 +301,5 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
     return app
 
 
-# uvicorn/`data-redactor serve` が参照するモジュールレベルの app（起動時に実資源をロード）。
+# uvicorn/`data-redactor serve` が参照するモジュールレベルの app (起動時に実資源をロード)。
 app = create_app()

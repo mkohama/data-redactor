@@ -1,14 +1,14 @@
-"""マスキング検出（UI 非依存）。
+"""マスキング検出 (UI 非依存)。
 
 公開 API:
-    MaskingEngine : マスキング検出エンジン（候補生成→確信度→ルーティング→マスク）
+    MaskingEngine : マスキング検出エンジン (候補生成→確信度→ルーティング→マスク)
     MaskResult / Candidate / MaskEntry : 結果の型
-    MaskDictionary : マスク辞書（社名・商標・人名の登録リスト）
+    MaskDictionary : マスク辞書 (社名・商標・人名の登録リスト)
 
-**遅延ロード（設計 B）**：``MaskingEngine`` / ``NerCache`` などエンジン系は spaCy（→torch）を
-引くため、パッケージ import 時には**読み込まない**。UI（純クライアント）は ``content_hash`` や
+**遅延ロード (設計 B) **：``MaskingEngine`` / ``NerCache`` などエンジン系は spaCy (→torch) を
+引くため、パッケージ import 時には**読み込まない**。UI (純クライアント) は ``content_hash`` や
 ``dict_sort_key`` など軽いシンボルだけを使い、spaCy 無しで ``import src.masking`` できる。
-エンジン系は初アクセス時に :func:`__getattr__` が遅延 import する（型検査は TYPE_CHECKING 経由）。
+エンジン系は初アクセス時に :func:`__getattr__` が遅延 import する (型検査は TYPE_CHECKING 経由)。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
-# --- 軽量シンボル（依存ゼロ〜yaml のみ）＝ eager import。UI はここだけ使う。 ---
+# --- 軽量シンボル (依存ゼロ〜yaml のみ) ＝ eager import。UI はここだけ使う。 ---
 from src.masking.allowlist import (
     MaskAllowlist,
     load_allowlist_entries,
@@ -34,7 +34,7 @@ from src.masking.dictionary import sort_key as dict_sort_key
 from src.masking.hashing import content_hash
 
 if TYPE_CHECKING:
-    # 型検査用の宣言（実行時は下の __getattr__ が遅延 import する）。これらは engine/cache 経由で
+    # 型検査用の宣言 (実行時は下の __getattr__ が遅延 import する)。これらは engine/cache 経由で
     # spaCy を引くので eager import しない＝UI へ spaCy を持ち込まない。
     from src.masking.cache import NerCache
     from src.masking.engine import (
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
         vote_category,
     )
 
-# 遅延ロード対象: シンボル名 → 実体のあるサブモジュール（"cache" / "engine"）。
+# 遅延ロード対象: シンボル名 → 実体のあるサブモジュール ("cache" / "engine")。
 _LAZY: dict[str, str] = {
     "NerCache": "cache",
     "AUTO_MASK_CONFIDENCE": "engine",
@@ -79,7 +79,7 @@ _LAZY: dict[str, str] = {
 
 
 def __getattr__(name: str) -> Any:
-    """エンジン系シンボルを初アクセス時に遅延 import する（PEP 562）。"""
+    """エンジン系シンボルを初アクセス時に遅延 import する (PEP 562)。"""
     sub = _LAZY.get(name)
     if sub is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

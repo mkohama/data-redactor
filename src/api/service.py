@@ -1,10 +1,10 @@
-"""``/mask`` / ``/unmask`` のオーケストレーション（HTTP 非依存の中身）。
+"""``/mask`` / ``/unmask`` のオーケストレーション (HTTP 非依存の中身)。
 
-part の解決（text / content_hash 参照 / 同梱ファイル）→ 各 part を解析（NER/LLM）→
+part の解決 (text / content_hash 参照 / 同梱ファイル) → 各 part を解析 (NER/LLM) →
 :meth:`MaskingEngine.mask_parts` で**バンドルで共有する対応表**を作る、までを行う。エラーは
-:class:`fastapi.HTTPException` で表現する（設計 §7 のエラー契約：404/422/502/503）。
+:class:`fastapi.HTTPException` で表現する (設計 §7 のエラー契約：404/422/502/503)。
 
-FastAPI のルーティング（:mod:`src.api.app`）はこの層を呼ぶだけ＝薄い。テストは
+FastAPI のルーティング (:mod:`src.api.app`) はこの層を呼ぶだけ＝薄い。テストは
 :class:`~fastapi.testclient.TestClient` 経由でこの層の分岐を網羅する。
 """
 
@@ -69,30 +69,30 @@ from src.masking.dictionary import load_entries, save_entries
 from src.masking.engine import BundleMaskResult, Candidate
 from src.sources.files import load_chunks_from_file
 
-# NER 系統に属さないチャネル（decided_by / 系統別 votes の判定で除外する）。
+# NER 系統に属さないチャネル (decided_by / 系統別 votes の判定で除外する)。
 _NON_NER_CHANNELS = frozenset({"dict", "session", "regex", "collected", "llm"})
-# 系統別 votes 表示のカテゴリ優先度（特別＝人名/社名/商標を上位に）。engine の _CAT_PRIORITY と同順。
+# 系統別 votes 表示のカテゴリ優先度 (特別＝人名/社名/商標を上位に)。engine の _CAT_PRIORITY と同順。
 _CAT_ORDER = ("人名", "社名", "商標", "連絡先", "地名", "その他")
 _CAT_RANK = {c: i for i, c in enumerate(_CAT_ORDER)}
 
 
 @dataclass
 class ApiContext:
-    """サーバが 1 プロセスで所有する資源（起動時にロード。設計 B）。"""
+    """サーバが 1 プロセスで所有する資源 (起動時にロード。設計 B)。"""
 
     engine: MaskingEngine
     cache: NerCache
     allowlist: MaskAllowlist
     model_names: tuple[str, ...]
     models_ready: bool
-    # 辞書・除外リストの YAML パス（エディタ /dictionary・/allowlist の読み書き先）。
-    #   None ならエディタは未設定（GET は空・PUT は 409）。書き込みは api のみ（設計 B）。
+    # 辞書・除外リストの YAML パス (エディタ /dictionary・/allowlist の読み書き先)。
+    #   None ならエディタは未設定 (GET は空・PUT は 409)。書き込みは api のみ (設計 B)。
     dict_path: str | None = None
     allowlist_path: str | None = None
 
 
 def _normalize_parts(req: MaskRequest) -> list[Part]:
-    """``text`` 糖衣を parts へ畳み、各 part がちょうど 1 種（text/content_hash/file）か検証する。"""
+    """``text`` 糖衣を parts へ畳み、各 part がちょうど 1 種 (text/content_hash/file) か検証する。"""
     if req.parts is not None and req.text is not None:
         raise HTTPException(422, "`parts` と `text` は同時に指定できません")
     parts = req.parts
@@ -120,7 +120,7 @@ def _normalize_parts(req: MaskRequest) -> list[Part]:
 def _resolve_chunks(
     part: Part, ctx: ApiContext, files: dict[str, tuple[str, bytes]]
 ) -> list[str]:
-    """1 part を解析対象チャンク列にする（text / content_hash / 同梱ファイル）。"""
+    """1 part を解析対象チャンク列にする (text / content_hash / 同梱ファイル)。"""
     if part.text is not None:
         return [part.text]
     if part.content_hash is not None:
@@ -156,7 +156,7 @@ def _analyze_part(
 ) -> tuple[MaskAnalysis, list[Candidate], list[CandidateGroup]]:
     """1 part を解析し、(解析結果, 自動選択候補, 実体グループ) を返す。
 
-    ``refresh=True`` はキャッシュを無視して NER/LLM とも強制再解析する（結果で上書き）。
+    ``refresh=True`` はキャッシュを無視して NER/LLM とも強制再解析する (結果で上書き)。
     """
     run_ner = detection in ("ner", "both")
     use_llm = detection in ("llm", "both")
@@ -192,7 +192,7 @@ def _analyze_part(
 
 
 def _system_votes(group: CandidateGroup) -> dict[str, str]:
-    """実体グループの票を系統別（ner / llm）カテゴリにまとめる（pending の ``votes`` 表示用）。"""
+    """実体グループの票を系統別 (ner / llm) カテゴリにまとめる (pending の ``votes`` 表示用)。"""
     ner_cats: list[str] = []
     llm_cats: list[str] = []
     for ch, label in group.votes:
@@ -217,10 +217,10 @@ def _build_pending(
     parts: list[Part],
     mask_level: str,
 ) -> list[PendingEntry]:
-    """自動マスク閾値未満のレビュー候補をバンドル（全パート）で集約する。
+    """自動マスク閾値未満のレビュー候補をバンドル (全パート) で集約する。
 
-    対象＝マスク可能だが ``mask_level`` 未満、かつ ``微弱``（既定非表示）・``除外`` を除いたもの。
-    同じ canonical は全パートでまとめ、出現位置は**原文座標**（masked_text と同じ座標系）にする。
+    対象＝マスク可能だが ``mask_level`` 未満、かつ ``微弱`` (既定非表示) ・``除外`` を除いたもの。
+    同じ canonical は全パートでまとめ、出現位置は**原文座標** (masked_text と同じ座標系) にする。
     """
     at_or_above = set(confidences_at_or_above(mask_level))
     maskable = set(confidences_at_or_above("faint"))  # 除外は含まれない
@@ -252,7 +252,7 @@ def _build_pending(
 
 
 # --------------------------------------------------------------------------- #
-# 共通バリデーション・mapping 整形（/mask と /analyze・/apply で共有）。
+# 共通バリデーション・mapping 整形 (/mask と /analyze・/apply で共有)。
 # --------------------------------------------------------------------------- #
 def _validate_detection(detection: str) -> None:
     if detection not in DETECTION_MODES:
@@ -266,7 +266,7 @@ def _validate_mask_level(mask_level: str) -> None:
 
 def _validate_models(ctx: ApiContext, models: list[str] | None) -> None:
     if models is not None and set(models) != set(ctx.model_names):
-        # 起動時ロードの固定モデルのみ（部分指定は未対応。黙って無視しない）。
+        # 起動時ロードの固定モデルのみ (部分指定は未対応。黙って無視しない)。
         raise HTTPException(
             422,
             "このビルドでは models の部分指定に未対応です"
@@ -275,7 +275,7 @@ def _validate_models(ctx: ApiContext, models: list[str] | None) -> None:
 
 
 def _wire_mapping(bundle: BundleMaskResult, part_ids: list[str]) -> list[MappingEntry]:
-    """BundleMaskResult の entries を wire の MappingEntry に整形する（/mask・/apply 共通）。"""
+    """BundleMaskResult の entries を wire の MappingEntry に整形する (/mask・/apply 共通)。"""
     return [
         MappingEntry(
             placeholder=e.placeholder,
@@ -296,7 +296,7 @@ def _wire_mapping(bundle: BundleMaskResult, part_ids: list[str]) -> list[Mapping
 def run_mask(
     ctx: ApiContext, req: MaskRequest, files: dict[str, tuple[str, bytes]]
 ) -> MaskResponse:
-    """``POST /mask`` の中身。parts をバンドル共有の対応表でマスクして返す（設計 §3-1）。"""
+    """``POST /mask`` の中身。parts をバンドル共有の対応表でマスクして返す (設計 §3-1)。"""
     _validate_detection(req.detection)
     _validate_mask_level(req.mask_level)
     _validate_models(ctx, req.models)
@@ -342,7 +342,7 @@ def run_mask(
 
 
 def run_unmask(req: UnmaskRequest) -> UnmaskResponse:
-    """``POST /unmask`` の中身。mapping で LLM 応答テキストを復元する（設計 §3-2）。"""
+    """``POST /unmask`` の中身。mapping で LLM 応答テキストを復元する (設計 §3-2)。"""
     entries = mapping_from_json(
         [
             {
@@ -358,8 +358,8 @@ def run_unmask(req: UnmaskRequest) -> UnmaskResponse:
 
 
 # --------------------------------------------------------------------------- #
-# 全体面：/documents 系（設計 §2-B）。既存の NerCache/DocumentLoader を配線するだけ。
-# content_hash はサーバが発行して返す（D1）。取込済み文書は /mask の content_hash で参照できる。
+# 全体面：/documents 系 (設計 §2-B)。既存の NerCache/DocumentLoader を配線するだけ。
+# content_hash はサーバが発行して返す (D1)。取込済み文書は /mask の content_hash で参照できる。
 # --------------------------------------------------------------------------- #
 SUPPORTED_EXTENSIONS: tuple[str, ...] = tuple(
     sorted(DocumentLoader.SUPPORTED_EXTENSIONS)
@@ -367,7 +367,7 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = tuple(
 
 
 def _doc_info(ctx: ApiContext, d: DocInfo) -> DocumentInfo:
-    """cache の DocInfo → wire の DocumentInfo（llm_versions を補って返す）。"""
+    """cache の DocInfo → wire の DocumentInfo (llm_versions を補って返す)。"""
     return DocumentInfo(
         content_hash=d.content_hash,
         source_kind=d.source_kind,
@@ -389,19 +389,19 @@ def _find_doc(ctx: ApiContext, chash: str) -> DocInfo | None:
 def _ingest_chunks(
     ctx: ApiContext, chunks: list[str], source_kind: str, source_name: str
 ) -> DocumentInfo:
-    """チャンク列を記録し DocumentInfo を返す。content_hash はサーバが発行（D1）。"""
+    """チャンク列を記録し DocumentInfo を返す。content_hash はサーバが発行 (D1)。"""
     if not chunks or not any(c.strip() for c in chunks):
         raise HTTPException(422, "取り込むテキストが空です")
     chash = content_hash(chunks)
     ctx.cache.record_document(chash, source_kind, source_name, chunks)
     info = _find_doc(ctx, chash)
-    if info is None:  # 記録直後に見つからないのは異常（保険）。
+    if info is None:  # 記録直後に見つからないのは異常 (保険)。
         raise HTTPException(500, "取り込み後に文書が見つかりませんでした")
     return _doc_info(ctx, info)
 
 
 def ingest_text(ctx: ApiContext, text: str, source_name: str) -> DocumentInfo:
-    """テキストを 1 チャンクとして取り込む（/mask の text 経路と同じ単位）。"""
+    """テキストを 1 チャンクとして取り込む (/mask の text 経路と同じ単位)。"""
     return _ingest_chunks(ctx, [text], "text", source_name)
 
 
@@ -410,9 +410,9 @@ def ingest_file(
 ) -> DocumentInfo:
     """アップロードされたファイルを DocumentLoader でテキスト化・チャンク化して取り込む。
 
-    source_kind は "file" 固定（サーバはソース非依存＝どこから来たファイルかは問わない）。
-    source_name は一覧表示用の任意メタで、省略時はアップロード名（filename）を使う
-    （kb-mcp から取得した元ファイルなどは、クライアントが文書名を source_name で渡せる）。
+    source_kind は "file" 固定 (サーバはソース非依存＝どこから来たファイルかは問わない)。
+    source_name は一覧表示用の任意メタで、省略時はアップロード名 (filename) を使う
+    (kb-mcp から取得した元ファイルなどは、クライアントが文書名を source_name で渡せる)。
     """
     ext = Path(filename).suffix.lower()
     if ext not in DocumentLoader.SUPPORTED_EXTENSIONS:
@@ -425,7 +425,7 @@ def ingest_file(
 
 
 def list_documents(ctx: ApiContext) -> list[DocumentInfo]:
-    """キャッシュ済み文書の一覧（新しい順は cache の実装に従う）。"""
+    """キャッシュ済み文書の一覧 (新しい順は cache の実装に従う)。"""
     return [_doc_info(ctx, d) for d in ctx.cache.list_documents()]
 
 
@@ -440,7 +440,7 @@ def get_document(ctx: ApiContext, chash: str) -> DocumentDetail:
 
 
 def delete_document(ctx: ApiContext, chash: str, layer: str | None) -> None:
-    """文書を削除。``layer="ner"`` は NER キャッシュのみ破棄（本文・LLM・draft は残す。D2/D4）。"""
+    """文書を削除。``layer="ner"`` は NER キャッシュのみ破棄 (本文・LLM・draft は残す。D2/D4)。"""
     if layer is None:
         ctx.cache.delete(chash)
     elif layer == "ner":
@@ -450,7 +450,7 @@ def delete_document(ctx: ApiContext, chash: str, layer: str | None) -> None:
 
 
 def patch_document(ctx: ApiContext, chash: str, source_kind: str) -> DocumentInfo:
-    """文書メタを更新（現状 source_kind のみ。D3）。未取込は 404。"""
+    """文書メタを更新 (現状 source_kind のみ。D3)。未取込は 404。"""
     info = _find_doc(ctx, chash)
     if info is None:
         raise HTTPException(404, f"未取込の content_hash です: {chash}")
@@ -461,9 +461,9 @@ def patch_document(ctx: ApiContext, chash: str, source_kind: str) -> DocumentInf
 
 
 # --------------------------------------------------------------------------- #
-# 全体面：/documents/{hash}/analyze・/apply・/draft（設計 §3-3〜§3-4）。
-# analyze/apply は取込済みチャンクを（NER キャッシュ越しに）解析し直す＝ステートレス。
-# span は解析（平坦化後）座標で、analyze の occurrences と apply の selection は同座標系。
+# 全体面：/documents/{hash}/analyze・/apply・/draft (設計 §3-3〜§3-4)。
+# analyze/apply は取込済みチャンクを (NER キャッシュ越しに) 解析し直す＝ステートレス。
+# span は解析 (平坦化後) 座標で、analyze の occurrences と apply の selection は同座標系。
 # --------------------------------------------------------------------------- #
 def _require_chunks(ctx: ApiContext, chash: str) -> list[str]:
     chunks = ctx.cache.get_chunks(chash)
@@ -473,7 +473,7 @@ def _require_chunks(ctx: ApiContext, chash: str) -> list[str]:
 
 
 def _group_votes(group: CandidateGroup) -> dict[str, str]:
-    """実体グループの票を {channel: ラベル（重複は ' / ' 連結）} にまとめる（表示用）。"""
+    """実体グループの票を {channel: ラベル (重複は ' / ' 連結)} にまとめる (表示用)。"""
     per_channel: dict[str, list[str]] = {}
     for ch, label in group.votes:
         labels = per_channel.setdefault(ch, [])
@@ -483,7 +483,7 @@ def _group_votes(group: CandidateGroup) -> dict[str, str]:
 
 
 def run_analyze(ctx: ApiContext, chash: str, req: AnalyzeRequest) -> AnalyzeResponse:
-    """``POST /documents/{hash}/analyze``＝候補一覧＋既定選択を返す（設計 §3-3）。"""
+    """``POST /documents/{hash}/analyze``＝候補一覧＋既定選択を返す (設計 §3-3)。"""
     chunks = _require_chunks(ctx, chash)
     _validate_detection(req.detection)
     _validate_mask_level(req.mask_level)
@@ -520,10 +520,10 @@ def run_analyze(ctx: ApiContext, chash: str, req: AnalyzeRequest) -> AnalyzeResp
 
 
 def run_apply(ctx: ApiContext, chash: str, req: ApplyRequest) -> ApplyResponse:
-    """``POST /documents/{hash}/apply``＝選択 span からマスク結果を作る（設計 §3-4）。
+    """``POST /documents/{hash}/apply``＝選択 span からマスク結果を作る (設計 §3-4)。
 
-    analyze と同じ検出条件で解析し直し（NER はキャッシュ命中で一瞬）、選択に一致する候補だけを
-    出現ごと（expand=False）でマスクする。mapping は /mask と同じ形＝そのまま /unmask に渡せる。
+    analyze と同じ検出条件で解析し直し (NER はキャッシュ命中で一瞬)、選択に一致する候補だけを
+    出現ごと (expand=False) でマスクする。mapping は /mask と同じ形＝そのまま /unmask に渡せる。
     """
     chunks = _require_chunks(ctx, chash)
     _validate_detection(req.detection)
@@ -533,7 +533,7 @@ def run_apply(ctx: ApiContext, chash: str, req: ApplyRequest) -> ApplyResponse:
         chunks,
         detection=req.detection,
         flatten=req.flatten_tables,
-        mask_level="strong",  # apply は selection を使うので閾値は無関係（既定でよい）
+        mask_level="strong",  # apply は selection を使うので閾値は無関係 (既定でよい)
     )
     sel = {(s, e) for s, e in req.selection}
     selected = [c for c in analysis.candidates if (c.start, c.end) in sel]
@@ -545,7 +545,7 @@ def run_apply(ctx: ApiContext, chash: str, req: ApplyRequest) -> ApplyResponse:
 
 
 def get_document_draft(ctx: ApiContext, chash: str) -> DraftBody:
-    """``GET /documents/{hash}/draft``＝手動選択差分を返す（無ければ空）。未取込は 404。"""
+    """``GET /documents/{hash}/draft``＝手動選択差分を返す (無ければ空)。未取込は 404。"""
     _require_chunks(ctx, chash)
     draft = ctx.cache.get_draft(chash)
     if draft is None:
@@ -566,9 +566,9 @@ def save_document_draft(ctx: ApiContext, chash: str, body: DraftBody) -> DraftBo
 
 
 # --------------------------------------------------------------------------- #
-# 全体面：/allowlist・/dictionary（設計 §3-5・エディタ）。load/save_*entries を配線する。
+# 全体面：/allowlist・/dictionary (設計 §3-5・エディタ)。load/save_*entries を配線する。
 # PUT 後は ctx の allowlist / engine.dictionary を再ロードし、以降の analyze/mask に即反映。
-# 書き込みは api のみ（設計 B）。パス未設定なら GET は空・PUT は 409。
+# 書き込みは api のみ (設計 B)。パス未設定なら GET は空・PUT は 409。
 # --------------------------------------------------------------------------- #
 def _require_path(path: str | None, what: str) -> str:
     if path is None:
@@ -577,7 +577,7 @@ def _require_path(path: str | None, what: str) -> str:
 
 
 def get_allowlist(ctx: ApiContext) -> AllowlistBody:
-    """``GET /allowlist``＝除外リストを構造のまま返す（ファイル未作成なら空）。"""
+    """``GET /allowlist``＝除外リストを構造のまま返す (ファイル未作成なら空)。"""
     path = _require_path(ctx.allowlist_path, "除外リスト")
     if not Path(path).exists():
         return AllowlistBody()
@@ -595,7 +595,7 @@ def put_allowlist(ctx: ApiContext, body: AllowlistBody) -> AllowlistBody:
 
 
 def get_dictionary(ctx: ApiContext) -> DictionaryBody:
-    """``GET /dictionary``＝マスク辞書を構造のまま返す（ファイル未作成なら空）。"""
+    """``GET /dictionary``＝マスク辞書を構造のまま返す (ファイル未作成なら空)。"""
     path = _require_path(ctx.dict_path, "マスク辞書")
     if not Path(path).exists():
         return DictionaryBody()

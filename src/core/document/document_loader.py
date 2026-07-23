@@ -67,7 +67,7 @@ class DocumentLoader:
     }
     # fmt: on
 
-    # 軽量モジュールから参照（UI との共有用）
+    # 軽量モジュールから参照 (UI との共有用)
     SUPPORTED_EXTENSIONS = SUPPORTED_DOCUMENT_EXTENSIONS
 
     def __init__(self, loader_mapping: Dict[str, Callable] | None = None):
@@ -108,7 +108,7 @@ class DocumentLoader:
         docs = loader.load()
 
         for doc in docs:
-            # NFKC正規化を適用（全フォーマット共通）
+            # NFKC正規化を適用 (全フォーマット共通)
             doc.page_content = normalize_nfkc(doc.page_content)
             # 基本的なメタデータを追加
             doc.metadata.update(

@@ -5,7 +5,7 @@ Excel to Markdown Loader
 3. マルチレベルヘッダー対応
 4. クリーニング品質向上 (全角スペース対応)
 5. メタデータキーを file_type から source_type に変更
-6. ベクトルDB格納用にMarkdown圧縮機能を追加（約30-40%のサイズ削減）
+6. ベクトルDB格納用にMarkdown圧縮機能を追加 (約30-40%のサイズ削減)
 """
 
 from typing import List, Union
@@ -32,7 +32,7 @@ class ExcelToMarkdownLoader:
         Excel ファイルを読み込み、各シートを Markdown 化して Document のリストとして返す
 
         Returns:
-            Document のリスト（各シートが1つの Document）
+            Document のリスト (各シートが1つの Document)
         """
         documents = []
 
@@ -114,12 +114,12 @@ class ExcelToMarkdownLoader:
         # NFKC正規化は DocumentLoader.load_document() で一元的に適用される
         df = df.map(lambda x: str(x).strip())
 
-        # 5. セル内の改行を空白に置き換え（Markdown表の行構造を維持）
+        # 5. セル内の改行を空白に置き換え (Markdown表の行構造を維持)
         # pandas.to_markdown() はセル内の \n を複数行に分割するため、
         # 1つのセルとして保持するために改行を空白に置換する
         df = df.map(lambda x: x.replace("\n", " ") if isinstance(x, str) else x)
 
-        # 6. 完全に空の行を削除（すべてのセルが空文字列('')の行を削除）
+        # 6. 完全に空の行を削除 (すべてのセルが空文字列('')の行を削除)
         df = df[df.apply(lambda row: any(cell != "" for cell in row), axis=1)]
 
         # 7. 完全に空の列を削除
@@ -184,7 +184,7 @@ class ExcelToMarkdownLoader:
                 cells = line.split("|")
                 # 各セルの空白を除去
                 stripped_cells = [cell.strip() for cell in cells]
-                # パイプで再結合（空白なし）
+                # パイプで再結合 (空白なし)
                 compacted_line = "|".join(stripped_cells)
                 compacted_lines.append(compacted_line)
             else:

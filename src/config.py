@@ -1,10 +1,10 @@
-"""チャンク分割の設定（kb-mcp から移植・チャンク設定のみ抜粋）。
+"""チャンク分割の設定 (kb-mcp から移植・チャンク設定のみ抜粋)。
 
 kb-mcp 本体の `src/config.py` は埋め込み・ストレージ等も含む大きな設定だが、
 data-redactor では NER 前のチャンク分割にしか使わないため、`SemanticRAGTextSplitter`
 が必要とする `ChunkingConfig` / `FileTypeChunkingSettings` だけを移植している。
-値（chunk_size / chunk_overlap）は kb-mcp と同一にして、RAG 格納時と同じ単位で
-チャンクされるようにしている（chunk_size はトークン数＝tiktoken cl100k_base）。
+値 (chunk_size / chunk_overlap) は kb-mcp と同一にして、RAG 格納時と同じ単位で
+チャンクされるようにしている (chunk_size はトークン数＝tiktoken cl100k_base)。
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ class FileTypeChunkingSettings:
 
 @dataclass
 class ChunkingConfig:
-    """テキスト分割の設定（ファイルタイプ別）。"""
+    """テキスト分割の設定 (ファイルタイプ別)。"""
 
-    # ファイルタイプ別の設定（kb-mcp の値と一致させる）
+    # ファイルタイプ別の設定 (kb-mcp の値と一致させる)
     filetype_settings: Dict[str, FileTypeChunkingSettings] = field(
         default_factory=lambda: {
             "txt": FileTypeChunkingSettings(chunk_size=1000, chunk_overlap=100),
@@ -45,5 +45,5 @@ class ChunkingConfig:
     )
 
     def get_settings(self, file_type: str) -> FileTypeChunkingSettings:
-        """ファイルタイプに応じた設定を取得（未知タイプは default）。"""
+        """ファイルタイプに応じた設定を取得 (未知タイプは default)。"""
         return self.filetype_settings.get(file_type, self.filetype_settings["default"])

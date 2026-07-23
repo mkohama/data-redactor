@@ -2,8 +2,8 @@
 pdfminer.six を使用した PDF ローダー
 
 [pypdf から pdfminer.six へ移行した理由]
-日本語PDFの一部（特に古い形式）には、フォント内の文字ID（CID）から
-Unicode への変換テーブル（ToUnicode CMap）が埋め込まれていないものがある。
+日本語PDFの一部 (特に古い形式) には、フォント内の文字ID (CID) から
+Unicode への変換テーブル (ToUnicode CMap) が埋め込まれていないものがある。
 
 pypdf はこの変換テーブルがないと CID をそのまま Unicode コードポイントとして
 解釈するため、日本語がチベット文字やオリヤー文字などに化けてしまう。
@@ -36,7 +36,7 @@ class PdfLoader:
         PDFファイルを読み込み、ページごとの Document リストとして返す
 
         Returns:
-            Document のリスト（ページごとに1つ、page メタデータ付き）
+            Document のリスト (ページごとに1つ、page メタデータ付き)
         """
         try:
             from pdfminer.high_level import extract_pages

@@ -1,14 +1,14 @@
-"""data-redactor の統一コマンドラインインタフェース（薄い表示層）。
+"""data-redactor の統一コマンドラインインタフェース (薄い表示層)。
 
 低レベルな ``uv run main.py ...`` / ``uv run streamlit run src/ui/app.py`` の代わりに、
 1 つのエントリポイント ``data-redactor`` にサブコマンドをぶら下げる。
 
     uv run data-redactor serve              # マスキング HTTP API を起動
-    uv run data-redactor ui                 # Streamlit UI を起動（API のクライアント）
-    uv run data-redactor dev                # API＋UI を 1 コマンドで起動（ローカル開発）
+    uv run data-redactor ui                 # Streamlit UI を起動 (API のクライアント)
+    uv run data-redactor dev                # API＋UI を 1 コマンドで起動 (ローカル開発)
     uv run data-redactor ner <file>         # ファイル/テキストを NER → HTML 表示
     uv run data-redactor debug <file>       # トークンの品詞 / NER ラベルを観察
-    uv run data-redactor check              # 品質ゲート（ruff + mypy）
+    uv run data-redactor check              # 品質ゲート (ruff + mypy)
 
 実際の抽出は src.ner.NerEngine が担当する。本ファイルは入力取得・引数処理・
 コンソール出力・displaCy / Streamlit への受け渡しだけを行う。
@@ -50,12 +50,12 @@ from src.ner import (
 )
 from src.sources import SAMPLE_TEXT, load_chunks_from_file
 
-# プロジェクトルート（src/ui/app.py や品質ゲート対象の解決に使う）
+# プロジェクトルート (src/ui/app.py や品質ゲート対象の解決に使う)
 _ROOT = Path(__file__).resolve().parent.parent
 # マスク辞書の既定パス
 _DEFAULT_DICT = _ROOT / "data" / "mask_dict.yaml"
-# pii-masker（submodule）追従に使う場所。detector_version の静的部分（pii-masker@<hash>）は
-#   src/detector.py（UI 非依存の共有モジュール）に焼き込まれている（旧 app.py から移設済み）。
+# pii-masker (submodule) 追従に使う場所。detector_version の静的部分 (pii-masker@<hash>) は
+#   src/detector.py (UI 非依存の共有モジュール) に焼き込まれている (旧 app.py から移設済み)。
 _SUBMODULE = _ROOT / "external" / "pii-masker"
 _DETECTOR_FILE = _ROOT / "src" / "detector.py"
 _DETECTOR_HASH_RE = re.compile(r"pii-masker@([0-9a-fA-F]+)")
@@ -64,18 +64,18 @@ _DETECTOR_HASH_RE = re.compile(r"pii-masker@([0-9a-fA-F]+)")
 def _ensure_utf8_stdout() -> None:
     """Windows コンソールでの日本語 UTF-8 出力の文字化けを避ける。
 
-    端末が対応していれば stdout を UTF-8 に切り替える（未対応なら
-    debug の --out でファイル出力すれば確実に読める）。
+    端末が対応していれば stdout を UTF-8 に切り替える (未対応なら
+    debug の --out でファイル出力すれば確実に読める)。
     """
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
 
 def _load_chunks(file: Path | None, text: str | None) -> list[str]:
-    """ファイル or テキスト or サンプルから解析対象チャンク（テキストのリスト）を得る。
+    """ファイル or テキスト or サンプルから解析対象チャンク (テキストのリスト) を得る。
 
-    ファイルは kb-mcp と同じ単位でチャンク化する（長文でも SudachiPy 上限で
-    落ちず、検索ヒット単位と結果が揃う）。テキスト/サンプルは 1 チャンク扱い。
+    ファイルは kb-mcp と同じ単位でチャンク化する (長文でも SudachiPy 上限で
+    落ちず、検索ヒット単位と結果が揃う)。テキスト/サンプルは 1 チャンク扱い。
     """
     if text:
         return [text]
@@ -88,10 +88,10 @@ def _load_chunks(file: Path | None, text: str | None) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# debug 用ヘルパー（トークンの品詞 / NER ラベルを並べて recall の穴を観察する）
+# debug 用ヘルパー (トークンの品詞 / NER ラベルを並べて recall の穴を観察する)
 # --------------------------------------------------------------------------- #
 def _proper_subtype(tag: str) -> str | None:
-    """SudachiPy 品詞から固有名詞のサブタイプを返す（固有名詞でなければ None）。
+    """SudachiPy 品詞から固有名詞のサブタイプを返す (固有名詞でなければ None)。
 
     例: ``名詞-固有名詞-人名-姓`` → ``人名`` / ``名詞-固有名詞-一般`` → ``一般``。
     """
@@ -103,7 +103,7 @@ def _proper_subtype(tag: str) -> str | None:
 
 
 def _is_interesting(info: TokenInfo) -> bool:
-    """既定表示の対象か（NER 検出 / 固有名詞 / 語彙外のいずれか）。"""
+    """既定表示の対象か (NER 検出 / 固有名詞 / 語彙外のいずれか)。"""
     return bool(info.ent_type) or _proper_subtype(info.tag) is not None or info.is_oov
 
 
@@ -128,11 +128,11 @@ def _token_table_lines(infos: list[TokenInfo], *, show_all: bool) -> list[str]:
 
 
 def _token_summary_lines(infos: list[TokenInfo]) -> list[str]:
-    """recall の穴を測る要約の行を返す（実値を含まず共有可）。"""
+    """recall の穴を測る要約の行を返す (実値を含まず共有可)。"""
     proper = [i for i in infos if _proper_subtype(i.tag) is not None]
     by_sub = Counter(_proper_subtype(i.tag) for i in proper)
     ner_tagged = [i for i in infos if i.ent_type]
-    # 固有名詞だが NER が拾えなかった = Sudachi 品詞でのみ救える候補（recall の穴）
+    # 固有名詞だが NER が拾えなかった = Sudachi 品詞でのみ救える候補 (recall の穴)
     missed = [i for i in proper if not i.ent_type]
 
     sub = " / ".join(f"{k}:{v}" for k, v in sorted(by_sub.items())) or "なし"
@@ -155,7 +155,7 @@ def _token_summary_lines(infos: list[TokenInfo]) -> list[str]:
 # --------------------------------------------------------------------------- #
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli() -> None:
-    """GiNZA 日本語固有表現抽出（NER）ツール。
+    """GiNZA 日本語固有表現抽出 (NER) ツール。
 
     LLM に渡す前の機密情報マスキングを目的に、ファイル/テキスト/kb-mcp の文書を
     テキスト化・チャンク化して NER し、displaCy で表示する。
@@ -167,7 +167,7 @@ def cli() -> None:
 )
 @click.argument("streamlit_args", nargs=-1, type=click.UNPROCESSED)
 def ui(streamlit_args: tuple[str, ...]) -> None:
-    """Streamlit UI を起動する（`streamlit run src/ui/app.py` のラッパ）。
+    """Streamlit UI を起動する (`streamlit run src/ui/app.py` のラッパ)。
 
     追加引数はそのまま streamlit に渡す。例: `data-redactor ui --server.port 8502`
     """
@@ -176,7 +176,7 @@ def ui(streamlit_args: tuple[str, ...]) -> None:
     try:
         code = subprocess.call(cmd)
     except KeyboardInterrupt:
-        code = 0  # Ctrl+C はサーバ停止の通常手順。正常終了として扱う（"Aborted!" を出さない）
+        code = 0  # Ctrl+C はサーバ停止の通常手順。正常終了として扱う ("Aborted!" を出さない)
     raise SystemExit(code)
 
 
@@ -190,11 +190,11 @@ def ui(streamlit_args: tuple[str, ...]) -> None:
 )
 @click.argument("uvicorn_args", nargs=-1, type=click.UNPROCESSED)
 def serve(host: str, port: int, reload_: bool, uvicorn_args: tuple[str, ...]) -> None:
-    """マスキング HTTP API を起動する（`uvicorn src.api.app:app` のラッパ）。
+    """マスキング HTTP API を起動する (`uvicorn src.api.app:app` のラッパ)。
 
-    起動時に GiNZA モデルを 1 回ロードし、`data/cache.db` を単一所有する（設計 B）。
-    既定ポートは 8509（kb-mcp の既定 8000 と衝突させないため。UI の MASK_API_URL 既定も 8509・
-    Docker では compose の api サービスも 8509、UI は 8508）。
+    起動時に GiNZA モデルを 1 回ロードし、`data/cache.db` を単一所有する (設計 B)。
+    既定ポートは 8509 (kb-mcp の既定 8000 と衝突させないため。UI の MASK_API_URL 既定も 8509・
+    Docker では compose の api サービスも 8509、UI は 8508)。
     追加引数はそのまま uvicorn に渡す。例: `data-redactor serve --port 8510`
     """
     cmd = [
@@ -217,11 +217,11 @@ def serve(host: str, port: int, reload_: bool, uvicorn_args: tuple[str, ...]) ->
 
 
 def _terminate(proc: subprocess.Popen) -> None:
-    """バックグラウンドの子プロセス（とその子）を確実に止める。
+    """バックグラウンドの子プロセス (とその子) を確実に止める。
 
     ``--reload`` の uvicorn はリローダ＋ワーカーの複数プロセスになり、親だけ terminate すると
     ワーカーがポートを掴んだまま孤児化しうる。プロセスツリーごと落とす：Windows は
-    ``taskkill /T``、POSIX は起動時に切ったセッション（プロセスグループ）へ SIGTERM。
+    ``taskkill /T``、POSIX は起動時に切ったセッション (プロセスグループ) へ SIGTERM。
     """
     if proc.poll() is not None:
         return
@@ -232,7 +232,7 @@ def _terminate(proc: subprocess.Popen) -> None:
             stderr=subprocess.DEVNULL,
         )
     else:
-        # killpg / getpgid は POSIX 専用（この分岐も POSIX のみ）。Windows で解析する mypy が
+        # killpg / getpgid は POSIX 専用 (この分岐も POSIX のみ)。Windows で解析する mypy が
         # 欠落属性として誤検出するので型無視で抑える。
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # type: ignore[attr-defined]
@@ -247,12 +247,12 @@ def _terminate(proc: subprocess.Popen) -> None:
 def _wait_for_api(
     health_url: str, proc: subprocess.Popen, *, timeout: float = 180.0
 ) -> bool:
-    """API の ``/health`` が 200 を返す（＝GiNZA ロード完了）まで待つ。
+    """API の ``/health`` が 200 を返す (＝GiNZA ロード完了) まで待つ。
 
     dev では UI が API より先に立ち上がり、モデルロード中の API に繋がらず「接続できません」と
     誤表示してしまう。UI を起動する前にここで待ってその窓を消す。社内プロキシ環境でも localhost へ
     直結するよう no-proxy opener を使う。API プロセスが落ちたら False、timeout でも False を返す
-    （呼び出し側は警告して UI を起動する）。
+    (呼び出し側は警告して UI を起動する)。
     """
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     start = time.monotonic()
@@ -264,7 +264,7 @@ def _wait_for_api(
                 if resp.status == 200:
                     return True
         except (urllib.error.URLError, OSError):
-            pass  # まだ起動中（接続拒否など）＝待つ
+            pass  # まだ起動中 (接続拒否など) ＝待つ
         time.sleep(1.0)
     return False
 
@@ -290,14 +290,14 @@ def _wait_for_api(
     help="API をコード変更でホットリロード（開発用）。",
 )
 def dev(host: str, api_port: int, ui_port: int, reload_: bool) -> None:
-    """API サーバと Streamlit UI を 1 コマンドでまとめて起動する（ローカル開発用）。
+    """API サーバと Streamlit UI を 1 コマンドでまとめて起動する (ローカル開発用)。
 
-    `data-redactor serve`（API）をバックグラウンドで、`data-redactor ui`（UI）を
-    フォアグラウンドで起動する。UI は環境変数 `MASK_API_URL` でこの API を指す（設計 B）。
+    `data-redactor serve` (API) をバックグラウンドで、`data-redactor ui` (UI) を
+    フォアグラウンドで起動する。UI は環境変数 `MASK_API_URL` でこの API を指す (設計 B)。
     Ctrl+C で UI を止めると、API も後片付けで停止する。
 
-    **API の /health が応答する（GiNZA ロード完了）まで待ってから UI を起動する**。UI が先に出て
-    ロード中の API に繋がらず「接続できません」と誤表示するのを防ぐため（cold start で数十秒待つ）。
+    **API の /health が応答する (GiNZA ロード完了) まで待ってから UI を起動する**。UI が先に出て
+    ロード中の API に繋がらず「接続できません」と誤表示するのを防ぐため (cold start で数十秒待つ)。
     """
     app = _ROOT / "src" / "ui" / "app.py"
     api_url = f"http://{host}:{api_port}"
@@ -325,7 +325,7 @@ def dev(host: str, api_port: int, ui_port: int, reload_: bool) -> None:
         "--server.port",
         str(ui_port),
     ]
-    # UI（別プロセス）へ接続先を渡す。POSIX は API を別セッションにして、Ctrl+C は
+    # UI (別プロセス) へ接続先を渡す。POSIX は API を別セッションにして、Ctrl+C は
     # フォアグラウンドの UI だけに届かせ、API は finally の後片付けで確実に落とす。
     ui_env = {**os.environ, "MASK_API_URL": api_url}
     popen_kw: dict = {} if os.name == "nt" else {"start_new_session": True}
@@ -421,7 +421,7 @@ def ner(
         click.echo(f"{ent.text:<16}{ent.label:<22}{ent.start:>5}{ent.end:>5}")
 
     # --- displaCy 表示 ---
-    # 色は（フィルタに関わらず安定させるため）モデルの全ラベルから作る
+    # 色は (フィルタに関わらず安定させるため) モデルの全ラベルから作る
     colors = build_color_map(engine.available_labels())
 
     if serve:
@@ -485,7 +485,7 @@ def debug(
     """各トークンの SudachiPy 品詞 / GiNZA NER ラベルを並べて観察する。
 
     NER が逃した固有名詞を、文脈非依存な Sudachi の品詞で拾えるか確認する
-    （マスキングの recall の穴を実データで特定するため）。
+    (マスキングの recall の穴を実データで特定するため)。
     """
     chunks = _load_chunks(file, text)
     models = list(AVAILABLE_MODELS) if both_models else [model]
@@ -511,11 +511,11 @@ def debug(
 
 
 def _audit_lines(groups: list[CandidateGroup], *, with_surface: bool) -> list[str]:
-    """各実体について「解決結果・票の分布・全票」を 1 行にする（確信度づけの監査用）。
+    """各実体について「解決結果・票の分布・全票」を 1 行にする (確信度づけの監査用)。
 
-    票の分布 (by-cat) は engine.tally_votes と同じ集計（カテゴリ別チャネル数・折衷ルール適用）を使う
+    票の分布 (by-cat) は engine.tally_votes と同じ集計 (カテゴリ別チャネル数・折衷ルール適用) を使う
     ＝確信度づけの実ロジックを監査できる。解決カテゴリが最多票でない／票が複数カテゴリに割れている
-    実体には ``split⚠`` を付ける。with_surface=True のときだけ表層を末尾に付ける（機密。共有禁止）。
+    実体には ``split⚠`` を付ける。with_surface=True のときだけ表層を末尾に付ける (機密。共有禁止)。
     """
     lines: list[str] = []
     for i, g in enumerate(groups, start=1):
@@ -539,13 +539,13 @@ def _audit_lines(groups: list[CandidateGroup], *, with_surface: bool) -> list[st
 def _embedded_leak_lines(
     dictionary: MaskDictionary, analysis: MaskAnalysis, *, with_surface: bool
 ) -> list[str]:
-    """辞書語を部分文字列として内包する未一致トークン（SmashMark/SonyXXX 型）を列挙する。
+    """辞書語を部分文字列として内包する未一致トークン (SmashMark/SonyXXX 型) を列挙する。
 
-    トークン単位辞書では取りこぼす＝**真の漏れ候補**。Stage 3（部分一致）の要否を実データで
+    トークン単位辞書では取りこぼす＝**真の漏れ候補**。Stage 3 (部分一致) の要否を実データで
     見極めるための監査。表層・canonical は機密なので、redacted ではカテゴリ別件数のみ出す。
 
-    対象は **商標・社名のみ**（部分一致したいのはこの distinctive 語）。人名・地名は意図的に
-    token 単位のままなので除外する（`小浜市⊃小浜` のような `〇〇市/〇〇区` ノイズを出さない）。
+    対象は **商標・社名のみ** (部分一致したいのはこの distinctive 語)。人名・地名は意図的に
+    token 単位のままなので除外する (`小浜市⊃小浜` のような `〇〇市/〇〇区` ノイズを出さない)。
     """
     target = {"商標", "社名"}
     hits = [
@@ -625,7 +625,7 @@ def mask(
     audit_surface: bool,
     audit_out: Path | None,
 ) -> None:
-    """機密情報を検出してマスク（伏せ字）する。確定/強は自動マスク、弱はレビュー候補。"""
+    """機密情報を検出してマスク (伏せ字) する。確定/強は自動マスク、弱はレビュー候補。"""
     chunks = _load_chunks(file, text)
 
     path = dict_path or (_DEFAULT_DICT if _DEFAULT_DICT.exists() else None)
@@ -638,7 +638,7 @@ def mask(
     click.echo(f"モデル: {', '.join(used)} を読み込み中 ...")
     engine = MaskingEngine(dictionary=dictionary, models=used)
     analysis = engine.analyze(chunks, flatten_tables=flatten)
-    # 実体（表層）ごとに集約。確定/強を自動マスク（全出現に展開）。
+    # 実体 (表層) ごとに集約。確定/強を自動マスク (全出現に展開)。
     groups = engine.group_candidates(analysis.candidates)
     selected = [m for g in groups if g.confidence in ("確定", "強") for m in g.members]
     result = engine.apply(analysis, selected)
@@ -694,13 +694,13 @@ def mask(
 
 
 def _run_lint(tool: str, args: list[str]) -> int:
-    """ruff / mypy を**堅牢に**実行する（PATH 解決 → uvx フォールバック → 実行不能なら警告して 0）。
+    """ruff / mypy を**堅牢に**実行する (PATH 解決 → uvx フォールバック → 実行不能なら警告して 0)。
 
-    実行機ごとに ruff/mypy の入り方が違う（グローバル Python / venv / uvx 経由）。素の実行ファイル名
-    だけに頼ると PATH に無い環境で ``FileNotFoundError``（WinError 2）で全体が落ちる。順に試す：
-    ①PATH 上の実体（``shutil.which``）②``uvx <tool>``（＝プロジェクトの手動運用と同じエフェメラル実行）
-    ③``uv tool run <tool>``（uvx が PATH に無い場合の等価コマンド）。どれも起動できなければ警告して
-    0 を返す（検証は諦めるが、sync 本体＝submodule 更新・stage は成功済みなので処理全体は落とさない）。
+    実行機ごとに ruff/mypy の入り方が違う (グローバル Python / venv / uvx 経由)。素の実行ファイル名
+    だけに頼ると PATH に無い環境で ``FileNotFoundError`` (WinError 2) で全体が落ちる。順に試す：
+    ①PATH 上の実体 (``shutil.which``) ②``uvx <tool>`` (＝プロジェクトの手動運用と同じエフェメラル実行)
+    ③``uv tool run <tool>`` (uvx が PATH に無い場合の等価コマンド)。どれも起動できなければ警告して
+    0 を返す (検証は諦めるが、sync 本体＝submodule 更新・stage は成功済みなので処理全体は落とさない)。
     """
     exe = shutil.which(tool)
     candidates: list[list[str]] = []
@@ -721,7 +721,7 @@ def _run_lint(tool: str, args: list[str]) -> int:
 
 @cli.command()
 def check() -> None:
-    """品質ゲート（ruff + mypy）を実行する。"""
+    """品質ゲート (ruff + mypy) を実行する。"""
     targets = ["src", "main.py"]  # app.py は src/ui/ 配下に移動＝"src" に含まれる
     click.echo("$ ruff check " + " ".join(targets))
     rc_ruff = _run_lint("ruff", ["check", *targets])
@@ -731,21 +731,21 @@ def check() -> None:
 
 
 def _git_out(args: list[str], cwd: Path) -> str:
-    """git をサブプロセスで実行し標準出力（strip 済み）を返す。失敗時は CalledProcessError。"""
+    """git をサブプロセスで実行し標準出力 (strip 済み) を返す。失敗時は CalledProcessError。"""
     return subprocess.run(
         ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
     ).stdout.strip()
 
 
 def _pii_masker_ene_types(sub: Path) -> set[str] | None:
-    """pii-masker が宣言する ENE type 名の集合を返す（取れなければ None）。
+    """pii-masker が宣言する ENE type 名の集合を返す (取れなければ None)。
 
-    出所は ``schema.py`` の ``PII_TYPES``（detector のプロンプトと GT で揃える語彙の正本。
-    全 target を通じて LLM が出しうる type の宣言一覧で、個別 target 専用の ``Trademark`` も含む）。
+    出所は ``schema.py`` の ``PII_TYPES`` (detector のプロンプトと GT で揃える語彙の正本。
+    全 target を通じて LLM が出しうる type の宣言一覧で、個別 target 専用の ``Trademark`` も含む)。
     かつては汎用検出プロンプト本文を正規表現で走査していたが、(1) プロンプトが ``targets.py`` へ移り、
     (2) 汎用プロンプト(pii)には ``Trademark`` が無いため「マップにあるがプロンプトに無い」と毎回
-    誤警告が出た。そこで宣言一覧（PII_TYPES）を直接読む方式に変えた（import せず list リテラルを
-    走査＝依存・副作用なし）。``PII_TYPES = [...]`` の書式が大きく変わると None を返す（手動確認を促す）。
+    誤警告が出た。そこで宣言一覧 (PII_TYPES) を直接読む方式に変えた (import せず list リテラルを
+    走査＝依存・副作用なし)。``PII_TYPES = [...]`` の書式が大きく変わると None を返す (手動確認を促す)。
     """
     schema = sub / "src" / "pii_masker" / "schema.py"
     if not schema.exists():
@@ -769,15 +769,15 @@ def _pii_masker_ene_types(sub: Path) -> set[str] | None:
     "--skip-tests", is_flag=True, help="ruff/mypy/pytest をスキップする（速い確認用）。"
 )
 def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
-    """pii-masker（submodule）を更新し、detector_version の追従と検証をまとめて行う。
+    """pii-masker (submodule) を更新し、detector_version の追従と検証をまとめて行う。
 
-    機械的な手順を自動化する：① submodule のポインタ更新（REF 省略時は追跡ブランチの最新／
-    REF 指定でそのコミット・タグへ）→ ② 新 HEAD の短縮ハッシュ取得 → ③ src/detector.py の
-    _DETECTOR_STATIC の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュを自動ミスさせる）
+    機械的な手順を自動化する：① submodule のポインタ更新 (REF 省略時は追跡ブランチの最新／
+    REF 指定でそのコミット・タグへ) → ② 新 HEAD の短縮ハッシュ取得 → ③ src/detector.py の
+    _DETECTOR_STATIC の `pii-masker@<hash>` を書き換え (= LLM 検出キャッシュを自動ミスさせる)
     → ④ ENE type ドリフト警告と submodule の変更点表示 → ⑤ ruff/mypy/pytest。
 
-    **コミットはしない**（submodule ポインタと src/detector.py を stage するだけ）。インターフェース契約・
-    ENE マップ更新・実機 e2e（az login）は人手で確認してからコミットすること（ENE マップは版バンプ不要）。
+    **コミットはしない** (submodule ポインタと src/detector.py を stage するだけ)。インターフェース契約・
+    ENE マップ更新・実機 e2e (az login) は人手で確認してからコミットすること (ENE マップは版バンプ不要)。
     """
     from src.masking.engine import _ENE_TO_CATEGORY
 
@@ -813,7 +813,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
     new_hash = _git_out(["rev-parse", "--short", "HEAD"], cwd=_SUBMODULE)
     click.echo(f"pii-masker HEAD: {new_hash}")
 
-    # ③ detector_version の書き換え（ハッシュ部分のみ。win… は env 由来で自動・type-map は版に含めない）
+    # ③ detector_version の書き換え (ハッシュ部分のみ。win… は env 由来で自動・type-map は版に含めない)
     if old_hash == new_hash:
         click.echo("detector_version のハッシュは最新です（書き換え不要）。")
     elif old_hash is None:
@@ -831,7 +831,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
             f"pii-masker@{new_hash} に書き換えました（LLM キャッシュが自動ミス→再取得になります）。"
         )
 
-    # ④-a submodule の変更点（契約 / プロンプトを目視するための手がかり）
+    # ④-a submodule の変更点 (契約 / プロンプトを目視するための手がかり)
     if old_hash and old_hash != new_hash:
         click.echo("\n===== pii-masker の変更（要目視：契約 / プロンプト） =====")
         try:
@@ -844,7 +844,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
             "schema.py・locate.py の変更は src/llm のアダプタ契約（detect/locate_all の戻り値）に影響します。"
         )
 
-    # ④-b ENE type ドリフト（schema.py の PII_TYPES vs _ENE_TO_CATEGORY）
+    # ④-b ENE type ドリフト (schema.py の PII_TYPES vs _ENE_TO_CATEGORY)
     types = _pii_masker_ene_types(_SUBMODULE)
     click.echo("\n===== ENE type ドリフト検査 =====")
     if types is None:
@@ -870,7 +870,7 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
                 + ", ".join(extra)
             )
 
-    # ⑤ stage（コミットはしない）
+    # ⑤ stage (コミットはしない)
     subprocess.call(["git", "add", "external/pii-masker", "src/detector.py"], cwd=_ROOT)
     click.echo(
         "\nstage しました（external/pii-masker, src/detector.py）。"
@@ -889,8 +889,8 @@ def sync_pii_masker(ref: str | None, no_update: bool, skip_tests: bool) -> None:
         if rc_ruff or rc_mypy or rc_test:
             click.echo("⚠ 検証で失敗があります。修正してからコミットしてください。")
 
-    # 残りの手動チェックリスト（pii-masker 更新で発生する作業のみ。窓ポリシー win… は env で調整する
-    # こちら都合の設定＝pii-masker 更新とは別の作業なので、ここには載せない）。
+    # 残りの手動チェックリスト (pii-masker 更新で発生する作業のみ。窓ポリシー win… は env で調整する
+    # こちら都合の設定＝pii-masker 更新とは別の作業なので、ここには載せない)。
     click.echo(
         "\n===== 残りの手動ステップ =====\n"
         "1. 上の ENE ドリフト・submodule 差分を確認し、必要なら _ENE_TO_CATEGORY を更新（版バンプ不要）\n"

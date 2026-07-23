@@ -24,7 +24,7 @@ class MarkdownSplitter(BaseSplitter):
     同一チャンク内でのヘッダー重複を避けるため、コンテキストアウェアなマージを行う。
     """
 
-    # ヘッダー定義（h1〜h9）
+    # ヘッダー定義 (h1〜h9)
     HEADERS_TO_SPLIT_ON = [
         ("#", "h1"),
         ("##", "h2"),
@@ -67,7 +67,7 @@ class MarkdownSplitter(BaseSplitter):
         current_chunk_text = ""
         current_chunk_metadata = document.metadata.copy()
 
-        # 直前のセクションのヘッダーライン（重複排除用）
+        # 直前のセクションのヘッダーライン (重複排除用)
         current_chunk_last_header_lines: List[str] = []
 
         # 設定取得
@@ -85,7 +85,7 @@ class MarkdownSplitter(BaseSplitter):
                 if key in split.metadata:
                     section_header_lines.append(f"{tag} {split.metadata[key]}")
 
-            # チャンク構築時のテキスト決定（重複排除ロジック）
+            # チャンク構築時のテキスト決定 (重複排除ロジック)
             content_to_append = self._build_content_to_append(
                 current_chunk_text,
                 section_header_lines,
@@ -169,7 +169,7 @@ class MarkdownSplitter(BaseSplitter):
         page_content: str,
     ) -> str:
         """
-        追加するコンテンツを構築（重複排除ロジック）
+        追加するコンテンツを構築 (重複排除ロジック)
         """
         if not current_chunk_text:
             # バッファが空 -> 全ヘッダー + 本文
@@ -215,12 +215,12 @@ class MarkdownSplitter(BaseSplitter):
         """
         if self._fallback_splitter is None:
 
-            # Markdown用の separator（ヘッダー以外）
+            # Markdown用の separator (ヘッダー以外)
             # fmt: off
             separators = [
                 # 見出しレベルは前段で処理
 
-                # テーブルっぽい行の前（ヘッダー行 + 区切り行のパターン）
+                # テーブルっぽい行の前 (ヘッダー行 + 区切り行のパターン)
                 r"\n+(?=\|[^\n]+\|[^\n]*\n\|[-:\s|]+\|)",
 
                 # HTMLテーブルの前
@@ -229,7 +229,7 @@ class MarkdownSplitter(BaseSplitter):
                 # コードブロックの前 (``` のチャンクができたりするので対象外...`)
                 # r"```\n",
 
-                # 階層的番号（例: "1. ", "1.1. ", "2.3.4. "）
+                # 階層的番号 (例: "1. ", "1.1. ", "2.3.4. ")
                 r"\n+\s*(?=\d+(?:\.\d+)*\.\s*[^#\n]+)",
 
                 # 段落区切り
@@ -241,7 +241,7 @@ class MarkdownSplitter(BaseSplitter):
                 # 日本語の句読点など(句点/感嘆符/疑問符) - 肯定後読み
                 r"(?<=[。！？])",
 
-                # 英語圏の句読点 + スペース（ピリオド、感嘆符、疑問符）
+                # 英語圏の句読点 + スペース (ピリオド、感嘆符、疑問符)
                 r"\.\s",
                 r"!\s",
                 r"\?\s",
@@ -249,7 +249,7 @@ class MarkdownSplitter(BaseSplitter):
                 # 単語区切り(連続スペース)
                 r"\s+",
 
-                # ※ "文字単位" 分割は安全な別処理で対応（ここには含めない）
+                # ※ "文字単位" 分割は安全な別処理で対応 (ここには含めない)
             ]
             # fmt: on
 

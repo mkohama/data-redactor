@@ -19,13 +19,13 @@ from src.logger import log
 
 class WordToMarkdownLoader:
     """
-    拡張Wordファイルローダー（Unstructured代替・高機能実装）
+    拡張Wordファイルローダー (Unstructured代替・高機能実装)
 
     Unstructuredから着想を得た以下の機能を実装:
-    - スタイルベースの見出し検出（Heading 1-9 → Markdown見出し）
-    - リスト項目の検出（List系スタイル → Markdown箇条書き）
-    - ハイパーリンクの保持（Markdownリンク形式）
-    - 強調テキストの保持（太字・イタリック → Markdown形式）
+    - スタイルベースの見出し検出 (Heading 1-9 → Markdown見出し)
+    - リスト項目の検出 (List系スタイル → Markdown箇条書き)
+    - ハイパーリンクの保持 (Markdownリンク形式)
+    - 強調テキストの保持 (太字・イタリック → Markdown形式)
     - 画像の位置記録
     """
 
@@ -75,7 +75,7 @@ class WordToMarkdownLoader:
             file_path: Wordファイルのパス (.docx)
             extract_tables: 表を抽出するかどうか
             extract_images: 画像の位置を記録するかどうか
-            preserve_formatting: 強調テキスト（太字・イタリック）を保持するかどうか
+            preserve_formatting: 強調テキスト (太字・イタリック) を保持するかどうか
         """
         self.file_path = Path(file_path)
         self.extract_tables = extract_tables
@@ -96,7 +96,7 @@ class WordToMarkdownLoader:
         Wordファイルを読み込み、Document のリストとして返す
 
         Returns:
-            Document のリスト（通常は1つ）
+            Document のリスト (通常は1つ)
         """
         try:
             doc = DocxDocument(str(self.file_path))
@@ -175,7 +175,7 @@ class WordToMarkdownLoader:
             is_numbered = "Number" in style_name
             prefix = "1." if is_numbered else "-"
 
-            # インデントレベルの取得（List 2, List 3等）
+            # インデントレベルの取得 (List 2, List 3等)
             indent_level = self._get_list_indent_level(style_name)
             indent = "  " * indent_level
 
@@ -223,7 +223,7 @@ class WordToMarkdownLoader:
         # paragraph.textを使用してURLパターンを検出する簡易実装
         full_text = "".join(result_parts)
 
-        # ハイパーリンクがある場合の処理（python-docx 0.8.11+）
+        # ハイパーリンクがある場合の処理 (python-docx 0.8.11+)
         if hasattr(paragraph, "hyperlinks") and paragraph.hyperlinks:
             # 既存のハイパーリンクをMarkdown形式に変換
             for hyperlink in paragraph.hyperlinks:
@@ -237,7 +237,7 @@ class WordToMarkdownLoader:
     def _run_contains_image(self, run: Any) -> bool:
         """ランに画像が含まれているか判定"""
         try:
-            # ランのXML要素に画像要素（drawing）があるか確認
+            # ランのXML要素に画像要素 (drawing) があるか確認
             return len(run._element.xpath(".//w:drawing")) > 0
         except Exception:
             return False
@@ -281,7 +281,7 @@ class WordToMarkdownLoader:
         return "\n".join(lines) if lines else ""
 
     def _extract_cell_text(self, cell: Any) -> str:
-        """セルからテキストを抽出（複数段落対応）"""
+        """セルからテキストを抽出 (複数段落対応)"""
         # セル内に複数の段落がある場合があるため、全て結合
         texts = []
         for paragraph in cell.paragraphs:

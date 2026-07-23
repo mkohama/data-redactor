@@ -1,7 +1,7 @@
 """
 DefaultSplitter - デフォルトのテキスト分割器
 
-特殊な処理が不要なファイルタイプ（txt, html, xml等）に使用する
+特殊な処理が不要なファイルタイプ (txt, html, xml等) に使用する
 汎用的な RecursiveCharacterTextSplitter のラッパー。
 """
 
@@ -41,7 +41,7 @@ class DefaultSplitter(BaseSplitter):
 
     def _get_or_create_splitter(self, file_type: str) -> RecursiveCharacterTextSplitter:
         """
-        ファイルタイプに応じた splitter を取得（キャッシュ付き）
+        ファイルタイプに応じた splitter を取得 (キャッシュ付き)
         """
         if file_type in self._splitter_cache:
             return self._splitter_cache[file_type]
@@ -51,7 +51,7 @@ class DefaultSplitter(BaseSplitter):
         separators = [
             r"\n\n",          # 二重改行
             r"\n",            # 改行
-            r"(?<=[。！？])",  # 日本語句読点（肯定後読み）
+            r"(?<=[。！？])",  # 日本語句読点 (肯定後読み)
             r"\. ",           # 句点 + space
             r"! ",            # 感嘆符 + space
             r"\? ",           # 疑問符 + space

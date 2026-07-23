@@ -41,7 +41,7 @@ class ExcelSplitter(BaseSplitter):
         """Excel用の Splitter を取得"""
         if self._splitter is None:
 
-            # Excel用の separator（行構造を優先）
+            # Excel用の separator (行構造を優先)
             # fmt: off
             separators = [
                 r"\n",             # 1. 最優先: 行の区切り (テーブル行全体を保持)

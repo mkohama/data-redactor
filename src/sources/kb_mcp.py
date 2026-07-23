@@ -196,8 +196,8 @@ def get_document_chunks_sync(doc_id: str, url: str = DEFAULT_KB_MCP_URL) -> list
     これにより各チャンクが GiNZA(SudachiPy) の解析上限を超えず、kb-mcp の
     検索ヒット単位と抽出結果も揃う。
 
-    chunks が無い古い形式の場合のみ、`content`（全文）を 1 要素として返す
-    （その場合は NER 側でバイト数安全に再分割される）。
+    chunks が無い古い形式の場合のみ、`content` (全文) を 1 要素として返す
+    (その場合は NER 側でバイト数安全に再分割される)。
     """
 
     async def _run() -> dict[str, Any]:
@@ -233,7 +233,7 @@ def download_document_sync(
 
 
 def get_document_text_sync(doc_id: str, url: str = DEFAULT_KB_MCP_URL) -> str:
-    """同期版: 指定ドキュメントの全文テキストを取得する（後方互換）.
+    """同期版: 指定ドキュメントの全文テキストを取得する (後方互換) .
 
     チャンクを区切りで連結して 1 本のテキストにする。長文をそのまま NER に
     渡すと SudachiPy の上限で落ちるため、解析には

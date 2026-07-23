@@ -1,33 +1,33 @@
-"""マスキング検出エンジン（UI 非依存）。
+"""マスキング検出エンジン (UI 非依存)。
 
-候補生成（NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書）→ 確信度づけ → 選択された候補で
-マスク適用（文書内収集で全出現に展開）。設計の背景は docs-dev/対策仮説.md を参照。
+候補生成 (NER 両モデル ∪ Sudachi 品詞 ∪ マスク辞書) → 確信度づけ → 選択された候補で
+マスク適用 (文書内収集で全出現に展開)。設計の背景は docs-dev/対策仮説.md を参照。
 
-確信度（**NER×LLM の2系統合議**で決める＝§13）。NER と LLM は対等な2系統で、
-NER の中の sudachi/electra/ja_ginza は「票」でなく系統内入力（NER は内部で何チャネル一致しても
-外に出す意見は 1 つ）。フラット集計だと NER の3チャネルが LLM の1票を圧殺するため等分にする：
-- カテゴリ … 各系統を 1 カテゴリへ畳み（特別=人名/社名/商標 が地名/その他に勝つ・重い特別が勝つ）、
-  系統間でも同じく特別優先・重い方（_CAT_PRIORITY）。
-- 確定 … **実辞書（名簿）一致のみ**。昇格（session）は確定にしない＝確定の出所は常に名簿。
-- 強  … **2系統（NER∧LLM）がともに特別カテゴリを検出**（種別が違ってもよい）、**昇格（session）票**、
-  または **連絡先の正規表現一致**（決定的だが誤検出あり得るので確定でなく強。除外リストで外せる）。
-- 中  … **1系統のみ**が特別カテゴリを検出（floor：特別は必ず中以上＝弱に落とさない）。
-- 弱  … どの系統も特別を出さない（地名/その他のみ。誤分類で人物が紛れるので必ずレビュー）
-- 微弱 … 中/弱 のうち「コードらしき」表層（`_`/`::`/`@`/`~` を含む、数字・記号のみ、または漢字以外の
-  1 文字＝社内コード/変数名/列挙子を NER が誤ラベルしたもの。例 `Em_NoYes` / `~C02` / `7-410` / `N`）。
-  既定で非表示・自動マスク外（データには残す＝取りこぼさない）。確定/強（辞書・連絡先・2系統一致・
-  昇格）は対象外。漢字 1 文字は実在姓（林・森 等）があるので保護＝微弱にしない。
+確信度 (**NER×LLM の2系統合議**で決める＝§13)。NER と LLM は対等な2系統で、
+NER の中の sudachi/electra/ja_ginza は「票」でなく系統内入力 (NER は内部で何チャネル一致しても
+外に出す意見は 1 つ)。フラット集計だと NER の3チャネルが LLM の1票を圧殺するため等分にする：
+- カテゴリ … 各系統を 1 カテゴリへ畳み (特別=人名/社名/商標 が地名/その他に勝つ・重い特別が勝つ)、
+  系統間でも同じく特別優先・重い方 (_CAT_PRIORITY)。
+- 確定 … **実辞書 (名簿) 一致のみ**。昇格 (session) は確定にしない＝確定の出所は常に名簿。
+- 強  … **2系統 (NER∧LLM) がともに特別カテゴリを検出** (種別が違ってもよい)、**昇格 (session) 票**、
+  または **連絡先の正規表現一致** (決定的だが誤検出あり得るので確定でなく強。除外リストで外せる)。
+- 中  … **1系統のみ**が特別カテゴリを検出 (floor：特別は必ず中以上＝弱に落とさない)。
+- 弱  … どの系統も特別を出さない (地名/その他のみ。誤分類で人物が紛れるので必ずレビュー)
+- 微弱 … 中/弱 のうち「コードらしき」表層 (`_`/`::`/`@`/`~` を含む、数字・記号のみ、または漢字以外の
+  1 文字＝社内コード/変数名/列挙子を NER が誤ラベルしたもの。例 `Em_NoYes` / `~C02` / `7-410` / `N`)。
+  既定で非表示・自動マスク外 (データには残す＝取りこぼさない)。確定/強 (辞書・連絡先・2系統一致・
+  昇格) は対象外。漢字 1 文字は実在姓 (林・森 等) があるので保護＝微弱にしない。
 
-昇格（session）＝ phase1 で強になった語を「確認済み」として phase2 に再注入したもの（§ analyze）。
-実辞書（dict）とは別チャネルにし、**確定でなく強**に留める（確定＝名簿、強＝検出/確認済み、の区別を保つ）。
-各票は自分のカテゴリにそのまま入れる（特例なし）。Sudachi 固有名詞-一般 は「その他」のまま扱い、
-NER 社名票で社名へ昇格させたりしない（未知の英字トークン＝Reject 等の汎用語を強にしないため）。
-単独モデルしか拾わない社名は中→レビュー（曖昧は人手）。重要な社名・商標は辞書が主役。
+昇格 (session) ＝ phase1 で強になった語を「確認済み」として phase2 に再注入したもの (§ analyze)。
+実辞書 (dict) とは別チャネルにし、**確定でなく強**に留める (確定＝名簿、強＝検出/確認済み、の区別を保つ)。
+各票は自分のカテゴリにそのまま入れる (特例なし)。Sudachi 固有名詞-一般 は「その他」のまま扱い、
+NER 社名票で社名へ昇格させたりしない (未知の英字トークン＝Reject 等の汎用語を強にしないため)。
+単独モデルしか拾わない社名は中→レビュー (曖昧は人手)。重要な社名・商標は辞書が主役。
 
 使い方：
-    analysis = engine.analyze(chunks)          # 全候補（確信度・各票の判定つき）
+    analysis = engine.analyze(chunks)          # 全候補 (確信度・各票の判定つき)
     selected = [c for c in analysis.candidates if c.confidence in ("確定", "強")]
-    result = engine.apply(analysis, selected)  # 選んだ候補でマスク（全出現に展開）
+    result = engine.apply(analysis, selected)  # 選んだ候補でマスク (全出現に展開)
 """
 
 from __future__ import annotations
@@ -50,17 +50,17 @@ from src.masking.dictionary import (
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
 from src.ner.engine import Analysis, ProgressCallback, sudachi_analyze_chunks
 
-if TYPE_CHECKING:  # 型のみ（実行時 import しない＝engine は src.llm/IO に依存しない）
+if TYPE_CHECKING:  # 型のみ (実行時 import しない＝engine は src.llm/IO に依存しない)
     from src.llm.schema import LlmDetection
 
-# クラスタ代表カテゴリの選択優先度（地名・その他は低い）
+# クラスタ代表カテゴリの選択優先度 (地名・その他は低い)
 _CAT_PRIORITY = ["人名", "社名", "商標", "連絡先", "地名", "その他"]
-# カテゴリ → 優先度ランク（小さいほど優先）。同点時の代表カテゴリ選択に使う。
+# カテゴリ → 優先度ランク (小さいほど優先)。同点時の代表カテゴリ選択に使う。
 _CAT_RANK = {c: i for i, c in enumerate(_CAT_PRIORITY)}
-# 確信度の強さ順（集約時に最良を選ぶ）。微弱＝コードらしき誤検出（既定で非表示・自動マスク外）。
-# 除外＝allowlist で人が「機密でない」と判断した語（最弱・既定で非表示・自動マスク外）。
+# 確信度の強さ順 (集約時に最良を選ぶ)。微弱＝コードらしき誤検出 (既定で非表示・自動マスク外)。
+# 除外＝allowlist で人が「機密でない」と判断した語 (最弱・既定で非表示・自動マスク外)。
 _CONF_RANK = {"確定": 4, "強": 3, "中": 2, "弱": 1, "微弱": 0, "除外": -1}
-# 自動マスク（初期チェック ON）にする確信度
+# 自動マスク (初期チェック ON) にする確信度
 AUTO_MASK_CONFIDENCE = ("確定", "強")
 # プレースホルダ接頭辞
 _PLACEHOLDER_PREFIX = {
@@ -72,40 +72,40 @@ _PLACEHOLDER_PREFIX = {
     "その他": "語",
 }
 
-# NER ラベル（大文字）→ カテゴリ。Product_Other 系（その他）は**ノイズ過多のため候補にしない**。
-# 注: 「N_*」（N_Person=人数 等）は関根体系では**数値表現（個数）**であって固有名詞ではない。
-# 人名・地名と取り違えないよう **含めない**（PERSON と N_PERSON は別物）。
-# 連絡先（Email/URL/Phone_Number）も **NER からは候補にしない**：`@TP` 等のコード式や数字に
-# 過剰発火し、両モデル一致で「連絡先/強→自動マスク」に暴発するため（Product_Other と同じ理由）。
-# 連絡先カテゴリ自体は残し、将来**正規表現で「形」から確定検出**する（メール/電話/郵便番号/型番）。
-# そもそもの自動マスク対象は 人名・社名・商標（地名は弱＝レビュー）。
+# NER ラベル (大文字) → カテゴリ。Product_Other 系 (その他) は**ノイズ過多のため候補にしない**。
+# 注: 「N_*」 (N_Person=人数 等) は関根体系では**数値表現 (個数) **であって固有名詞ではない。
+# 人名・地名と取り違えないよう **含めない** (PERSON と N_PERSON は別物)。
+# 連絡先 (Email/URL/Phone_Number) も **NER からは候補にしない**：`@TP` 等のコード式や数字に
+# 過剰発火し、両モデル一致で「連絡先/強→自動マスク」に暴発するため (Product_Other と同じ理由)。
+# 連絡先カテゴリ自体は残し、将来**正規表現で「形」から確定検出**する (メール/電話/郵便番号/型番)。
+# そもそもの自動マスク対象は 人名・社名・商標 (地名は弱＝レビュー)。
 _NER_LABEL_CATEGORY: dict[str, str] = {
     "PERSON": "人名",
-    # 社名は **COMPANY / COMPANY_GROUP の2ラベルのみ**（明確な会社・企業グループ）。
+    # 社名は **COMPANY / COMPANY_GROUP の2ラベルのみ** (明確な会社・企業グループ)。
     # CORPORATION_OTHER(企業その他)・SHOW_ORGANIZATION(興行団体)・SPORTS_ORGANIZATION_OTHER・
-    # POLITICAL_*・GOVERNMENT・INTERNATIONAL_ORGANIZATION は業務文書でゴミ（一般語の誤爆）に
-    # なりやすいので**含めない**（CORPORATION_OTHER も粒度が粗く社名として怪しい）。
+    # POLITICAL_*・GOVERNMENT・INTERNATIONAL_ORGANIZATION は業務文書でゴミ (一般語の誤爆) に
+    # なりやすいので**含めない** (CORPORATION_OTHER も粒度が粗く社名として怪しい)。
     # これらの実在組織は LLM(Company)＋辞書で拾う。
     "COMPANY": "社名",
     "COMPANY_GROUP": "社名",
     # Nationality(国籍)・Ethnic_Group_Other(民族)・Family(一族) は会社/組織ではないので含めない。
-    # 地名は **粗い都市/県/国（CITY/PROVINCE/COUNTRY）だけに絞る**。_OTHER 系（GPE_OTHER/
+    # 地名は **粗い都市/県/国 (CITY/PROVINCE/COUNTRY) だけに絞る**。_OTHER 系 (GPE_OTHER/
     # GEOLOGICAL_REGION_OTHER/LOCATION_OTHER/DOMESTIC_REGION_OTHER/CONTINENTAL_REGION_OTHER/
-    # FACILITY_OTHER）は従来どおり含めない（粒度が粗く一般語の誤爆）。
+    # FACILITY_OTHER) は従来どおり含めない (粒度が粗く一般語の誤爆)。
     # 2026-07-07: さらに **FACILITY_PART / STATION / AIRPORT / ADDRESS / POSTAL_ADDRESS を外した**。
     # FACILITY_PART は「3階」「西口」等の施設部位＝ほぼ純ノイズ、駅/空港/住所/郵便番号も業務文書では
-    # 候補一覧のノイズになるわりにレビュー価値が低い。**地名は元々 弱（レビュー止まり・自動マスク外）
-    # なので外してもマスク漏れは起きない**（人名/社名/商標が言えばそちらで拾う）＝効果はノイズ削減のみ。
-    # NER 経路は未登録ラベルを候補にしない（_ner_candidates で category is None なら continue）。
+    # 候補一覧のノイズになるわりにレビュー価値が低い。**地名は元々 弱 (レビュー止まり・自動マスク外)
+    # なので外してもマスク漏れは起きない** (人名/社名/商標が言えばそちらで拾う) ＝効果はノイズ削減のみ。
+    # NER 経路は未登録ラベルを候補にしない (_ner_candidates で category is None なら continue)。
     # 落とした地名をどうしてもマスクしたい場合は辞書登録で確定へ上げる。
     "CITY": "地名",
     "PROVINCE": "地名",
     "COUNTRY": "地名",
-    # 連絡先（Phone_Number/Email/URL）は意図的に含めない（上のコメント参照。正規表現に委ねる）。
+    # 連絡先 (Phone_Number/Email/URL) は意図的に含めない (上のコメント参照。正規表現に委ねる)。
 }
 
-# LLM（pii-masker）の ENE type → data-redactor の6カテゴリ（§7-④。内部語彙は6カテゴリに畳む）。
-# 生 ene_type は LlmSpan 側に温存し、出口1 で細分表示する（merge 語彙は汚さない）。
+# LLM (pii-masker) の ENE type → data-redactor の6カテゴリ (§7-④。内部語彙は6カテゴリに畳む)。
+# 生 ene_type は LlmSpan 側に温存し、出口1 で細分表示する (merge 語彙は汚さない)。
 _ENE_TO_CATEGORY: dict[str, str] = {
     "Person": "人名",
     "Company": "社名",
@@ -118,33 +118,33 @@ _ENE_TO_CATEGORY: dict[str, str] = {
     "Email": "連絡先",
     "Phone_Number": "連絡先",
     "Trademark": "商標",  # pii-masker への要望 type。主要カテゴリなので必須
-    # 識別子は「その他」へ畳む（＝確信度は弱固定）。ただし LLM 由来は微弱降格を免除し弱のままレビューに残す（_LLM_IDENTIFIER_TYPES）。
+    # 識別子は「その他」へ畳む (＝確信度は弱固定)。ただし LLM 由来は微弱降格を免除し弱のままレビューに残す (_LLM_IDENTIFIER_TYPES)。
     "Employee_ID": "その他",
     "Account": "その他",
     "IP_Address": "その他",
 }
 
 # 「その他」へ畳むので確信度は**弱固定**。ただし LLM が付けたこれらは _looks_like_code による
-# 微弱降格を**免除**する（`7-410` 型の社員番号等が消えると recall 漏れ＝致命的）。
-# ＝弱のままレビューに必ず残す（既定で自動マスクはされないが、候補から消えずデータにも残る。§7-④）。
+# 微弱降格を**免除**する (`7-410` 型の社員番号等が消えると recall 漏れ＝致命的)。
+# ＝弱のままレビューに必ず残す (既定で自動マスクはされないが、候補から消えずデータにも残る。§7-④)。
 _LLM_IDENTIFIER_TYPES = frozenset({"Employee_ID", "Account", "IP_Address"})
 
-# 連絡先（category=連絡先）の正規表現。NER は @ や数字に過剰発火して不安定なので、
-# 「形」が決まっている連絡先は決定的な正規表現で拾う（§ docs-dev/マスキング設計.md §10）。
-# まずは Email のみ。URL・電話番号は同じ仕組みでここに追加する（すべて連絡先カテゴリ）。
-# メールはドメインに辞書社名（exmotion 等）を内包するため、**1 件まるごと**を 1 候補にして
-# 辞書による部分マスク（`x@[社名].co.jp` の体裁崩れ）を防ぐ（_contact_candidates で他候補を退ける）。
+# 連絡先 (category=連絡先) の正規表現。NER は @ や数字に過剰発火して不安定なので、
+# 「形」が決まっている連絡先は決定的な正規表現で拾う (§ docs-dev/マスキング設計.md §10)。
+# まずは Email のみ。URL・電話番号は同じ仕組みでここに追加する (すべて連絡先カテゴリ)。
+# メールはドメインに辞書社名 (exmotion 等) を内包するため、**1 件まるごと**を 1 候補にして
+# 辞書による部分マスク (`x@[社名].co.jp` の体裁崩れ) を防ぐ (_contact_candidates で他候補を退ける)。
 #
 # パターンは WHATWG / Ruby URI::MailTo::EMAIL_REGEXP をベースに、用途に合わせて 3 点調整：
-#  ① アンカー（^…$ / \A…\z）は付けない＝文中に埋め込まれたメールを finditer で拾うため。
-#  ② ローカル部の許容文字から **`|` を除外**＝本ツールは `|` 区切りの表を扱い（flatten OFF 時は
-#     原文に `|` が残る）、`|x@…|` の先頭 `|` まで飲み込んで表が壊れるのを防ぐ。実在メールで
-#     `|` を含むものはほぼ無く recall 損失はない（WHATWG 原文は `{|}` を含む）。
-#  ③ ドメインは **ドット付き＋英字 TLD（2 文字以上）を必須**にする。WHATWG/RFC は `local@host`
-#     （`user@localhost` のような TLD 無しの社内ホスト）も許すが、業務文書の実在メールは必ず
-#     ドット付きドメイン（`xxx@会社.co.jp`）。TLD 無しを許すと社内ジャーゴン `SmashMark@TP` や
+#  ① アンカー (^…$ / \A…\z) は付けない＝文中に埋め込まれたメールを finditer で拾うため。
+#  ② ローカル部の許容文字から **`|` を除外**＝本ツールは `|` 区切りの表を扱い (flatten OFF 時は
+#     原文に `|` が残る)、`|x@…|` の先頭 `|` まで飲み込んで表が壊れるのを防ぐ。実在メールで
+#     `|` を含むものはほぼ無く recall 損失はない (WHATWG 原文は `{|}` を含む)。
+#  ③ ドメインは **ドット付き＋英字 TLD (2 文字以上) を必須**にする。WHATWG/RFC は `local@host`
+#     (`user@localhost` のような TLD 無しの社内ホスト) も許すが、業務文書の実在メールは必ず
+#     ドット付きドメイン (`xxx@会社.co.jp`)。TLD 無しを許すと社内ジャーゴン `SmashMark@TP` や
 #     `有効性@TP` 等を「メール」と誤検出する。TLD 無し/数字のみ TLD を捨てて誤検出を断つ
-#     （`user@localhost` 等は落ちるが業務文書ではほぼ無い）。
+#     (`user@localhost` 等は落ちるが業務文書ではほぼ無い)。
 _EMAIL_RE = re.compile(
     r"[a-zA-Z0-9.!#$%&'*+/=?^_`{}~-]+"
     r"@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
@@ -152,58 +152,58 @@ _EMAIL_RE = re.compile(
 )
 _CONTACT_PATTERNS: tuple[re.Pattern[str], ...] = (_EMAIL_RE,)
 
-# 「コードらしさ」判定用。実在の人名・社名には現れない特徴を持つ語＝NER の誤ラベル（社内コード/
-# 変数名/列挙子）とみなし、中/弱 の候補を **微弱**（既定で非表示・自動マスク外）へ落とす（§ analyze）。
-# 確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝確信度の根拠があるものは守る。
+# 「コードらしさ」判定用。実在の人名・社名には現れない特徴を持つ語＝NER の誤ラベル (社内コード/
+# 変数名/列挙子) とみなし、中/弱 の候補を **微弱** (既定で非表示・自動マスク外) へ落とす (§ analyze)。
+# 確定/強 (辞書・連絡先・2系統一致・昇格) は対象にしない＝確信度の根拠があるものは守る。
 _CODE_MARKER_RE = re.compile(
     r"[_@~\[\]{}=!<>;|\\]|::"
-)  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 / `37D]==0` / `a=b` 等（[ ] { } = ! < > ; | も）。
-# `\`（バックスラッシュ）も＝ファイルパス `C:\Group\ABC-Z\...` を NER が `Group\ABC-Z` と塊にして
+)  # Em_NoYes / Em_OffOn::idOff / ピッチ@ / ~C02 / `37D]==0` / `a=b` 等 ([ ] { } = ! < > ; | も)。
+# `\` (バックスラッシュ) も＝ファイルパス `C:\Group\ABC-Z\...` を NER が `Group\ABC-Z` と塊にして
 # 社名に誤爆する。実在の人名・社名に `\` は現れないのでコードマーカー扱いで微弱へ落とす。
-# 「名前に使われる字」＝英字 or 日本語（かな U+3040-30FF・漢字 U+3400-9FFF）。これを 1 つも
-# 含まない＝数字/記号のみ（例 7-410）。
+# 「名前に使われる字」＝英字 or 日本語 (かな U+3040-30FF・漢字 U+3400-9FFF)。これを 1 つも
+# 含まない＝数字/記号のみ (例 7-410)。
 _NAME_CHAR_RE = re.compile(r"[A-Za-z぀-ヿ㐀-鿿]")
-# 漢字 1 文字（U+3400-9FFF）。1 文字語のうち漢字は実在姓（林・森・関・南 等）があるので保護する。
+# 漢字 1 文字 (U+3400-9FFF)。1 文字語のうち漢字は実在姓 (林・森・関・南 等) があるので保護する。
 _KANJI_RE = re.compile(r"[㐀-鿿]")
-# 英数字コード（16D / 1L / 37D）。ASCII のみ＋数字混在＝識別子。実在の人名・社名はまず数字を含まない
-# （`7-Eleven`/`3M` 等は稀＝辞書登録で守る）。`-`/`.`/`&` は社名にあり得るのでマーカーには入れない。
+# 英数字コード (16D / 1L / 37D)。ASCII のみ＋数字混在＝識別子。実在の人名・社名はまず数字を含まない
+# (`7-Eleven`/`3M` 等は稀＝辞書登録で守る)。`-`/`.`/`&` は社名にあり得るのでマーカーには入れない。
 _ASCII_DIGIT_CODE_RE = re.compile(r"^[\x21-\x7e]*[0-9][\x21-\x7e]*$")
-# CJK の区切り・括弧（中黒・各種括弧）が **ASCII 英字に隣接**する surface。NER スパンがセル/引用の
-# 境界を巻き込んだ人工物（`AP・` / `theta・「` / `会社「A」`）に特徴的。**隣接に限る**のが肝：
-# `C型補正値リミット・チェック結果` のように区切りが仮名間にある実在語（ASCII の `C` は `型` に付く）は
-# 拾わない。純カナの中黒名（`ジョン・スミス` / `ソニー・ミュージック`）も ASCII 隣接が無いので対象外＝守る。
+# CJK の区切り・括弧 (中黒・各種括弧) が **ASCII 英字に隣接**する surface。NER スパンがセル/引用の
+# 境界を巻き込んだ人工物 (`AP・` / `theta・「` / `会社「A」`) に特徴的。**隣接に限る**のが肝：
+# `C型補正値リミット・チェック結果` のように区切りが仮名間にある実在語 (ASCII の `C` は `型` に付く) は
+# 拾わない。純カナの中黒名 (`ジョン・スミス` / `ソニー・ミュージック`) も ASCII 隣接が無いので対象外＝守る。
 _CJK_SEP_CHARS = "・･「」『』（）〔〕【】〈〉《》｢｣"
 _CJK_SEP_ADJ_ASCII_RE = re.compile(
     rf"[A-Za-z][{_CJK_SEP_CHARS}]|[{_CJK_SEP_CHARS}][A-Za-z]"
 )
-# 先頭/末尾に垂れたハイフン類・中黒・ピリオド＝スパン境界の人工物（`AP-` / `R-` / `-C02` / `AP・` /
-# `田中・` / `情報.`＝文末/フィールド区切りの `.` を NER が固有表現に巻き込んだもの）。実在名は英数字/
-# CJK 文字で始まり終わる（`Coca-Cola`/`Anne-Marie` の**内部**ハイフンや `Booking.com` の**内部** `.` は
-# 対象外＝守る＝端だけ見る）。長音 `ー`(U+30FC) は含めない（`サーバー` 等の正当なカナ語末に出るため）。
-# 半角 `.`(U+002E) と全角 `．`(U+FF0E) を対象に（`。`(U+3002) は _SPAN_SPLIT_CHARS で既に分割済み）。
+# 先頭/末尾に垂れたハイフン類・中黒・ピリオド＝スパン境界の人工物 (`AP-` / `R-` / `-C02` / `AP・` /
+# `田中・` / `情報.`＝文末/フィールド区切りの `.` を NER が固有表現に巻き込んだもの)。実在名は英数字/
+# CJK 文字で始まり終わる (`Coca-Cola`/`Anne-Marie` の**内部**ハイフンや `Booking.com` の**内部** `.` は
+# 対象外＝守る＝端だけ見る)。長音 `ー`(U+30FC) は含めない (`サーバー` 等の正当なカナ語末に出るため)。
+# 半角 `.`(U+002E) と全角 `．`(U+FF0E) を対象に (`。`(U+3002) は _SPAN_SPLIT_CHARS で既に分割済み)。
 _DANGLING_SEP_RE = re.compile(r"^[-‐‑–—―・･.．]|[-‐‑–—―・･.．]$")
-# スパン境界に付く引用符・バッククォート類（ASCII/全角/スマート）。NER/表がセルや引用符を
-# 巻き込んだ人工物（`"O1234.01` / `＂…` / `“…”`）の判定を邪魔するので、判定前に**先頭/末尾から剥がす**。
-# 剥がした中身で判定するので、`"ソニー"`（中身が実名）は守られ、`"O1234.01`（中身がコード）は落ちる。
-# 先頭/末尾のみ剥がす＝内部のアポストロフィ（`L'Oréal` / `O'Brien`）は残す＝実名を壊さない。
+# スパン境界に付く引用符・バッククォート類 (ASCII/全角/スマート)。NER/表がセルや引用符を
+# 巻き込んだ人工物 (`"O1234.01` / `＂…` / `“…”`) の判定を邪魔するので、判定前に**先頭/末尾から剥がす**。
+# 剥がした中身で判定するので、`"ソニー"` (中身が実名) は守られ、`"O1234.01` (中身がコード) は落ちる。
+# 先頭/末尾のみ剥がす＝内部のアポストロフィ (`L'Oréal` / `O'Brien`) は残す＝実名を壊さない。
 _EDGE_QUOTES = "\"'`＂｀“”‘’„‟〝〞«»"
-# 丸括弧（ASCII `()`・全角 `（）`）。NER スパンが `LSMonitor(...)` の開き括弧を巻き込むと
+# 丸括弧 (ASCII `()`・全角 ` () `)。NER スパンが `LSMonitor(...)` の開き括弧を巻き込むと
 # `LSMonito(` のように**不均衡な括弧**で終わる/始まる人工物になる。ブラケット `[ ] { }` は常に
-# コード（_CODE_MARKER_RE で拾う）だが、丸括弧は `Sony (Japan)` 等の正当な社名に出るので
-# **数の不均衡（open≠close）**だけを artifact とみなす（均衡した括弧つき社名は守る）。
+# コード (_CODE_MARKER_RE で拾う) だが、丸括弧は `Sony (Japan)` 等の正当な社名に出るので
+# **数の不均衡 (open≠close) **だけを artifact とみなす (均衡した括弧つき社名は守る)。
 _OPEN_PARENS = "(（"
 _CLOSE_PARENS = ")）"
-# 日本語の「文字」（ひらがな・カタカナ・漢字）。区切り記号 `・`(U+30FB) や `「` は**含めない**
-# ＝NER の人名票を弱める判定で「日本語人名は信頼する」ためのゲートに使う（_looks_like_nonperson_latin）。
+# 日本語の「文字」 (ひらがな・カタカナ・漢字)。区切り記号 `・`(U+30FB) や `「` は**含めない**
+# ＝NER の人名票を弱める判定で「日本語人名は信頼する」ためのゲートに使う (_looks_like_nonperson_latin)。
 _JP_LETTER_RE = re.compile(r"[ぁ-ゖァ-ヺー㐀-䶿一-鿿]")
-# ラテン英字の連なり（語）と、実在人名の語の形＝Titlecase（先頭大文字＋以降小文字。John / Smith）。
+# ラテン英字の連なり (語) と、実在人名の語の形＝Titlecase (先頭大文字＋以降小文字。John / Smith)。
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]+")
 _TITLECASE_RE = re.compile(r"[A-Z][a-z]*")
 
 
 @dataclass(frozen=True)
 class Candidate:
-    """マスク候補スパン（全文オフセット）。"""
+    """マスク候補スパン (全文オフセット)。"""
 
     start: int
     end: int
@@ -214,16 +214,16 @@ class Candidate:
     votes: tuple[tuple[str, str], ...]
 
     def vote_label(self, channel: str) -> str:
-        """指定チャネルの判定ラベルを返す（無ければ空文字。先頭1件のみ）。"""
+        """指定チャネルの判定ラベルを返す (無ければ空文字。先頭1件のみ)。"""
         for ch, label in self.votes:
             if ch == channel:
                 return label
         return ""
 
     def vote_labels(self, channel: str) -> str:
-        """指定チャネルの全ラベルを ` / ` 連結で返す（重複は畳む）。
+        """指定チャネルの全ラベルを ` / ` 連結で返す (重複は畳む)。
 
-        Sudachi は形態素ごとに票が付くので、多トークンの実体（例 姓+名）では
+        Sudachi は形態素ごとに票が付くので、多トークンの実体 (例 姓+名) では
         ``vote_label`` の先頭1件では足りない。表示用にこちらを使う。
         """
         labels = [label for ch, label in self.votes if ch == channel]
@@ -232,12 +232,12 @@ class Candidate:
 
 @dataclass(frozen=True)
 class CandidateGroup:
-    """同一実体（表層）の候補をまとめたもの。マスクは実体ごとに行うため UI/CLI はこれを使う。
+    """同一実体 (表層) の候補をまとめたもの。マスクは実体ごとに行うため UI/CLI はこれを使う。
 
-    マスクは「出現ごと」でなく「実体ごと」（一か所選べば文書内の全出現に展開される）。
+    マスクは「出現ごと」でなく「実体ごと」 (一か所選べば文書内の全出現に展開される)。
     """
 
-    surface: str  # 代表表記（辞書 canonical があればそれ、なければ表層）
+    surface: str  # 代表表記 (辞書 canonical があればそれ、なければ表層)
     category: str
     confidence: str  # 出現の中で最良の確信度
     votes: tuple[tuple[str, str], ...]  # 全出現でついた票の和集合
@@ -254,19 +254,19 @@ class CandidateGroup:
         return ""
 
     def vote_labels(self, channel: str) -> str:
-        """指定チャネルの全ラベルを ` / ` 連結で返す（重複は畳む。多トークン Sudachi 用）。"""
+        """指定チャネルの全ラベルを ` / ` 連結で返す (重複は畳む。多トークン Sudachi 用)。"""
         labels = [label for ch, label in self.votes if ch == channel]
         return " / ".join(dict.fromkeys(labels))
 
 
 @dataclass(frozen=True)
 class MaskEntry:
-    """プレースホルダ 1 件（復元用の対応表）。
+    """プレースホルダ 1 件 (復元用の対応表)。
 
-    - ``canonical``：復元先の代表語（辞書 canonical があればそれ、無ければ代表表層）。
+    - ``canonical``：復元先の代表語 (辞書 canonical があればそれ、無ければ代表表層)。
       :func:`unmask` はここへ戻す。
-    - ``spans``：このプレースホルダが占める**原文座標**の出現位置（監査・再現用）。
-      復元自体はプレースホルダ文字列で行う（LLM 応答はオフセットが変わる）ため span は不要。
+    - ``spans``：このプレースホルダが占める**原文座標**の出現位置 (監査・再現用)。
+      復元自体はプレースホルダ文字列で行う (LLM 応答はオフセットが変わる) ため span は不要。
     """
 
     placeholder: str
@@ -278,10 +278,10 @@ class MaskEntry:
 
 @dataclass(frozen=True)
 class MaskAnalysis:
-    """解析結果（マスクはまだ適用していない。候補を選ぶ前段）。
+    """解析結果 (マスクはまだ適用していない。候補を選ぶ前段)。
 
     ``text``/``tokens``/``candidates`` は検出に使う**平坦化後テキスト基準**。
-    マスクは ``original_text``（平坦化前の `|` 入り原文）へ ``offset_map`` で写して当てる。
+    マスクは ``original_text`` (平坦化前の `|` 入り原文) へ ``offset_map`` で写して当てる。
     平坦化しない場合は ``original_text == text``・``offset_map`` は恒等写像。
     """
 
@@ -290,7 +290,7 @@ class MaskAnalysis:
     candidates: tuple[Candidate, ...]
     original_text: str = ""
     offset_map: tuple[int, ...] = ()
-    # モデル別の解析時間 (model_name, 秒)。所要時間の可視化用（UI/CLI が表示）。
+    # モデル別の解析時間 (model_name, 秒)。所要時間の可視化用 (UI/CLI が表示)。
     timings: tuple[tuple[str, float], ...] = ()
 
 
@@ -298,20 +298,20 @@ class MaskAnalysis:
 class MaskResult:
     """選んだ候補でマスクを適用した結果。"""
 
-    text: str  # 元テキスト（チャンク連結後）
+    text: str  # 元テキスト (チャンク連結後)
     masked_text: str  # マスク済みテキスト
-    masked: tuple[Candidate, ...]  # 実際にマスクしたスパン（選択＋文書内展開）
+    masked: tuple[Candidate, ...]  # 実際にマスクしたスパン (選択＋文書内展開)
     mapping: tuple[MaskEntry, ...]  # プレースホルダ ↔ 原語
 
 
 @dataclass(frozen=True)
 class BundleEntry:
-    """バンドル（複数パート）で共有する対応表 1 件。設計 §3-1 の ``mapping[]``。
+    """バンドル (複数パート) で共有する対応表 1 件。設計 §3-1 の ``mapping[]``。
 
-    ``occurrences`` は ``(part_index, start, end)`` の列（各パートの**原文座標**）。同じ
-    プレースホルダが複数パート・複数箇所に出るため、どのパートのどこかを保持する（監査・再現用）。
-    ``confidence`` は内部（日本語）表現＝グループ代表の最良確信度（API 層で wire 変換）。
-    ``decided_by`` は決め手（``consensus``/``ner``/``llm``/``dict``/``session``/``regex``）。
+    ``occurrences`` は ``(part_index, start, end)`` の列 (各パートの**原文座標**)。同じ
+    プレースホルダが複数パート・複数箇所に出るため、どのパートのどこかを保持する (監査・再現用)。
+    ``confidence`` は内部 (日本語) 表現＝グループ代表の最良確信度 (API 層で wire 変換)。
+    ``decided_by`` は決め手 (``consensus``/``ner``/``llm``/``dict``/``session``/``regex``)。
     """
 
     placeholder: str
@@ -325,19 +325,19 @@ class BundleEntry:
 
 @dataclass(frozen=True)
 class BundleMaskResult:
-    """:meth:`MaskingEngine.mask_parts` の結果（各パートのマスク済み本文＋共有対応表）。"""
+    """:meth:`MaskingEngine.mask_parts` の結果 (各パートのマスク済み本文＋共有対応表)。"""
 
     masked_texts: tuple[str, ...]  # 入力パートと同順のマスク済み本文
     entries: tuple[BundleEntry, ...]  # バンドルで共有する対応表
 
 
 def unmask(text: str, mapping: Iterable[MaskEntry]) -> str:
-    """マスク済み（＝LLM が返した）テキストを復元する。設計 §3-2。
+    """マスク済み (＝LLM が返した) テキストを復元する。設計 §3-2。
 
-    - ``placeholder`` → ``canonical``（無ければ ``surfaces[0]``）へ置換。
-    - **長いプレースホルダ優先**（``[社1]`` が ``[社10]`` を巻き込まないように）。
-    - **mapping に無いプレースホルダは触らない**（LLM の捏造・改変は安全側で無変更）。
-    - span は使わない（LLM 応答はオフセットが変わるため、プレースホルダ文字列で照合）。
+    - ``placeholder`` → ``canonical`` (無ければ ``surfaces[0]``) へ置換。
+    - **長いプレースホルダ優先** (``[社1]`` が ``[社10]`` を巻き込まないように)。
+    - **mapping に無いプレースホルダは触らない** (LLM の捏造・改変は安全側で無変更)。
+    - span は使わない (LLM 応答はオフセットが変わるため、プレースホルダ文字列で照合)。
     """
     result = text
     for m in sorted(mapping, key=lambda e: len(e.placeholder), reverse=True):
@@ -349,7 +349,7 @@ def unmask(text: str, mapping: Iterable[MaskEntry]) -> str:
 
 
 def mapping_to_json(mapping: Iterable[MaskEntry]) -> list[dict]:
-    """``MaskEntry`` 列を JSON 化可能な dict 列にする（対応表の永続化・API 送出用）。"""
+    """``MaskEntry`` 列を JSON 化可能な dict 列にする (対応表の永続化・API 送出用)。"""
     return [
         {
             "placeholder": m.placeholder,
@@ -363,7 +363,7 @@ def mapping_to_json(mapping: Iterable[MaskEntry]) -> list[dict]:
 
 
 def mapping_from_json(data: Iterable[dict]) -> tuple[MaskEntry, ...]:
-    """:func:`mapping_to_json` の逆。``spans`` は省略可（unmask には不要）。"""
+    """:func:`mapping_to_json` の逆。``spans`` は省略可 (unmask には不要)。"""
     return tuple(
         MaskEntry(
             placeholder=d["placeholder"],
@@ -390,15 +390,15 @@ def _sudachi_category(tag: str) -> str | None:
 def vote_category(channel: str, label: str) -> str | None:
     """監査用：1 票 (channel, label) がどのカテゴリに投票したかを引く。
 
-    候補生成（analyze）でカテゴリを決めるのと同じ対応関係を使う（重複ロジックを作らない）。
-    辞書票のラベルは ``"社名(辞書)"``、昇格票（session）は ``"社名(確認済)"`` 形式なので
+    候補生成 (analyze) でカテゴリを決めるのと同じ対応関係を使う (重複ロジックを作らない)。
+    辞書票のラベルは ``"社名(辞書)"``、昇格票 (session) は ``"社名(確認済)"`` 形式なので
     接頭のカテゴリを取り出す。
     """
     if channel in ("dict", "session"):
         return label.split("(", 1)[0] or None
-    if channel == "regex":  # 連絡先（メール等）の決定的検出。label がそのままカテゴリ。
+    if channel == "regex":  # 連絡先 (メール等) の決定的検出。label がそのままカテゴリ。
         return label or None
-    if channel == "llm":  # LLM（pii-masker）票。label は ENE type。
+    if channel == "llm":  # LLM (pii-masker) 票。label は ENE type。
         return _ENE_TO_CATEGORY.get(label)
     if channel == "sudachi":
         return _sudachi_category(label)
@@ -406,13 +406,13 @@ def vote_category(channel: str, label: str) -> str | None:
 
 
 def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
-    """票集合 → カテゴリ別の「チャネル数」（**監査用の集計**。cli の票分布表示に使う）。
+    """票集合 → カテゴリ別の「チャネル数」 (**監査用の集計**。cli の票分布表示に使う)。
 
-    確信度・カテゴリの**決定**は :func:`_merge` の2系統合議（NER 系統 / LLM 系統）で行う＝
+    確信度・カテゴリの**決定**は :func:`_merge` の2系統合議 (NER 系統 / LLM 系統) で行う＝
     この関数は決定には使わない。フラット集計だと NER の3チャネルが LLM の1票を圧殺するため
-    （§13「NER と LLM は対等な2系統」。NER の中の sudachi/electra/ja_ginza は票でなく系統内入力）。
-    票＝チャネル（同一チャネルの複数形態素＝姓+名 等は 1 票に畳む）。Sudachi 固有名詞-一般 は
-    「その他」のまま（未知の英字トークンを社名に水増ししない＝Reject 等の汎用語を強にしない）。
+    (§13「NER と LLM は対等な2系統」。NER の中の sudachi/electra/ja_ginza は票でなく系統内入力)。
+    票＝チャネル (同一チャネルの複数形態素＝姓+名 等は 1 票に畳む)。Sudachi 固有名詞-一般 は
+    「その他」のまま (未知の英字トークンを社名に水増ししない＝Reject 等の汎用語を強にしない)。
     """
     channels_by_cat: dict[str, set[str]] = defaultdict(set)
     for ch, label in votes:
@@ -422,30 +422,30 @@ def tally_votes(votes: Iterable[tuple[str, str]]) -> Counter[str]:
     return Counter({cat: len(chs) for cat, chs in channels_by_cat.items()})
 
 
-# 確信度を数える系統（NER / LLM）から外す決定的チャネル。
-#   dict=確定（名簿）／session=昇格（確認済＝強）／regex=連絡先（決定的＝強。実体は _merge を通らない）。
+# 確信度を数える系統 (NER / LLM) から外す決定的チャネル。
+#   dict=確定 (名簿) ／session=昇格 (確認済＝強) ／regex=連絡先 (決定的＝強。実体は _merge を通らない)。
 _DECISIVE_CHANNELS = frozenset({"dict", "session", "regex"})
 
 
 def _system_category(
     votes: Iterable[tuple[str, str]], surface: str, *, llm: bool
 ) -> str | None:
-    """1 系統の票を **1 カテゴリ**へ畳む（系統内合議）。``llm=True``＝LLM 系統 / ``False``＝NER 系統。
+    """1 系統の票を **1 カテゴリ**へ畳む (系統内合議)。``llm=True``＝LLM 系統 / ``False``＝NER 系統。
 
-    NER 系統＝``dict``/``session``/``regex``/``llm`` 以外の全チャネル（sudachi・各 GiNZA モデル）。
-    系統内では **特別（人名/社名/商標）が地名/その他に勝ち、重い特別が勝つ**＝``_CAT_PRIORITY``
-    最上位を採る（NER が何チャネル一致しても外に出す意見は 1 つ＝§13）。票が無ければ None。
+    NER 系統＝``dict``/``session``/``regex``/``llm`` 以外の全チャネル (sudachi・各 GiNZA モデル)。
+    系統内では **特別 (人名/社名/商標) が地名/その他に勝ち、重い特別が勝つ**＝``_CAT_PRIORITY``
+    最上位を採る (NER が何チャネル一致しても外に出す意見は 1 つ＝§13)。票が無ければ None。
 
-    **Stage 1（NER 限定・surface で特別票を弱める）**：ja_ginza 等が英字/コードを社名・人名へ
+    **Stage 1 (NER 限定・surface で特別票を弱める) **：ja_ginza 等が英字/コードを社名・人名へ
     誤爆するため、NER の特別票を surface で「その他」に落とし、**コードノイズが LLM と組んで
-    「強」になる経路を断つ**（その後 1 系統＝中→ Stage 2 ``_demote_code_like`` で微弱化される）。
+    「強」になる経路を断つ** (その後 1 系統＝中→ Stage 2 ``_demote_code_like`` で微弱化される)。
     カテゴリ非対称：
-    - **人名**：ラテン文字主体で **Titlecase 語の並びでない**もの（``EndTime``/``MarkID``/``dElem``/
-      ``Wafer ID``/``FIARSL``/``theta・「`` 等）／コードらしき → その他（:func:`_looks_like_nonperson_latin`）。
-      実在のラテン人名は Titlecase（``John``/``Smith``/``Anne-Marie``）なので、それ以外は識別子/術語の誤爆。
-      かな/漢字を含む人名（``佐伯``）は信頼して残す。英語人名の recall は LLM（2系統＝強）と辞書が担保。
-    - **社名**：コードらしき のみ → その他（``IBM``/``SAP``/``Apple``/``eBay`` 等の ASCII 社名は正当ゆえ守る）。
-    LLM 票は弱めない（文脈判定を尊重）。
+    - **人名**：ラテン文字主体で **Titlecase 語の並びでない**もの (``EndTime``/``MarkID``/``dElem``/
+      ``Wafer ID``/``FIARSL``/``theta・「`` 等) ／コードらしき → その他 (:func:`_looks_like_nonperson_latin`)。
+      実在のラテン人名は Titlecase (``John``/``Smith``/``Anne-Marie``) なので、それ以外は識別子/術語の誤爆。
+      かな/漢字を含む人名 (``佐伯``) は信頼して残す。英語人名の recall は LLM (2系統＝強) と辞書が担保。
+    - **社名**：コードらしき のみ → その他 (``IBM``/``SAP``/``Apple``/``eBay`` 等の ASCII 社名は正当ゆえ守る)。
+    LLM 票は弱めない (文脈判定を尊重)。
     """
     cats: list[str] = []
     for ch, label in votes:
@@ -454,7 +454,7 @@ def _system_category(
         cat = vote_category(ch, label)
         if cat is None:
             continue
-        if not llm:  # Stage 1: NER の特別票を surface で弱める（カテゴリ非対称）
+        if not llm:  # Stage 1: NER の特別票を surface で弱める (カテゴリ非対称)
             if cat == "人名" and (
                 _looks_like_code(surface) or _looks_like_nonperson_latin(surface)
             ):
@@ -468,7 +468,7 @@ def _system_category(
 def _representative(members: list[Candidate]) -> Candidate:
     """同一表層の出現群から代表を選ぶ：確信度が最良、同点はカテゴリ優先度が高い方。
 
-    実体（表層）の代表カテゴリ・確信度を決めるのに使う（出現ごとに割れた種別を 1 つへ）。
+    実体 (表層) の代表カテゴリ・確信度を決めるのに使う (出現ごとに割れた種別を 1 つへ)。
     """
     return max(
         members,
@@ -501,19 +501,19 @@ class MaskingEngine:
         llm_detection: LlmDetection | None = None,
         run_ner: bool = True,
     ) -> MaskAnalysis:
-        """全候補（確信度・各票の判定つき）を作る。マスクはまだ適用しない。
+        """全候補 (確信度・各票の判定つき) を作る。マスクはまだ適用しない。
 
-        2 フェーズ：① 実辞書で確信度づけ → ② 確定/強の clean な実体（＋``extra_terms`` で
-        渡された選択語）を**辞書と同等の語**としてセッション辞書に昇格し、辞書マッチと
+        2 フェーズ：① 実辞書で確信度づけ → ② 確定/強の clean な実体 (＋``extra_terms`` で
+        渡された選択語) を**辞書と同等の語**としてセッション辞書に昇格し、辞書マッチと
         クラスタ分割を再実行する。これで「ある箇所で確定した語＝全出現で確定」「塊を確定語の
-        境界で分割」が辞書機構の自然な帰結になる（per_entity→per_occurrence の一本化）。
-        ``promote=False`` で昇格を切る（出現ごとモードの同形異義語制御用）。
-        ``extra_terms`` は ``(surface, category)`` の列（UI/CLI の選択語）。
+        境界で分割」が辞書機構の自然な帰結になる (per_entity→per_occurrence の一本化)。
+        ``promote=False`` で昇格を切る (出現ごとモードの同形異義語制御用)。
+        ``extra_terms`` は ``(surface, category)`` の列 (UI/CLI の選択語)。
         ``progress`` はステージコールバック：各段階の開始時に (段階index, 全段階数, ラベル) を受ける。
-        段階＝各モデルの解析（重い・モデルごと）＋ 候補の集約。1 モデルの解析中はサブ進捗を出さない
-        （最速の既定バッチで処理するため。小バッチ化は本末転倒）。「どの段階か」を示すのが目的。
+        段階＝各モデルの解析 (重い・モデルごと) ＋ 候補の集約。1 モデルの解析中はサブ進捗を出さない
+        (最速の既定バッチで処理するため。小バッチ化は本末転倒)。「どの段階か」を示すのが目的。
         ``refresh_cache=True`` は NER キャッシュの読みを飛ばして強制再解析し、結果でキャッシュを
-        上書きする（LLM 層の強制再検出は run_llm_detection(force=True) が別途担う）。
+        上書きする (LLM 層の強制再検出は run_llm_detection(force=True) が別途担う)。
         """
         chunks = list(chunks)
         per_model: list[tuple[str, Analysis]] = []
@@ -521,13 +521,13 @@ class MaskingEngine:
         other_raw: list[Candidate] = []
 
         if run_ner:
-            # NER 経路（NLP 処理＝GiNZA 2モデル。激重）。(content_hash, model, flatten) でキャッシュ。
-            #   ヒットすれば GiNZA をスキップ。下の候補生成（辞書/除外依存）は毎回再計算する。
+            # NER 経路 (NLP 処理＝GiNZA 2モデル。激重)。(content_hash, model, flatten) でキャッシュ。
+            #   ヒットすれば GiNZA をスキップ。下の候補生成 (辞書/除外依存) は毎回再計算する。
             n_models = len(self.engines)
             n_stages = n_models + 1  # 各モデル ＋ 候補集約
             chash = content_hash(chunks) if ner_cache is not None else ""
             for idx, e in enumerate(self.engines):
-                # refresh_cache＝True はキャッシュ読みをスキップして再解析（結果は下で put＝上書き）。
+                # refresh_cache＝True はキャッシュ読みをスキップして再解析 (結果は下で put＝上書き)。
                 cached = (
                     ner_cache.get(chash, e.model_name, flatten_tables)
                     if ner_cache is not None and not refresh_cache
@@ -535,7 +535,7 @@ class MaskingEngine:
                 )
                 if (
                     progress is not None
-                ):  # 重い解析の前にこの段階を表示（実行中に見える）
+                ):  # 重い解析の前にこの段階を表示 (実行中に見える)
                     label = f"{e.model_name} を解析" + (
                         "（キャッシュ）" if cached else "中"
                     )
@@ -547,20 +547,20 @@ class MaskingEngine:
                     a = e.analyze_chunks(chunks, flatten_tables=flatten_tables)
                     if (
                         ner_cache is not None
-                    ):  # 未確定でも解析過程として保存（再解析を一瞬に）
+                    ):  # 未確定でも解析過程として保存 (再解析を一瞬に)
                         ner_cache.put(chash, e.model_name, flatten_tables, a)
                 timings.append((e.model_name, perf_counter() - t0))
                 per_model.append((e.model_name, a))
             if progress is not None:
                 progress(n_models, n_stages, "候補を集約・確信度づけ中")
             base = per_model[0][1]
-            # NLP（NER）チャネルの票＝Sudachi 品詞 ∪ GiNZA NER（§13。A 案: Sudachi 票は NER 実行時のみ）。
+            # NLP (NER) チャネルの票＝Sudachi 品詞 ∪ GiNZA NER (§13。A 案: Sudachi 票は NER 実行時のみ)。
             other_raw = _sudachi_raw(base.tokens, base.text) + _ner_raw(
                 per_model, base.text
             )
         else:
-            # 軽量経路（§13 ③）：GiNZA を回さず SudachiPy 単体でトークンのみ（辞書照合用）。
-            #   Sudachi 品詞票・NER 票は出さない（A 案）。ルールベース＋LLM のみで候補を作る。
+            # 軽量経路 (§13 ③)：GiNZA を回さず SudachiPy 単体でトークンのみ (辞書照合用)。
+            #   Sudachi 品詞票・NER 票は出さない (A 案)。ルールベース＋LLM のみで候補を作る。
             if progress is not None:
                 progress(0, 1, "候補を集約・確信度づけ中（NER なし）")
             base = sudachi_analyze_chunks(chunks, flatten_tables=flatten_tables)
@@ -569,12 +569,12 @@ class MaskingEngine:
         tokens = base.tokens
         surfaces = [t.surface for t in tokens]
 
-        # LLM（pii-masker）検出を `llm` チャネルの票として合流（J2）。新カテゴリ・新確信度は作らず、
-        #   2系統合議に **LLM 系統**として流すだけ＝単独→中／NER 系統と相乗り→強／確定は名簿のみ（§7-②）。
+        # LLM (pii-masker) 検出を `llm` チャネルの票として合流 (J2)。新カテゴリ・新確信度は作らず、
+        #   2系統合議に **LLM 系統**として流すだけ＝単独→中／NER 系統と相乗り→強／確定は名簿のみ (§7-②)。
         if llm_detection is not None:
             other_raw.extend(_llm_raw(llm_detection, text))
 
-        # 実辞書の票（確定の根拠）＝トークン境界一致＋融合トークン内部の CJK 部分一致
+        # 実辞書の票 (確定の根拠) ＝トークン境界一致＋融合トークン内部の CJK 部分一致
         #   ＋ `部分一致: true` の境界内包照合。両フェーズで共通。
         dict_raw = _dict_matches_raw(
             self.dictionary, tokens, surfaces, text, "dict", "(辞書)"
@@ -588,7 +588,7 @@ class MaskingEngine:
         clusters = _cluster(text, dict_raw + partial_raw + other_raw)
 
         # フェーズ② 強の clean な語＋選択語を「確認済み」として昇格し、分割と確信度づけを再実行。
-        #   昇格票は実辞書とは**別チャネル `session`**（→ 確定ではなく強）。確定は実辞書のみ。
+        #   昇格票は実辞書とは**別チャネル `session`** (→ 確定ではなく強)。確定は実辞書のみ。
         if promote:
             promoted = _promoted_dictionary(self.dictionary, clusters, extra_terms)
             if promoted is not None:
@@ -599,7 +599,7 @@ class MaskingEngine:
                     text, dict_raw + partial_raw + session_raw + other_raw
                 )
 
-        # 連絡先（メール等）を正規表現で確定検出し、重なる他候補を退けて 1 件まるごとにする。
+        # 連絡先 (メール等) を正規表現で確定検出し、重なる他候補を退けて 1 件まるごとにする。
         #   例：辞書社名 exmotion を内包する `x@exmotion.co.jp` を、社名で割らずメール 1 候補に。
         contacts = _contact_candidates(text)
         if contacts:
@@ -611,11 +611,11 @@ class MaskingEngine:
             ]
             clusters = sorted(clusters + contacts, key=lambda c: (c.start, c.end))
 
-        # コードらしき誤検出（中/弱）を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
+        # コードらしき誤検出 (中/弱) を微弱へ落とす (既定で非表示・自動マスク外。データは残す)。
         clusters = _demote_code_like(clusters)
 
         # 除外リスト(allowlist)：人が「機密でない」と登録した語を「除外」へ落とす
-        #   （辞書＝名簿は守る。連絡先 regex の誤検出メール等は検出由来なので除外可）。
+        #   (辞書＝名簿は守る。連絡先 regex の誤検出メール等は検出由来なので除外可)。
         if allowlist is not None:
             clusters = apply_allowlist(clusters, allowlist, tokens)
 
@@ -637,11 +637,11 @@ class MaskingEngine:
     ) -> MaskResult:
         """選択された候補でマスクを適用する。
 
-        expand=True（既定）: 実体ごと。選んだ表層を文書内の**全出現**に展開してマスク。
-        expand=False: 出現ごと。選んだスパン**だけ**をマスク（同形異義語の個別制御用）。
+        expand=True (既定): 実体ごと。選んだ表層を文書内の**全出現**に展開してマスク。
+        expand=False: 出現ごと。選んだスパン**だけ**をマスク (同形異義語の個別制御用)。
 
         検出・展開は平坦化テキスト座標で行い、最後に :func:`_to_original_spans` で
-        原文座標へ写してから原文を置換する（`|` 入りの原文を保ったままマスクする）。
+        原文座標へ写してから原文を置換する (`|` 入りの原文を保ったままマスクする)。
         """
         orig_spans = self.original_spans(analysis, selected, expand=expand)
         original_text = analysis.original_text or analysis.text
@@ -661,17 +661,17 @@ class MaskingEngine:
         *,
         expand: bool,
     ) -> list[Candidate]:
-        """選択候補を（必要なら全出現に展開して）**原文座標**のスパン列にする。
+        """選択候補を (必要なら全出現に展開して) **原文座標**のスパン列にする。
 
-        :meth:`apply` の前半（展開＋座標写し）を切り出したもの。:meth:`mask_parts`（バンドルの
-        共有プレースホルダ）や API 層の pending 位置算出でも同じ前処理を使うため共通化した
-        （採番だけを差し替える）。``expand=False`` なら渡した候補をそのまま原文座標へ写す。
+        :meth:`apply` の前半 (展開＋座標写し) を切り出したもの。:meth:`mask_parts` (バンドルの
+        共有プレースホルダ) や API 層の pending 位置算出でも同じ前処理を使うため共通化した
+        (採番だけを差し替える)。``expand=False`` なら渡した候補をそのまま原文座標へ写す。
         """
         selected = list(selected)
         if expand:
-            # 表層ごとに代表カテゴリを 1 つに（出現ごとに割れた種別を実体単位へ統一）。
-            # 大小区別エントリ（case_sensitive）は case 保存キーで別集約し、展開も大小区別で行う
-            #   （``STS`` を ``Sts``/``sts`` に広げない）。それ以外は従来どおり大小無視で展開。
+            # 表層ごとに代表カテゴリを 1 つに (出現ごとに割れた種別を実体単位へ統一)。
+            # 大小区別エントリ (case_sensitive) は case 保存キーで別集約し、展開も大小区別で行う
+            #   (``STS`` を ``Sts``/``sts`` に広げない)。それ以外は従来どおり大小無視で展開。
             by_ci: dict[str, list[Candidate]] = {}
             by_cs: dict[str, list[Candidate]] = {}
             for c in selected:
@@ -697,14 +697,14 @@ class MaskingEngine:
         *,
         expand: bool = True,
     ) -> BundleMaskResult:
-        """複数パート（プロンプト＋複数ファイル等）を**バンドルで共有する 1 つの対応表**でマスクする。
+        """複数パート (プロンプト＋複数ファイル等) を**バンドルで共有する 1 つの対応表**でマスクする。
 
-        設計 §3-1 の ``POST /mask`` の核。各パートは独立に解析済み（``MaskAnalysis`` と選択候補）を
-        渡す。同じ canonical（表記ゆれ含む）は**全パートで同じプレースホルダ**（``[社1]`` は
-        どのパートでも ``[社1]``）に採番する＝LLM の誤解と unmask の曖昧を防ぐ。
+        設計 §3-1 の ``POST /mask`` の核。各パートは独立に解析済み (``MaskAnalysis`` と選択候補) を
+        渡す。同じ canonical (表記ゆれ含む) は**全パートで同じプレースホルダ** (``[社1]`` は
+        どのパートでも ``[社1]``) に採番する＝LLM の誤解と unmask の曖昧を防ぐ。
 
-        戻り値は各パートの ``masked_text``（入力順）と、バンドルで共有する ``entries``（プレースホルダ・
-        カテゴリ・canonical・確信度・decided_by・出現位置つき）。`/unmask` は entries だけで復元できる。
+        戻り値は各パートの ``masked_text`` (入力順) と、バンドルで共有する ``entries`` (プレースホルダ・
+        カテゴリ・canonical・確信度・decided_by・出現位置つき)。`/unmask` は entries だけで復元できる。
         """
         per_part_spans = [
             self.original_spans(analysis, selected, expand=expand)
@@ -719,12 +719,12 @@ class MaskingEngine:
         return BundleMaskResult(masked_texts=masked_texts, entries=entries)
 
     def group_candidates(self, candidates: Iterable[Candidate]) -> list[CandidateGroup]:
-        """候補を実体（**表層**）ごとにまとめる。
+        """候補を実体 (**表層**) ごとにまとめる。
 
-        **同じ表層は 1 実体に集約**する（マスクは表層＝トークン単位で効くため、カテゴリが
-        出現ごとに割れていても 1 つにまとめる）。実体のカテゴリ・確信度は代表（確信度最良・
-        同点はカテゴリ優先）を採る。confidence は最良、votes は和集合。
-        出現ごとの個別判断は :data:`MaskAnalysis.candidates`（出現ごとモード）が担う。
+        **同じ表層は 1 実体に集約**する (マスクは表層＝トークン単位で効くため、カテゴリが
+        出現ごとに割れていても 1 つにまとめる)。実体のカテゴリ・確信度は代表 (確信度最良・
+        同点はカテゴリ優先) を採る。confidence は最良、votes は和集合。
+        出現ごとの個別判断は :data:`MaskAnalysis.candidates` (出現ごとモード) が担う。
         """
         groups: dict[str, list[Candidate]] = {}
         order: list[str] = []
@@ -756,7 +756,7 @@ class MaskingEngine:
     def mask_chunks(
         self, chunks: Iterable[str], *, flatten_tables: bool = False
     ) -> tuple[MaskAnalysis, MaskResult]:
-        """解析＋既定選択（確定/強）でのマスク適用をまとめて行う。"""
+        """解析＋既定選択 (確定/強) でのマスク適用をまとめて行う。"""
         analysis = self.analyze(chunks, flatten_tables=flatten_tables)
         selected = [
             c for c in analysis.candidates if c.confidence in AUTO_MASK_CONFIDENCE
@@ -770,15 +770,15 @@ class MaskingEngine:
 def _raw(
     start: int, end: int, text: str, category: str, vote: tuple[str, str]
 ) -> Candidate:
-    """確信度未確定の生候補（confidence はクラスタ時に決める）。"""
+    """確信度未確定の生候補 (confidence はクラスタ時に決める)。"""
     return Candidate(start, end, text[start:end], category, "", (vote,))
 
 
 def _llm_raw(detection: LlmDetection, text: str) -> list[Candidate]:
-    """LLM 検出（``LlmDetection``）の各スパンを ``llm`` チャネルの生票に変換する（Stage B）。
+    """LLM 検出 (``LlmDetection``) の各スパンを ``llm`` チャネルの生票に変換する (Stage B)。
 
-    票のラベルは生 ENE type（``vote_category`` が ``_ENE_TO_CATEGORY`` で6カテゴリへ写す）。
-    生成段階のカテゴリは仮（最終カテゴリは _merge の2系統合議が決める）が、未投票時の保険として写像値を入れる。
+    票のラベルは生 ENE type (``vote_category`` が ``_ENE_TO_CATEGORY`` で6カテゴリへ写す)。
+    生成段階のカテゴリは仮 (最終カテゴリは _merge の2系統合議が決める) が、未投票時の保険として写像値を入れる。
     """
     out: list[Candidate] = []
     for sp in detection.spans:
@@ -788,23 +788,23 @@ def _llm_raw(detection: LlmDetection, text: str) -> list[Candidate]:
 
 
 def _has_llm_identifier_vote(c: Candidate) -> bool:
-    """LLM が識別子（社員番号/アカウント/IP）と判定した票を持つか（微弱降格の免除判定）。"""
+    """LLM が識別子 (社員番号/アカウント/IP) と判定した票を持つか (微弱降格の免除判定)。"""
     return any(ch == "llm" and label in _LLM_IDENTIFIER_TYPES for ch, label in c.votes)
 
 
 def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
-    """中/弱 の低価値検出を微弱へ落とす（既定で非表示・自動マスク外。データは残す）。
+    """中/弱 の低価値検出を微弱へ落とす (既定で非表示・自動マスク外。データは残す)。
 
-    確定/強（辞書・連絡先・2系統一致・昇格）は守る＝中/弱 のみ対象。例外：LLM が識別子
-    （社員番号/アカウント/IP）と判定したものは免除＝レビューに残す（§7-④。`7-410` 型でも消さない）。
+    確定/強 (辞書・連絡先・2系統一致・昇格) は守る＝中/弱 のみ対象。例外：LLM が識別子
+    (社員番号/アカウント/IP) と判定したものは免除＝レビューに残す (§7-④。`7-410` 型でも消さない)。
 
-    対象は次のいずれか（LLM 識別子は上記のとおり免除）：
-    - **コードらしき表層**（:func:`_looks_like_code`。`Em_NoYes`/`16D`/`AP・` 等）。
-    - **全大文字ASCII**（``WEXPC-YCD`` 等）。ただし**社名・商標は除く**（``IBM``/``SAP`` 等の略語社名・
-      ``MCSX`` 等の全大文字な商標/型番を守る。全大文字は人名でないので Stage 1 で人名→その他へ既に落ちる）。
-    - **「その他」カテゴリ全般**（＝隠すべきか不明な低価値。Sudachi ``固有名詞-一般`` の「ただの固有名詞」や、
-      Stage 1 で特別→その他へ降格されたノイズ ``EndTime`` 等）。地名・LLM 識別子は「その他」でないため対象外
-      （地名は弱＝要レビューのまま、識別子は上の免除で弱に残る）。
+    対象は次のいずれか (LLM 識別子は上記のとおり免除)：
+    - **コードらしき表層** (:func:`_looks_like_code`。`Em_NoYes`/`16D`/`AP・` 等)。
+    - **全大文字ASCII** (``WEXPC-YCD`` 等)。ただし**社名・商標は除く** (``IBM``/``SAP`` 等の略語社名・
+      ``MCSX`` 等の全大文字な商標/型番を守る。全大文字は人名でないので Stage 1 で人名→その他へ既に落ちる)。
+    - **「その他」カテゴリ全般** (＝隠すべきか不明な低価値。Sudachi ``固有名詞-一般`` の「ただの固有名詞」や、
+      Stage 1 で特別→その他へ降格されたノイズ ``EndTime`` 等)。地名・LLM 識別子は「その他」でないため対象外
+      (地名は弱＝要レビューのまま、識別子は上の免除で弱に残る)。
     """
     return [
         (
@@ -822,15 +822,15 @@ def _demote_code_like(candidates: list[Candidate]) -> list[Candidate]:
     ]
 
 
-# NER スパンを割る文字＝実在の人名・社名に決して現れない区切り（平文化が注入する `、`/`。`、
-# 改行＝セル/文/チャンクの境界）。これらを含むスパンは「またいで融合した塊」なので片へ分ける。
+# NER スパンを割る文字＝実在の人名・社名に決して現れない区切り (平文化が注入する `、`/`。`、
+# 改行＝セル/文/チャンクの境界)。これらを含むスパンは「またいで融合した塊」なので片へ分ける。
 _SPAN_SPLIT_CHARS = frozenset("、。\n")
 
 
 def _split_on_separators(text: str, start: int, end: int) -> list[tuple[int, int]]:
     """スパン [start,end) を ``_SPAN_SPLIT_CHARS`` で分割し、非空な片の (start,end) を返す。
 
-    区切りを含まなければ元の 1 片をそのまま返す（無回帰）。区切り文字自身は片に含めない。
+    区切りを含まなければ元の 1 片をそのまま返す (無回帰)。区切り文字自身は片に含めない。
     """
     spans: list[tuple[int, int]] = []
     seg_start: int | None = None
@@ -847,9 +847,9 @@ def _split_on_separators(text: str, start: int, end: int) -> list[tuple[int, int
 
 
 # --------------------------------------------------------------------------- #
-# チャネル別の票生成（§13 のチャネル分離）。各関数は「生候補（confidence 未確定）」の列を返す。
-# 集約（_cluster/_merge の2系統合議）はチャネル非依存なので、ここを足し引きするだけで
-# 「走ったチャネルだけ集計」が表現できる（NER 任意化＝④ の土台）。
+# チャネル別の票生成 (§13 のチャネル分離)。各関数は「生候補 (confidence 未確定)」の列を返す。
+# 集約 (_cluster/_merge の2系統合議) はチャネル非依存なので、ここを足し引きするだけで
+# 「走ったチャネルだけ集計」が表現できる (NER 任意化＝④ の土台)。
 # --------------------------------------------------------------------------- #
 def _dict_matches_raw(
     dictionary: MaskDictionary,
@@ -859,11 +859,11 @@ def _dict_matches_raw(
     channel: str,
     suffix: str,
 ) -> list[Candidate]:
-    """辞書のトークン照合を ``channel`` 票（生候補）にする（dict→確定 / session→強 の根拠）。"""
+    """辞書のトークン照合を ``channel`` 票 (生候補) にする (dict→確定 / session→強 の根拠)。"""
     out: list[Candidate] = []
     spans = [
         (t.start, t.end) for t in tokens
-    ]  # 空白区切りを境界と認識させる（`LB SONY` 対策）
+    ]  # 空白区切りを境界と認識させる (`LB SONY` 対策)
     for m in dictionary.match(surfaces, spans):
         start = tokens[m.start_token].start
         end = tokens[m.end_token - 1].end
@@ -882,9 +882,9 @@ def _dict_substring_raw(
 ) -> list[Candidate]:
     """辞書語が**融合トークン内部の CJK/かな部分文字列**として現れた分を ``channel`` 票にする。
 
-    Sudachi が複合カタカナを 1 トークンに融合したときの取りこぼし（``エクスモーション`` in
-    ``エクスモーションオリジナル``）を埋める。channel は :func:`_dict_matches_raw` と同じ
-    （dict→確定 / session→強）。命中は一致した部分だけを span にする。
+    Sudachi が複合カタカナを 1 トークンに融合したときの取りこぼし (``エクスモーション`` in
+    ``エクスモーションオリジナル``) を埋める。channel は :func:`_dict_matches_raw` と同じ
+    (dict→確定 / session→強)。命中は一致した部分だけを span にする。
     """
     tok_tuples = [(t.surface, t.start, t.end) for t in tokens]
     out: list[Candidate] = []
@@ -898,10 +898,10 @@ def _partial_raw(
     tokens: tuple[AnalyzedToken, ...],
     text: str,
 ) -> list[Candidate]:
-    """``部分一致: true`` 辞書語の境界内包照合を dict 票（生候補）にする。
+    """``部分一致: true`` 辞書語の境界内包照合を dict 票 (生候補) にする。
 
-    命中はトークン全体でなく**一致した部分だけ**を span にする（`SmashMark`→`Smash` /
-    `IF-X`→`IF-`）。区切りをまたぐ照合に対応するため、トークンを全文オフセット付きで渡す。
+    命中はトークン全体でなく**一致した部分だけ**を span にする (`SmashMark`→`Smash` /
+    `IF-X`→`IF-`)。区切りをまたぐ照合に対応するため、トークンを全文オフセット付きで渡す。
     """
     tok_tuples = [(t.surface, t.start, t.end) for t in tokens]
     out: list[Candidate] = []
@@ -911,7 +911,7 @@ def _partial_raw(
 
 
 def _sudachi_raw(tokens: tuple[AnalyzedToken, ...], text: str) -> list[Candidate]:
-    """Sudachi 品詞（固有名詞）を ``sudachi`` 票（生候補）にする（NLP/NER チャネルの一部）。"""
+    """Sudachi 品詞 (固有名詞) を ``sudachi`` 票 (生候補) にする (NLP/NER チャネルの一部)。"""
     out: list[Candidate] = []
     for t in tokens:
         category = _sudachi_category(t.tag)
@@ -921,10 +921,10 @@ def _sudachi_raw(tokens: tuple[AnalyzedToken, ...], text: str) -> list[Candidate
 
 
 def _ner_raw(per_model: list[tuple[str, Analysis]], text: str) -> list[Candidate]:
-    """GiNZA NER エンティティを各モデル名チャネルの票（生候補）にする。
+    """GiNZA NER エンティティを各モデル名チャネルの票 (生候補) にする。
 
-    Product_Other 系（その他）はノイズ過多のため除外。NER スパンは `、`/`。`/改行で分割
-    （セル/文/チャンクをまたいだ融合の人工物を片へ割る。融合でも実体を取りこぼさない）。
+    Product_Other 系 (その他) はノイズ過多のため除外。NER スパンは `、`/`。`/改行で分割
+    (セル/文/チャンクをまたいだ融合の人工物を片へ割る。融合でも実体を取りこぼさない)。
     """
     out: list[Candidate] = []
     for model_name, analysis in per_model:
@@ -938,32 +938,32 @@ def _ner_raw(per_model: list[tuple[str, Analysis]], text: str) -> list[Candidate
 
 
 def _looks_like_code(surface: str) -> bool:
-    """社内コード/変数名らしき表層か（実在の人名・社名には現れない特徴）。
+    """社内コード/変数名らしき表層か (実在の人名・社名には現れない特徴)。
 
     いずれかに該当：
     - 記号マーカー ``_`` / ``::`` / ``@`` / ``~`` / ``[ ] { } = ! < > ; | \\`` を含む
-      （例 ``Em_NoYes`` / ``Em_OffOn::idOff`` / ``ピッチ@`` / ``~C02`` / ``37D]==0`` /
-      ファイルパス由来の ``Group\\ABC-Z``）。
-    - 英字も日本語（かな・漢字）も含まない＝数字・記号のみ（例 ``7-410``）。
-    - **ASCII のみ＋数字を含む**（例 ``16D`` / ``1L`` / ``37D``）。実在の人名・社名はまず数字を含まない。
-    - **CJK区切り/括弧が ASCII 英字に隣接**（例 ``AP・`` / ``theta・「`` / ``会社「A」``）＝NER スパンが
+      (例 ``Em_NoYes`` / ``Em_OffOn::idOff`` / ``ピッチ@`` / ``~C02`` / ``37D]==0`` /
+      ファイルパス由来の ``Group\\ABC-Z``)。
+    - 英字も日本語 (かな・漢字) も含まない＝数字・記号のみ (例 ``7-410``)。
+    - **ASCII のみ＋数字を含む** (例 ``16D`` / ``1L`` / ``37D``)。実在の人名・社名はまず数字を含まない。
+    - **CJK区切り/括弧が ASCII 英字に隣接** (例 ``AP・`` / ``theta・「`` / ``会社「A」``) ＝NER スパンが
       セル/引用の境界を巻き込んだ人工物。**隣接に限る**ので、区切りが仮名間にある実在語
-      （``C型補正値リミット・チェック結果``）や純カナの中黒名（``ジョン・スミス``）は対象外＝守る。
-    - **先頭/末尾に垂れたハイフン類・中黒**（例 ``AP-`` / ``R-`` / ``-C02`` / ``田中・``）＝境界の人工物。
-      内部ハイフンの実在名（``Coca-Cola`` / ``Anne-Marie``）や長音 ``ー`` は対象外＝守る。
-    - **不均衡な丸括弧**（open≠close。例 ``LSMonito(`` / ``)Monitor``）＝NER スパンが括弧を巻き込んだ
-      人工物。均衡した括弧つき社名（``Sony (Japan)`` / ``会社（日本）``）は守る（ASCII/全角とも）。
-    - **1 文字語（漢字を除く）**＝ASCII 英字・かな・数字・記号 1 文字（例 ``N`` / ``D``）。実在名では
-      まず無い。ただし**漢字 1 文字は実在姓**（林・森・関 等）があるので保護＝対象外。
+      (``C型補正値リミット・チェック結果``) や純カナの中黒名 (``ジョン・スミス``) は対象外＝守る。
+    - **先頭/末尾に垂れたハイフン類・中黒** (例 ``AP-`` / ``R-`` / ``-C02`` / ``田中・``) ＝境界の人工物。
+      内部ハイフンの実在名 (``Coca-Cola`` / ``Anne-Marie``) や長音 ``ー`` は対象外＝守る。
+    - **不均衡な丸括弧** (open≠close。例 ``LSMonito(`` / ``)Monitor``) ＝NER スパンが括弧を巻き込んだ
+      人工物。均衡した括弧つき社名 (``Sony (Japan)`` / ``会社 (日本) ``) は守る (ASCII/全角とも)。
+    - **1 文字語 (漢字を除く) **＝ASCII 英字・かな・数字・記号 1 文字 (例 ``N`` / ``D``)。実在名では
+      まず無い。ただし**漢字 1 文字は実在姓** (林・森・関 等) があるので保護＝対象外。
 
-    NER（electra/ja_ginza）がこれらを社名/人名に誤ラベルし中/弱で大量に湧くため、
-    :meth:`MaskingEngine.analyze` で **中/弱 のみ** を **微弱**（既定で非表示・自動マスク外）へ落とす（Stage 2）。
-    確定/強（辞書・連絡先・2系統一致・昇格）は対象にしない＝根拠があるものは守る。
+    NER (electra/ja_ginza) がこれらを社名/人名に誤ラベルし中/弱で大量に湧くため、
+    :meth:`MaskingEngine.analyze` で **中/弱 のみ** を **微弱** (既定で非表示・自動マスク外) へ落とす (Stage 2)。
+    確定/強 (辞書・連絡先・2系統一致・昇格) は対象にしない＝根拠があるものは守る。
     NER の票そのものを弱める Stage 1 は :func:`_system_category` を参照。
 
-    判定前に**先頭/末尾の引用符類を剥がす**（`_EDGE_QUOTES`）：全角/スマート引用符（`＂` `“` `”`）は
-    ASCII 判定を素通りするため、剥がしてから中身で判定する（`"O1234.01`→`O1234.01` はコード判定に載る。
-    `"ソニー"`→`ソニー` は実名なので落ちない）。
+    判定前に**先頭/末尾の引用符類を剥がす** (`_EDGE_QUOTES`)：全角/スマート引用符 (`＂` `“` `”`) は
+    ASCII 判定を素通りするため、剥がしてから中身で判定する (`"O1234.01`→`O1234.01` はコード判定に載る。
+    `"ソニー"`→`ソニー` は実名なので落ちない)。
     """
     surface = surface.strip(_EDGE_QUOTES)
     if _CODE_MARKER_RE.search(surface):
@@ -974,53 +974,51 @@ def _looks_like_code(surface: str) -> bool:
         return True
     if _CJK_SEP_ADJ_ASCII_RE.search(surface):
         return (
-            True  # ASCII英字に隣接する中黒/括弧＝スパン境界の人工物（AP・ / theta・「）
+            True  # ASCII英字に隣接する中黒/括弧＝スパン境界の人工物 (AP・ / theta・「)
         )
     if _DANGLING_SEP_RE.search(surface):
-        return (
-            True  # 先頭/末尾に垂れたハイフン類・中黒＝境界の人工物（AP- / R- / -C02）
-        )
+        return True  # 先頭/末尾に垂れたハイフン類・中黒＝境界の人工物 (AP- / R- / -C02)
     if sum(c in _OPEN_PARENS for c in surface) != sum(
         c in _CLOSE_PARENS for c in surface
     ):
-        return True  # 不均衡な丸括弧＝スパン境界の人工物（LSMonito( / )Monitor）
+        return True  # 不均衡な丸括弧＝スパン境界の人工物 (LSMonito( / )Monitor)
     return len(surface) == 1 and not _KANJI_RE.match(surface)
 
 
 def _looks_like_nonperson_latin(surface: str) -> bool:
-    """ラテン文字主体（かな/漢字を含まない）の表層が、**実在人名の形を成していない**か。
+    """ラテン文字主体 (かな/漢字を含まない) の表層が、**実在人名の形を成していない**か。
 
-    実在のラテン人名は「各語が **Titlecase**（先頭大文字＋以降小文字）」（``John`` / ``Smith`` /
-    ``Anne-Marie``）。この形に**合致しない** ASCII 語は、人名でなく識別子/術語/コード片とみなして
-    NER の人名票を弱める（:func:`_system_category` の Stage 1・**人名のみ**）。明示的に弾く構造：
+    実在のラテン人名は「各語が **Titlecase** (先頭大文字＋以降小文字)」 (``John`` / ``Smith`` /
+    ``Anne-Marie``)。この形に**合致しない** ASCII 語は、人名でなく識別子/術語/コード片とみなして
+    NER の人名票を弱める (:func:`_system_category` の Stage 1・**人名のみ**)。明示的に弾く構造：
 
-    - **全小文字**（``theta`` / ``list`` / ``print``）＝実在の固有名は全小文字にならない。
-    - **camelCase / PascalCase の途中コブ**（``EndTime`` / ``MarkID`` / ``dElem`` / ``OutputItegrity``）
+    - **全小文字** (``theta`` / ``list`` / ``print``) ＝実在の固有名は全小文字にならない。
+    - **camelCase / PascalCase の途中コブ** (``EndTime`` / ``MarkID`` / ``dElem`` / ``OutputItegrity``)
       ＝語の途中に大文字。
-    - **全大文字**（``FIARSL``）／**2文字以上の全大文字語を含む複合**（``Wafer ID`` の ``ID``）。
-    - **記号・ブラケット混じり**（``theta・「``）＝Titlecase 語に分解できない。
+    - **全大文字** (``FIARSL``) ／**2文字以上の全大文字語を含む複合** (``Wafer ID`` の ``ID``)。
+    - **記号・ブラケット混じり** (``theta・「``) ＝Titlecase 語に分解できない。
 
-    日本語（かな/漢字）を含む表層は対象外＝**NER の日本語人名判定を信頼**する（``佐伯`` 等は守る。
-    ``サブエラーコード`` のようなカタカナ汎用語は表層で固有名と区別できず、辞書/除外リストの仕事）。
-    数字・記号のみ（ラテン英字を含まない）は別経路 :func:`_looks_like_code` に委ねる。
+    日本語 (かな/漢字) を含む表層は対象外＝**NER の日本語人名判定を信頼**する (``佐伯`` 等は守る。
+    ``サブエラーコード`` のようなカタカナ汎用語は表層で固有名と区別できず、辞書/除外リストの仕事)。
+    数字・記号のみ (ラテン英字を含まない) は別経路 :func:`_looks_like_code` に委ねる。
 
-    ⚠ ``McDonald`` / ``DeWitt`` / ``DiCaprio`` 等の途中大文字を持つ外国姓も巻き込む（Titlecase でない）。
-    LLM（2系統一致＝強）と辞書で救済される前提＝英語人名の recall は NER 単独の仕事ではない。
+    ⚠ ``McDonald`` / ``DeWitt`` / ``DiCaprio`` 等の途中大文字を持つ外国姓も巻き込む (Titlecase でない)。
+    LLM (2系統一致＝強) と辞書で救済される前提＝英語人名の recall は NER 単独の仕事ではない。
     """
     if _JP_LETTER_RE.search(surface):
-        return False  # かな/漢字を含む＝NER の日本語人名判定を信頼（弱めない）
+        return False  # かな/漢字を含む＝NER の日本語人名判定を信頼 (弱めない)
     words = _ASCII_WORD_RE.findall(surface)
     if not words:
-        return False  # ラテン英字が無い（数字/記号のみ）＝_looks_like_code の担当
+        return False  # ラテン英字が無い (数字/記号のみ) ＝_looks_like_code の担当
     return not all(_TITLECASE_RE.fullmatch(w) for w in words)
 
 
 def _is_jargon_caps(surface: str) -> bool:
-    """全大文字ASCII（略語/ジャーゴン。``FIARSL`` / ``WEXPC-YCD`` / ``EGPDPRY``）か。
+    """全大文字ASCII (略語/ジャーゴン。``FIARSL`` / ``WEXPC-YCD`` / ``EGPDPRY``) か。
 
-    ASCII のみ・英大文字を含み・**英小文字を含まない**（``-`` や数字・区切りの混在は許す）。
-    実在の人名はこの形にならない（人名は Titlecase か日本語）ので **NER の人名票を弱める**判定に使う
-    （:func:`_system_category` の Stage 1）。社名は ``IBM``/``SAP``/``AWS`` 等があるので社名には使わない。
+    ASCII のみ・英大文字を含み・**英小文字を含まない** (``-`` や数字・区切りの混在は許す)。
+    実在の人名はこの形にならない (人名は Titlecase か日本語) ので **NER の人名票を弱める**判定に使う
+    (:func:`_system_category` の Stage 1)。社名は ``IBM``/``SAP``/``AWS`` 等があるので社名には使わない。
     """
     return (
         surface.isascii()
@@ -1030,10 +1028,10 @@ def _is_jargon_caps(surface: str) -> bool:
 
 
 def _contact_candidates(text: str) -> list[Candidate]:
-    """連絡先（メール等）を正規表現で検出し、**1 件まるごと**の候補にする。
+    """連絡先 (メール等) を正規表現で検出し、**1 件まるごと**の候補にする。
 
-    finditer で全出現を個別に拾う（＝展開不要で全部マスクされる）。確信度は **強**（自動マスク）：
-    正規表現は決定的だが誤検出があり得る（例 `20181210112500@MH01R2.sdf`）。**確定は名簿のみ**に
+    finditer で全出現を個別に拾う (＝展開不要で全部マスクされる)。確信度は **強** (自動マスク)：
+    正規表現は決定的だが誤検出があり得る (例 `20181210112500@MH01R2.sdf`)。**確定は名簿のみ**に
     予約し、連絡先は強に留める＝自動マスクしつつ、誤検出は除外リストで外せる。
     """
     out: list[Candidate] = []
@@ -1055,8 +1053,8 @@ def _contact_candidates(text: str) -> list[Candidate]:
 def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
     """重なる候補スパンをまとめ、票数とカテゴリから確信度を決める。
 
-    辞書一致を含むクラスタは**辞書境界で分割**する（粗い NER スパンに辞書の実体を
-    飲み込ませない）。例：`SONY・Nikon・Canon` を 1 つにせず SONY/Nikon/Canon の各辞書
+    辞書一致を含むクラスタは**辞書境界で分割**する (粗い NER スパンに辞書の実体を
+    飲み込ませない)。例：`SONY・Nikon・Canon` を 1 つにせず SONY/Nikon/Canon の各辞書
     スパンへ、`小浜出身` を `小浜` だけに割る。辞書一致が無ければ従来どおり 1 スパンに統合。
     """
     if not cands:
@@ -1077,7 +1075,7 @@ def _cluster(text: str, cands: list[Candidate]) -> list[Candidate]:
 
 
 def _has_dict_vote(c: Candidate) -> bool:
-    """実辞書票を持つか（確定の判定用。session=昇格は含めない）。"""
+    """実辞書票を持つか (確定の判定用。session=昇格は含めない)。"""
     return any(ch == "dict" for ch, _ in c.votes)
 
 
@@ -1086,25 +1084,25 @@ def apply_allowlist(
     allowlist: MaskAllowlist,
     tokens: Iterable[AnalyzedToken] = (),
 ) -> list[Candidate]:
-    """除外リスト一致の候補を「除外」へ落とす（**解析をやり直さず**候補だけ書き換える）。
+    """除外リスト一致の候補を「除外」へ落とす (**解析をやり直さず**候補だけ書き換える)。
 
-    recall 安全：守るのは **辞書（人の名簿）一致のみ**（`_has_dict_vote`）。辞書語は人が意図して
+    recall 安全：守るのは **辞書 (人の名簿) 一致のみ** (`_has_dict_vote`)。辞書語は人が意図して
     「必ずマスク」と登録したものなので、除外リストでは上書きしない。
-    一方、**連絡先 regex（強）**（例 `20181210112500@MH01R2.sdf` の誤検出メール）は検出由来なので、
-    人が明示的に除外できる（表層単位なので本物のメールには波及しない）。
+    一方、**連絡先 regex (強) ** (例 `20181210112500@MH01R2.sdf` の誤検出メール) は検出由来なので、
+    人が明示的に除外できる (表層単位なので本物のメールには波及しない)。
     ``analyze`` 内でも、UI が確定済み解析へ後から除外を反映するときも、この同一ロジックを使う。
 
     照合は :meth:`MaskAllowlist.matches`＝完全一致 or ``embed`` 語の境界内包一致
-    （``FB`` embed で ``GetFBData`` を丸ごと除外）。``tokens`` を渡すと、各候補を覆うトークンの表層を
-    embed 照合に使い、**形態素境界**でも効く（日本語対応。``補正`` embed → ``用補正値``）。
-    ``tokens`` 無し（既定）は表層文字列ベースの ASCII/識別子系のみ（後方互換）。
+    (``FB`` embed で ``GetFBData`` を丸ごと除外)。``tokens`` を渡すと、各候補を覆うトークンの表層を
+    embed 照合に使い、**形態素境界**でも効く (日本語対応。``補正`` embed → ``用補正値``)。
+    ``tokens`` 無し (既定) は表層文字列ベースの ASCII/識別子系のみ (後方互換)。
     """
     if not allowlist:
         return list(candidates)
     toks = tuple(tokens)
     out: list[Candidate] = []
     for c in candidates:
-        # 候補 [start,end) を覆う（完全に内側の）トークンの表層＝形態素境界での embed 照合に使う。
+        # 候補 [start,end) を覆う (完全に内側の) トークンの表層＝形態素境界での embed 照合に使う。
         cover = [t.surface for t in toks if c.start <= t.start and t.end <= c.end]
         hit = not _has_dict_vote(c) and allowlist.matches(c.surface, cover or None)
         out.append(replace(c, confidence="除外") if hit else c)
@@ -1114,10 +1112,10 @@ def apply_allowlist(
 def apply_allowlist_to_analysis(
     analysis: MaskAnalysis, allowlist: MaskAllowlist
 ) -> MaskAnalysis:
-    """解析結果（候補）に除外リストを後から適用した新しい :class:`MaskAnalysis` を返す。
+    """解析結果 (候補) に除外リストを後から適用した新しい :class:`MaskAnalysis` を返す。
 
-    NER は再実行しない（候補の confidence を書き換えるだけ）＝除外の反映が即座で済む。
-    ``analysis.tokens`` を渡すので embed 除外が形態素境界でも効く（日本語対応）。
+    NER は再実行しない (候補の confidence を書き換えるだけ) ＝除外の反映が即座で済む。
+    ``analysis.tokens`` を渡すので embed 除外が形態素境界でも効く (日本語対応)。
     """
     return replace(
         analysis,
@@ -1128,11 +1126,11 @@ def apply_allowlist_to_analysis(
 
 
 def _has_anchor_vote(c: Candidate) -> bool:
-    """分割の足場になる票を持つか＝実辞書 or 昇格（session）。確定済みの実体の境界で割る。"""
+    """分割の足場になる票を持つか＝実辞書 or 昇格 (session)。確定済みの実体の境界で割る。"""
     return any(ch in ("dict", "session") for ch, _ in c.votes)
 
 
-# 昇格対象から外す「区切り」を含む表層（塊＝複数実体）。中黒/スラッシュ/カンマ/空白など。
+# 昇格対象から外す「区切り」を含む表層 (塊＝複数実体)。中黒/スラッシュ/カンマ/空白など。
 _SEPARATOR_CHARS = "・･/／,，、　 \t×"
 
 
@@ -1145,12 +1143,12 @@ def _promoted_dictionary(
     clusters: list[Candidate],
     extra_terms: Iterable[tuple[str, str]],
 ) -> MaskDictionary | None:
-    """強の clean な語＋選択語だけを集めた「確認済み」辞書を返す（実辞書とは別）。
+    """強の clean な語＋選択語だけを集めた「確認済み」辞書を返す (実辞書とは別)。
 
-    これは**確定ではなく強**として再注入するためのもの（実辞書 = 確定 と区別）。
-    対象は phase1 で **強**になった語（＝実辞書に無い・NER/Sudachi で確認できた語）と
-    選択語。確定（= 実辞書）は実辞書自身が全出現を拾うので昇格不要。
-    昇格しないもの：地名/その他、区切りを含む表層（塊＝再び 1 つに固まる）。
+    これは**確定ではなく強**として再注入するためのもの (実辞書 = 確定 と区別)。
+    対象は phase1 で **強**になった語 (＝実辞書に無い・NER/Sudachi で確認できた語) と
+    選択語。確定 (= 実辞書) は実辞書自身が全出現を拾うので昇格不要。
+    昇格しないもの：地名/その他、区切りを含む表層 (塊＝再び 1 つに固まる)。
     何も無ければ None。
     """
     additions: dict[str, tuple[str, str]] = {}
@@ -1170,16 +1168,16 @@ def _promoted_dictionary(
 
 
 def _overlaps_any(s: int, e: int, spans: list[tuple[int, int]]) -> bool:
-    """[s, e) が spans のいずれかと **少しでも重なる** か（端が接するだけ＝境界一致は重なりでない）。
+    """[s, e) が spans のいずれかと **少しでも重なる** か (端が接するだけ＝境界一致は重なりでない)。
 
-    内包（`SONY` を覆う `SONYビル`）・またぎ（`SONY・Nikon・Canon` を覆う粗い NER）・部分重なり
-    （`情報.D` が確定 `D-Cap`[3,8) と [3,4) だけ重なる）を **すべて** 重なりとして扱う。
+    内包 (`SONY` を覆う `SONYビル`) ・またぎ (`SONY・Nikon・Canon` を覆う粗い NER) ・部分重なり
+    (`情報.D` が確定 `D-Cap`[3,8) と [3,4) だけ重なる) を **すべて** 重なりとして扱う。
     """
     return any(s < de and ds < e for ds, de in spans)
 
 
 def _segment_spans(members: list[Candidate]) -> list[tuple[int, int]]:
-    """メンバー群を重なりでまとめた区間（min start, max end）の列にする。"""
+    """メンバー群を重なりでまとめた区間 (min start, max end) の列にする。"""
     if not members:
         return []
     ordered = sorted(members, key=lambda m: (m.start, m.end))
@@ -1200,15 +1198,15 @@ def _resolve_cluster(
 ) -> list[Candidate]:
     """1 クラスタを確信度づけ。辞書一致があれば辞書境界で分割して返す。
 
-    足場（辞書 or 昇格＝session）が無ければ 1 件に統合。足場があれば：
-    - 各足場スパンを独立候補に（粗い NER スパンに飲み込ませない。例 `SONY・Nikon・Canon`→3分割）。
-    - 足場スパンと**重ならない**その他メンバー（＝列挙に取り残された実体。例 `SONY|Nikon|Canon` の
-      昇格後の Nikon）だけを区間にまとめて出す。普通名詞のみの隙間（例 `小浜出身` の `出身`＝Sudachi
-      候補が無い）は出さない。
-    - **足場スパンと少しでも重なる非足場メンバーは候補として出さない**（内包・またぎに加え、部分重なりも）。
-      確定/強で消える箇所に、それと重なる別スパン（例 `情報.D` が確定 `D-Cap`[3,8) と [3,4) だけ重なる）を
+    足場 (辞書 or 昇格＝session) が無ければ 1 件に統合。足場があれば：
+    - 各足場スパンを独立候補に (粗い NER スパンに飲み込ませない。例 `SONY・Nikon・Canon`→3分割)。
+    - 足場スパンと**重ならない**その他メンバー (＝列挙に取り残された実体。例 `SONY|Nikon|Canon` の
+      昇格後の Nikon) だけを区間にまとめて出す。普通名詞のみの隙間 (例 `小浜出身` の `出身`＝Sudachi
+      候補が無い) は出さない。
+    - **足場スパンと少しでも重なる非足場メンバーは候補として出さない** (内包・またぎに加え、部分重なりも)。
+      確定/強で消える箇所に、それと重なる別スパン (例 `情報.D` が確定 `D-Cap`[3,8) と [3,4) だけ重なる) を
       二重に候補提示しない＝表示・選択の混乱と、確定領域への確信度漏れを断つ。重なる票は下の overlap
-      収集で確信度（橋渡し）には効かせるので、広い NER 票が足場スパンの確信度に寄与する点は維持する。
+      収集で確信度 (橋渡し) には効かせるので、広い NER 票が足場スパンの確信度に寄与する点は維持する。
     - 各 emit スパンには**重なる全メンバーの票**を集める＝橋渡しの広い NER 票も確信度に効かせる。
     """
     anchor_members = [m for m in members if _has_anchor_vote(m)]
@@ -1229,19 +1227,19 @@ def _resolve_cluster(
 
 
 def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candidate:
-    """重なる票群を 1 候補へ。種別・確信度は **NER×LLM の2系統合議**で決める（§13）。
+    """重なる票群を 1 候補へ。種別・確信度は **NER×LLM の2系統合議**で決める (§13)。
 
-    ① 種別＝特別（人名/社名/商標）が地名/その他に勝つ・両系統が別の特別なら重い方（_CAT_PRIORITY）。
-    ② 確信度＝「特別（隠すべき）」と言った**系統数**：2系統=強／1系統=中（floor）／特別なし=弱。
-       辞書=確定（最優先・名簿）／昇格(session)=強。NER の内部チャネル数は確信度に効かない。
+    ① 種別＝特別 (人名/社名/商標) が地名/その他に勝つ・両系統が別の特別なら重い方 (_CAT_PRIORITY)。
+    ② 確信度＝「特別 (隠すべき)」と言った**系統数**：2系統=強／1系統=中 (floor) ／特別なし=弱。
+       辞書=確定 (最優先・名簿) ／昇格(session)=強。NER の内部チャネル数は確信度に効かない。
     """
 
-    # 決定的チャネル（dict=確定 / session=昇格→強 / regex=連絡先）の票は、その一致が **この emit
+    # 決定的チャネル (dict=確定 / session=昇格→強 / regex=連絡先) の票は、その一致が **この emit
     # スパンに収まる** メンバー由来のときだけ採る。部分的に重なるだけの広い NER スパンへ確定/強が
     # 漏れるのを防ぐ。例:「情報.D」(NER 1 スパン) が辞書の部分一致 D-Cap[3,8) と [3,4) だけ重なるとき、
-    # 一般語『情報』まで商標・確定で誤マスクされていた（辞書は「名簿が実際にその位置で一致した」ときだけ
-    # 砦になる。votes 自体から外すので _has_dict_vote＝除外リスト適用可否もこの emit では正しくなる）。
-    # 非決定（system: NER/Sudachi/LLM）票は重なる全メンバーから集める＝広い NER スパンの橋渡しは確信度に効かせる。
+    # 一般語『情報』まで商標・確定で誤マスクされていた (辞書は「名簿が実際にその位置で一致した」ときだけ
+    # 砦になる。votes 自体から外すので _has_dict_vote＝除外リスト適用可否もこの emit では正しくなる)。
+    # 非決定 (system: NER/Sudachi/LLM) 票は重なる全メンバーから集める＝広い NER スパンの橋渡しは確信度に効かせる。
     def _applies(m: Candidate, ch: str) -> bool:
         return ch not in _DECISIVE_CHANNELS or (start <= m.start and m.end <= end)
 
@@ -1251,7 +1249,7 @@ def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candida
         )
     )
     surface = text[start:end]
-    # 辞書票があれば辞書のカテゴリで確定（系統の票数によらず最優先＝名簿が砦）。
+    # 辞書票があれば辞書のカテゴリで確定 (系統の票数によらず最優先＝名簿が砦)。
     dict_cats = [
         cat
         for ch, label in votes
@@ -1259,7 +1257,7 @@ def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candida
     ]
     if dict_cats:
         return Candidate(start, end, surface, dict_cats[0], "確定", votes)
-    # 各系統を 1 カテゴリへ畳む（系統内合議）。NER 系統 / LLM 系統。
+    # 各系統を 1 カテゴリへ畳む (系統内合議)。NER 系統 / LLM 系統。
     sys_cats = [
         c
         for c in (
@@ -1269,16 +1267,16 @@ def _merge(text: str, start: int, end: int, members: list[Candidate]) -> Candida
         if c is not None
     ]
     if not sys_cats:
-        # 系統票が無い（session 昇格のみ等）＝カテゴリ未確定の中扱い（下の昇格で強になり得る）。
+        # 系統票が無い (session 昇格のみ等) ＝カテゴリ未確定の中扱い (下の昇格で強になり得る)。
         category, confidence = members[0].category, "中"
     else:
         # ① 種別＝特別が地名/その他に勝つ・重い特別が勝つ＝_CAT_PRIORITY 最上位。
         category = min(sys_cats, key=lambda c: _CAT_RANK.get(c, 99))
-        # ② 確信度＝特別（地名/その他でない）と言った系統数。2系統=強／1系統=中（floor）／0=弱。
+        # ② 確信度＝特別 (地名/その他でない) と言った系統数。2系統=強／1系統=中 (floor) ／0=弱。
         n_special = sum(1 for c in sys_cats if c not in ("地名", "その他"))
         confidence = "強" if n_special >= 2 else "中" if n_special >= 1 else "弱"
-    # 昇格（session＝他箇所で確認済み）票がそのカテゴリにあれば最低でも強（決定的だが名簿でないので
-    #   確定にはしない＝確定は実辞書だけ、という区別を保つ）。
+    # 昇格 (session＝他箇所で確認済み) 票がそのカテゴリにあれば最低でも強 (決定的だが名簿でないので
+    #   確定にはしない＝確定は実辞書だけ、という区別を保つ)。
     if category not in ("地名", "その他") and any(
         ch == "session" and vote_category(ch, label) == category for ch, label in votes
     ):
@@ -1293,10 +1291,10 @@ def _expand(
     cs_collected: dict[str, str],
     existing: list[Candidate],
 ) -> list[Candidate]:
-    """選んだ表層形を、文書内の全出現（トークン単位）に展開する。
+    """選んだ表層形を、文書内の全出現 (トークン単位) に展開する。
 
-    ``collected``＝大小無視で照合する表層（normalize キー）。``cs_collected``＝大小区別で
-    照合する表層（normalize_cs キー。``STS`` は ``STS`` のみに展開し ``Sts``/``sts`` は広げない）。
+    ``collected``＝大小無視で照合する表層 (normalize キー)。``cs_collected``＝大小区別で
+    照合する表層 (normalize_cs キー。``STS`` は ``STS`` のみに展開し ``Sts``/``sts`` は広げない)。
     """
     if not collected and not cs_collected:
         return []
@@ -1344,7 +1342,7 @@ def _map_span(
 ) -> tuple[int, int] | None:
     """平坦化テキストのスパン [start, end) を原文座標へ写す。
 
-    挿入文字（区切り `、`/句点 `。`/連結改行＝対応 -1）を読み飛ばし、原文側で実体を
+    挿入文字 (区切り `、`/句点 `。`/連結改行＝対応 -1) を読み飛ばし、原文側で実体を
     覆う連続範囲を返す。スパン内に実体が無ければ None。検出は `、` でセルを割っているため
     1 つのスパンはセル内に収まり、原文範囲に `|` は挟まらない。
     """
@@ -1364,7 +1362,7 @@ def _map_span(
 def _to_original_spans(
     spans: list[Candidate], original_text: str, offset_map: tuple[int, ...]
 ) -> list[Candidate]:
-    """候補スパン（平坦化座標）を原文座標へ写し、原文の表層で作り直す。
+    """候補スパン (平坦化座標) を原文座標へ写し、原文の表層で作り直す。
 
     平坦化しない場合は offset_map が恒等なので原文 = 平坦化テキストで実質そのまま。
     """
@@ -1385,10 +1383,10 @@ def _assign_placeholders(
 ) -> tuple[tuple[MaskEntry, ...], dict[tuple[int, int], str]]:
     """(カテゴリ, 代表表記) ごとにプレースホルダを割り当てる。
 
-    **同じ表層（canonical）は 1 プレースホルダに統一**する（カテゴリが出現ごとに割れていても
-    1 つにまとめる＝表層単位でマスク、と整合）。実体のカテゴリは代表（確信度最良・同点は優先）を採る。
-    表記ゆれ（英語表記↔カタカナ表記・略称・旧称）も canonical で同じプレースホルダに寄る。
-    辞書で**置換語（mask）が指定**された実体は、自動採番でなくその語を使う（未指定は自動採番）。
+    **同じ表層 (canonical) は 1 プレースホルダに統一**する (カテゴリが出現ごとに割れていても
+    1 つにまとめる＝表層単位でマスク、と整合)。実体のカテゴリは代表 (確信度最良・同点は優先) を採る。
+    表記ゆれ (英語表記↔カタカナ表記・略称・旧称) も canonical で同じプレースホルダに寄る。
+    辞書で**置換語 (mask) が指定**された実体は、自動採番でなくその語を使う (未指定は自動採番)。
     """
     groups: dict[str, list[Candidate]] = {}
     order: list[str] = []
@@ -1417,7 +1415,7 @@ def _assign_placeholders(
             prefix = _PLACEHOLDER_PREFIX.get(category, "語")
             placeholder = f"[{prefix}{counters[category]}]"
         surfaces = tuple(dict.fromkeys(sp.surface for sp in members))
-        # canonical: 辞書 canonical があればそれ、無ければ代表表層（unmask の復元先）。
+        # canonical: 辞書 canonical があればそれ、無ければ代表表層 (unmask の復元先)。
         entry_canonical = canonical or _representative(members).surface
         entry_spans = tuple((sp.start, sp.end) for sp in members)
         mapping.append(
@@ -1428,16 +1426,16 @@ def _assign_placeholders(
     return tuple(mapping), span_placeholder
 
 
-# 系統（NER / LLM）に属さない決定的チャネル。decided_by 判定で「NER 系統の票があるか」を見るときに除く。
+# 系統 (NER / LLM) に属さない決定的チャネル。decided_by 判定で「NER 系統の票があるか」を見るときに除く。
 _NON_SYSTEM_CHANNELS = frozenset({"dict", "session", "regex", "collected"})
 
 
 def _decided_by(votes: tuple[tuple[str, str], ...]) -> str:
-    """票集合から「決め手」を1語で返す（設計 §3-1 の ``mapping[].decided_by``）。
+    """票集合から「決め手」を1語で返す (設計 §3-1 の ``mapping[].decided_by``)。
 
-    優先順：辞書（名簿）＞連絡先 regex ＞ NER∧LLM の合議（``consensus``）＞ LLM 単独 ＞ 昇格
-    （session）＞ NER 単独。``collected``（展開）票しか無い＝他所で確定した実体の全出現展開なので
-    NER 扱い（元の決め手は代表候補側が持つ）。
+    優先順：辞書 (名簿) ＞連絡先 regex ＞ NER∧LLM の合議 (``consensus``) ＞ LLM 単独 ＞ 昇格
+    (session) ＞ NER 単独。``collected`` (展開) 票しか無い＝他所で確定した実体の全出現展開なので
+    NER 扱い (元の決め手は代表候補側が持つ)。
     """
     chans = {ch for ch, _ in votes}
     if "dict" in chans:
@@ -1459,11 +1457,11 @@ def _assign_bundle_entries(
     parts_spans: list[list[Candidate]],
     dictionary: MaskDictionary,
 ) -> tuple[tuple[BundleEntry, ...], list[dict[tuple[int, int], str]]]:
-    """バンドル（複数パート）で **canonical ごとに共有プレースホルダ**を採番する。
+    """バンドル (複数パート) で **canonical ごとに共有プレースホルダ**を採番する。
 
-    :func:`_assign_placeholders`（単一パート）のバンドル版。同じ canonical は全パートで同じ
-    プレースホルダになる（カテゴリ別の連番はパートをまたいで 1 本）。戻り値は共有 ``entries`` と、
-    パートごとの ``span→placeholder`` マップ（各パートの ``_apply_mask`` に渡す）。
+    :func:`_assign_placeholders` (単一パート) のバンドル版。同じ canonical は全パートで同じ
+    プレースホルダになる (カテゴリ別の連番はパートをまたいで 1 本)。戻り値は共有 ``entries`` と、
+    パートごとの ``span→placeholder`` マップ (各パートの ``_apply_mask`` に渡す)。
     """
     groups: dict[str, list[tuple[int, Candidate]]] = {}
     order: list[str] = []
@@ -1514,7 +1512,7 @@ def _assign_bundle_entries(
 def _apply_mask(
     text: str, spans: list[Candidate], span_placeholder: dict[tuple[int, int], str]
 ) -> str:
-    """マスク対象スパンを右から左へプレースホルダに置換する（重なりは右側優先で1回）。"""
+    """マスク対象スパンを右から左へプレースホルダに置換する (重なりは右側優先で1回)。"""
     intervals = sorted(
         {(sp.start, sp.end) for sp in spans}, key=lambda x: x[0], reverse=True
     )

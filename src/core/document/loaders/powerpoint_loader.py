@@ -48,13 +48,13 @@ class ParsedPresentation:
 
 class PowerPointLoader:
     """
-    PowerPointファイルローダー（Unstructured代替・軽量実装）
+    PowerPointファイルローダー (Unstructured代替・軽量実装)
 
     特徴:
     - python-pptx のみ使用
-    - テーブル抽出（CSV準拠のクォート処理と行列数の取得）
+    - テーブル抽出 (CSV準拠のクォート処理と行列数の取得)
     - 画像やグループ図形も検出可能
-    - スライド順・位置順にソート（スライド幅で正規化されたキーを使用）
+    - スライド順・位置順にソート (スライド幅で正規化されたキーを使用)
     - LangChain Document対応
     """
 
@@ -349,7 +349,7 @@ class PowerPointLoader:
         return [Document(page_content=content.strip(), metadata=metadata)]
 
     def _text_frame_to_text(self, text_frame: TextFrame) -> str:
-        """TextFrame内の文字列を結合（段落ごとに改行、空行を除去）"""
+        """TextFrame内の文字列を結合 (段落ごとに改行、空行を除去)"""
 
         #  空白段落の除去をより堅牢に
         paragraphs = [
@@ -358,7 +358,7 @@ class PowerPointLoader:
         return "\n".join(paragraphs)
 
     def _table_to_text(self, table: Table) -> str:
-        """テーブルをCSV準拠のテキストに変換（セル内クォート処理を含む）"""
+        """テーブルをCSV準拠のテキストに変換 (セル内クォート処理を含む)"""
         col_num = len(table.columns)
         rows = []
         row = []
@@ -388,7 +388,7 @@ class PowerPointLoader:
         return "\n".join(rows)
 
     def _order_shapes(self, shapes: Any, slide_width: int) -> List[Any]:
-        """図形を自然な順序でソート（上→下、左→右）"""
+        """図形を自然な順序でソート (上→下、左→右)"""
 
         def sort_key(x: Any) -> Tuple[int, float]:
             # 丸め幅を8000に変更し、様々なスライドサイズでの安定性を向上
