@@ -54,6 +54,22 @@ SUPPORTED_EXTENSIONS = sorted(e[1:] for e in SUPPORTED_DOCUMENT_EXTENSIONS)
 # kb-mcp の既定 8000 と衝突させないため 8509)。Docker は MASK_API_URL=http://api:8509 を渡す。
 MASK_API_URL = os.environ.get("MASK_API_URL", "http://127.0.0.1:8509")
 
+# 1 リクエストのタイムアウト秒数。大きい文書の NER は重い (数分〜十数分) ので既定を長めに取る。
+# env MASK_API_TIMEOUT で調整: 未設定・空・不正なら既定 600 秒、0 以下なら無制限 (待ち続ける)。
+_DEFAULT_API_TIMEOUT = 600.0
+
+
+def _mask_api_timeout() -> float | None:
+    """MaskClient に渡すタイムアウト秒数を env から決める。0 以下は無制限 (None)。"""
+    raw = os.environ.get("MASK_API_TIMEOUT", "").strip()
+    if not raw:
+        return _DEFAULT_API_TIMEOUT
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return _DEFAULT_API_TIMEOUT
+    return None if seconds <= 0 else seconds
+
 
 @st.cache_resource(show_spinner=False)
 def _mask_client(base_url: str) -> MaskClient:
@@ -61,8 +77,9 @@ def _mask_client(base_url: str) -> MaskClient:
 
     内部で httpx 接続を 1 本持つので、プロセス内で使い回す (cache_resource)。
     base_url を引数 (キャッシュ鍵) にしているので、接続先を変えれば作り直される。
+    タイムアウトは env MASK_API_TIMEOUT で調整する (既定 600 秒・0 で無制限)。
     """
-    return MaskClient(base_url)
+    return MaskClient(base_url, timeout=_mask_api_timeout())
 
 
 def _server_config() -> dict:
