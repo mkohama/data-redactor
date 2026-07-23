@@ -66,6 +66,37 @@ def test_cached_ner_models(tmp_path) -> None:
     assert cache.cached_ner_models(h, True) == set()  # flatten 違い
 
 
+def test_delete_removes_all_layers(tmp_path) -> None:
+    """delete は全層（documents / ner / llm_detection / mask_draft）を消す。
+
+    以前は ner と documents しか消しておらず、同一内容を再取込したとき（content_hash は
+    内容から決まるので同じ値になる）旧 LLM 検出が孤児として蘇り、削除済みの文書が
+    「LLM キャッシュ済み」扱いになっていた（そのリグレッション）。
+    """
+    from src.ner.engine import Analysis
+
+    cache = NerCache(tmp_path / "cache.db")
+    h, model, ver = "hDel", "gpt-4.1-mini", "v1"
+    cache.record_document(h, "text", "x.txt", ["本文"])
+    cache.put(
+        h,
+        "ja_ginza",
+        False,
+        Analysis(
+            text="本文", tokens=(), entities=(), original_text="本文", offset_map=()
+        ),
+    )
+    cache.put_llm(h, model, False, ver, detection_to_json(_sample()))
+    cache.save_draft(h, {(0, 2)}, set())
+
+    cache.delete(h)
+
+    assert cache.get_chunks(h) is None  # documents
+    assert cache.cached_ner_models(h, False) == set()  # ner
+    assert cache.llm_versions(h) == set()  # llm_detection（孤児が残らない）
+    assert cache.get_draft(h) is None  # mask_draft
+
+
 def test_cache_get_put_roundtrip(tmp_path) -> None:
     cache = NerCache(tmp_path / "cache.db")
     h, model, ver = "hash1", "gpt-4.1-mini", "v1"

@@ -274,9 +274,19 @@ class NerCache:
         ]
 
     def delete(self, content_hash: str) -> None:
-        """1 文書のキャッシュ（NER 層＋文書メタ）を削除する。"""
+        """1 文書のキャッシュを全層まとめて削除する（文書メタ＋NER＋LLM＋手動選択差分）。
+
+        キャッシュは content_hash をキーに 4 テーブル（documents / ner / llm_detection /
+        mask_draft）へ分かれている。全層を消さないと、同一内容を再取込したとき（content_hash は
+        内容から決まるので同じ値になる）に旧 LLM 検出や旧ドラフトが孤児として蘇り、
+        「削除したのにキャッシュ済み扱い」になる。
+        """
         with self._conn() as c:
             c.execute("DELETE FROM ner WHERE content_hash = ?", (content_hash,))
+            c.execute(
+                "DELETE FROM llm_detection WHERE content_hash = ?", (content_hash,)
+            )
+            c.execute("DELETE FROM mask_draft WHERE content_hash = ?", (content_hash,))
             c.execute("DELETE FROM documents WHERE content_hash = ?", (content_hash,))
 
     def delete_ner(self, content_hash: str) -> None:
