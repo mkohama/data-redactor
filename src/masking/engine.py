@@ -1381,23 +1381,30 @@ def _to_original_spans(
 def _assign_placeholders(
     spans: list[Candidate], dictionary: MaskDictionary
 ) -> tuple[tuple[MaskEntry, ...], dict[tuple[int, int], str]]:
-    """(カテゴリ, 代表表記) ごとにプレースホルダを割り当てる。
+    """表記 (surface) ごとにプレースホルダを割り当てる。
 
-    **同じ表層 (canonical) は 1 プレースホルダに統一**する (カテゴリが出現ごとに割れていても
-    1 つにまとめる＝表層単位でマスク、と整合)。実体のカテゴリは代表 (確信度最良・同点は優先) を採る。
-    表記ゆれ (英語表記↔カタカナ表記・略称・旧称) も canonical で同じプレースホルダに寄る。
-    辞書で**置換語 (mask) が指定**された実体は、自動採番でなくその語を使う (未指定は自動採番)。
+    同じ表記は 1 プレースホルダにまとめ、表記が違えば別プレースホルダにする。
+    こうすると復元で元の表記に正確に戻せる
+    (例: eXmotion→[社1] / エクスモーション→[社2]。同じ eXmotion が複数回出ても [社1] は 1 つ)。
+    カテゴリは代表 (確信度最良・同点は優先) を採る。
+    例外: 辞書で置換語 (mask) を指定した実体は、その 1 文字列へ寄せたいので canonical でまとめ、
+    その置換語を使う (表記ゆれも 1 つに寄る。復元はその実体の canonical へ戻す)。
     """
     groups: dict[str, list[Candidate]] = {}
     order: list[str] = []
     group_canonical: dict[str, str | None] = {}
     for sp in spans:
         canonical = dictionary.canonical_of(sp.surface)
-        key = normalize(canonical) if canonical else normalize(sp.surface)
+        # 表記 (surface) ごとに別プレースホルダにする。復元で元の表記へ正確に戻すため
+        # (例: eXmotion→[社1] / エクスモーション→[社2]。同じ表記の繰り返しは同一)。
+        # 例外: 辞書に固定の置換語 (mask:) がある実体は、その 1 文字列へ寄せたいので canonical でまとめる。
+        custom = dictionary.custom_placeholder(canonical) if canonical else None
+        key = normalize(canonical) if (canonical and custom) else normalize(sp.surface)
         if key not in groups:
             groups[key] = []
             order.append(key)
-            group_canonical[key] = canonical
+            # custom のときだけ canonical を持つ。それ以外は復元先を「その表記」にするため None。
+            group_canonical[key] = canonical if custom else None
         groups[key].append(sp)
 
     counters: dict[str, int] = {}
@@ -1457,11 +1464,12 @@ def _assign_bundle_entries(
     parts_spans: list[list[Candidate]],
     dictionary: MaskDictionary,
 ) -> tuple[tuple[BundleEntry, ...], list[dict[tuple[int, int], str]]]:
-    """バンドル (複数パート) で **canonical ごとに共有プレースホルダ**を採番する。
+    """バンドル (複数パート) で表記 (surface) ごとに共有プレースホルダを採番する。
 
-    :func:`_assign_placeholders` (単一パート) のバンドル版。同じ canonical は全パートで同じ
-    プレースホルダになる (カテゴリ別の連番はパートをまたいで 1 本)。戻り値は共有 ``entries`` と、
-    パートごとの ``span→placeholder`` マップ (各パートの ``_apply_mask`` に渡す)。
+    _assign_placeholders (単一パート) のバンドル版。同じ表記は全パートで同じプレースホルダに
+    なり、表記が違えば別になる (カテゴリ別の連番はパートをまたいで 1 本)。固定の置換語 (辞書 mask:)
+    がある実体だけは canonical でまとめる。戻り値は共有 entries と、パートごとの
+    span→placeholder マップ (各パートの _apply_mask に渡す)。
     """
     groups: dict[str, list[tuple[int, Candidate]]] = {}
     order: list[str] = []
@@ -1469,11 +1477,18 @@ def _assign_bundle_entries(
     for part_index, spans in enumerate(parts_spans):
         for sp in spans:
             canonical = dictionary.canonical_of(sp.surface)
-            key = normalize(canonical) if canonical else normalize(sp.surface)
+            # 表記 (surface) ごとに別プレースホルダ。復元で元の表記へ正確に戻すため。
+            # 例外: 固定の置換語 (辞書 mask:) がある実体は canonical でまとめる。
+            custom = dictionary.custom_placeholder(canonical) if canonical else None
+            key = (
+                normalize(canonical)
+                if (canonical and custom)
+                else normalize(sp.surface)
+            )
             if key not in groups:
                 groups[key] = []
                 order.append(key)
-                group_canonical[key] = canonical
+                group_canonical[key] = canonical if custom else None
             groups[key].append((part_index, sp))
 
     counters: dict[str, int] = {}

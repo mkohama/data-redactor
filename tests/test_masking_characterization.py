@@ -178,3 +178,58 @@ def test_refresh_cache_bypasses_and_overwrites_ner_cache(engine, tmp_path) -> No
     cache.gets = cache.puts = 0
     engine.analyze(chunks, ner_cache=cache, refresh_cache=True)
     assert cache.gets == 0 and cache.puts > 0  # 読み飛ばし＝再解析して上書き
+
+
+def test_distinct_surfaces_get_distinct_placeholders_and_round_trip() -> None:
+    """表記が違えば別プレースホルダ・同じ表記は同一。復元は元の表記へ完全一致で戻る。
+
+    辞書に別名 (eXmotion / エクスモーション) を登録しても、両者は同一化せず別プレースホルダに
+    なる。同じ eXmotion の繰り返しは 1 つにまとまる。placeholder が元表記に 1:1 対応するので
+    unmask が元テキストを完全復元できる。GiNZA は使わない (run_ner=False)。
+    """
+    from src.masking import unmask
+
+    d = MaskDictionary(
+        {
+            normalize("エクスモーション"): ("エクスモーション", "社名"),
+            normalize("eXmotion"): ("エクスモーション", "社名"),
+        }
+    )
+    eng = MaskingEngine(dictionary=d, models=[])
+    text = "eXmotion は日本語で書くとエクスモーションです。eXmotion は社名です"
+    a = eng.analyze([text], run_ner=False)
+    groups = eng.group_candidates(a.candidates)
+    sel = [m for g in groups if g.confidence in ("確定", "強") for m in g.members]
+    res = eng.apply(a, sel)
+
+    # eXmotion (2 回) と エクスモーション で placeholder は 2 種 (出現ごとには分けない)。
+    assert len({e.placeholder for e in res.mapping}) == 2
+    # 復元は元テキストに完全一致 (別名が canonical に潰れない)。
+    assert unmask(res.masked_text, res.mapping) == text
+
+
+def test_custom_mask_still_unifies_surfaces() -> None:
+    """辞書で固定の置換語 (mask:) を指定した実体は、表記ゆれも 1 つの置換語に寄せる (従来どおり)。"""
+    from src.masking import unmask
+
+    d = MaskDictionary(
+        {
+            normalize("エクスモーション"): ("エクスモーション", "社名"),
+            normalize("eXmotion"): ("エクスモーション", "社名"),
+        },
+        placeholders={"エクスモーション": "〔社A〕"},
+    )
+    eng = MaskingEngine(dictionary=d, models=[])
+    text = "eXmotion と エクスモーション は同じ会社"
+    a = eng.analyze([text], run_ner=False)
+    groups = eng.group_candidates(a.candidates)
+    sel = [m for g in groups if g.confidence in ("確定", "強") for m in g.members]
+    res = eng.apply(a, sel)
+
+    # 両表記とも固定の置換語 1 つに寄る。
+    assert {e.placeholder for e in res.mapping} == {"〔社A〕"}
+    # 復元は canonical (この実体の代表語) へ戻す＝固定置換語では表記ゆれは保存されない
+    # (eXmotion は消え、両方 エクスモーション になる)。スペース差に依存しないよう出現数で確認。
+    restored = unmask(res.masked_text, res.mapping)
+    assert "eXmotion" not in restored
+    assert restored.count("エクスモーション") == 2
