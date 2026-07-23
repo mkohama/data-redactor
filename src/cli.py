@@ -22,6 +22,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 import webbrowser
 from collections import Counter
 from pathlib import Path
@@ -241,6 +244,31 @@ def _terminate(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+def _wait_for_api(
+    health_url: str, proc: subprocess.Popen, *, timeout: float = 180.0
+) -> bool:
+    """API の ``/health`` が 200 を返す（＝GiNZA ロード完了）まで待つ。
+
+    dev では UI が API より先に立ち上がり、モデルロード中の API に繋がらず「接続できません」と
+    誤表示してしまう。UI を起動する前にここで待ってその窓を消す。社内プロキシ環境でも localhost へ
+    直結するよう no-proxy opener を使う。API プロセスが落ちたら False、timeout でも False を返す
+    （呼び出し側は警告して UI を起動する）。
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if proc.poll() is not None:
+            return False  # API が起動に失敗して終了した
+        try:
+            with opener.open(health_url, timeout=2) as resp:
+                if resp.status == 200:
+                    return True
+        except (urllib.error.URLError, OSError):
+            pass  # まだ起動中（接続拒否など）＝待つ
+        time.sleep(1.0)
+    return False
+
+
 @cli.command()
 @click.option(
     "--host", default="127.0.0.1", show_default=True, help="API の待受ホスト。"
@@ -266,11 +294,16 @@ def dev(host: str, api_port: int, ui_port: int, reload_: bool) -> None:
 
     `data-redactor serve`（API）をバックグラウンドで、`data-redactor ui`（UI）を
     フォアグラウンドで起動する。UI は環境変数 `MASK_API_URL` でこの API を指す（設計 B）。
-    Ctrl+C で UI を止めると、API も後片付けで停止する。GiNZA のロードに少し時間がかかるので、
-    起動直後の UI は「モデルロード中」と出ることがある（数秒〜十数秒で解消）。
+    Ctrl+C で UI を止めると、API も後片付けで停止する。
+
+    **API の /health が応答する（GiNZA ロード完了）まで待ってから UI を起動する**。UI が先に出て
+    ロード中の API に繋がらず「接続できません」と誤表示するのを防ぐため（cold start で数十秒待つ）。
     """
     app = _ROOT / "src" / "ui" / "app.py"
     api_url = f"http://{host}:{api_port}"
+    # 0.0.0.0/:: に bind したときのヘルスチェックは loopback で叩く。
+    health_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    health_url = f"http://{health_host}:{api_port}/health"
 
     api_cmd = [
         sys.executable,
@@ -297,13 +330,29 @@ def dev(host: str, api_port: int, ui_port: int, reload_: bool) -> None:
     ui_env = {**os.environ, "MASK_API_URL": api_url}
     popen_kw: dict = {} if os.name == "nt" else {"start_new_session": True}
 
-    click.echo(f"API を起動中: {api_url}（GiNZA ロードに少し時間がかかります）")
+    click.echo(f"API を起動中: {api_url}（GiNZA ロード完了まで待機します ...）")
     api = subprocess.Popen(api_cmd, cwd=_ROOT, **popen_kw)
     try:
-        click.echo(f"UI を起動中: http://{host}:{ui_port}（MASK_API_URL={api_url}）")
-        code = subprocess.call(ui_cmd, cwd=_ROOT, env=ui_env)
+        ready = _wait_for_api(health_url, api)
+        if api.poll() is not None:
+            click.echo(
+                "❌ API が起動に失敗して終了しました（上のログを確認してください）。"
+            )
+            code = api.returncode or 1
+        else:
+            if ready:
+                click.echo("✅ API 準備完了。UI を起動します。")
+            else:
+                click.echo(
+                    "⚠ API のヘルスチェックがタイムアウトしました。UI は起動しますが、"
+                    "接続できるまで少し待って再読み込みしてください。"
+                )
+            click.echo(
+                f"UI を起動中: http://{host}:{ui_port}（MASK_API_URL={api_url}）"
+            )
+            code = subprocess.call(ui_cmd, cwd=_ROOT, env=ui_env)
     except KeyboardInterrupt:
-        code = 0  # Ctrl+C は停止の通常手順。正常終了として扱う。
+        code = 0  # 待機中/UI 実行中の Ctrl+C は停止の通常手順。正常終了として扱う。
     finally:
         click.echo("API を停止しています ...")
         _terminate(api)
