@@ -1,7 +1,8 @@
-"""マスキング HTTP API の入出力スキーマ (Pydantic)。設計 §3-1 / §3-2。
+"""マスキング HTTP API の入出力スキーマ (Pydantic)。
 
-wire (HTTP 表現) の形だけを定義する。確信度の ASCII↔日本語変換は :mod:`src.api.enums`、
-検出・マスクの実体は :mod:`src.masking` が持つ (ここは「形」に徹する)。
+wire (HTTP 表現) の形だけを定義する。
+確信度の ASCII と日本語の変換は src.api.enums、検出・マスクの実体は src.masking が持つ。
+ここは「形」に徹する。
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ class FileRef(BaseModel):
 
 
 class Part(BaseModel):
-    """``/mask`` の入力 part (3 種のいずれか＝text / content_hash / file。設計 §3-1)。"""
+    """/mask の入力 part。text / content_hash / file の 3 種のいずれか。"""
 
     id: str
     text: str | None = None
@@ -30,10 +31,10 @@ class Part(BaseModel):
 
 
 class MaskRequest(BaseModel):
-    """``POST /mask`` のリクエスト (application/json。同梱ファイルは multipart のマニフェスト)。"""
+    """POST /mask のリクエスト (application/json。同梱ファイルは multipart のマニフェスト)。"""
 
     parts: list[Part] | None = None
-    # 単一 text は parts:[{id:"_", text}] の糖衣 (設計 §3-1)。
+    # 単一 text は parts:[{id:"_", text}] の糖衣。
     text: str | None = None
     detection: str = DEFAULT_DETECTION
     mask_level: str = DEFAULT_MASK_LEVEL
@@ -59,7 +60,7 @@ class Occurrence(BaseModel):
 
 
 class MappingEntry(BaseModel):
-    """バンドルで共有する対応表 1 件 (設計 §3-1 の ``mapping[]``)。"""
+    """バンドルで共有する対応表 1 件 (mapping[] の 1 要素)。"""
 
     placeholder: str
     category: str
@@ -71,7 +72,7 @@ class MappingEntry(BaseModel):
 
 
 class PendingEntry(BaseModel):
-    """自動マスク閾値未満のレビュー候補 (設計 §3-1 の ``pending[]``)。"""
+    """自動マスク閾値未満のレビュー候補 (pending[] の 1 要素)。"""
 
     surface: str
     category: str
@@ -90,7 +91,7 @@ class DetectorInfo(BaseModel):
 
 
 class MaskResponse(BaseModel):
-    """``POST /mask`` のレスポンス (設計 §3-1)。"""
+    """POST /mask のレスポンス。"""
 
     status: str = "unconfirmed"  # confirmed 層は後回し (当面固定)
     masked_parts: list[MaskedPart]
@@ -100,26 +101,26 @@ class MaskResponse(BaseModel):
 
 
 class UnmaskRequest(BaseModel):
-    """``POST /unmask`` のリクエスト (設計 §3-2)。"""
+    """POST /unmask のリクエスト。"""
 
     text: str
     mapping: list[MappingEntry]
 
 
 class UnmaskResponse(BaseModel):
-    """``POST /unmask`` のレスポンス。"""
+    """POST /unmask のレスポンス。"""
 
     restored_text: str
 
 
 # --------------------------------------------------------------------------- #
-# 全体面：/documents 系 (設計 §2-B)。Streamlit クライアントのレビュー UI 用。
+# 文書 API：/documents 系。UI のレビュー画面が、取り込んだ文書を content_hash で使い回すために使う。
 # --------------------------------------------------------------------------- #
 class DocumentIngestRequest(BaseModel):
-    """``POST /documents`` (application/json) ＝テキストを取り込む。
+    """POST /documents (application/json) ＝テキストを取り込む。
 
-    バイナリ (kb-mcp から取得した元ファイル等を含む) は multipart で ``file`` として送る
-    (サーバはソース非依存＝取得はクライアントの責務。設計 §4)。
+    バイナリ (kb-mcp から取得した元ファイル等を含む) は multipart で file として送る。
+    サーバはソースに依存しない。ファイルの取得はクライアントの責務。
     """
 
     text: str | None = None
@@ -127,7 +128,7 @@ class DocumentIngestRequest(BaseModel):
 
 
 class DocumentInfo(BaseModel):
-    """キャッシュ済み文書 1 件のメタ＋キャッシュ状態 (一覧・詳細で共有)。設計 §2-B・D4。"""
+    """キャッシュ済み文書 1 件のメタ情報とキャッシュ状態 (一覧・詳細で共有)。"""
 
     content_hash: str
     source_kind: str  # text / file / kb
@@ -140,30 +141,31 @@ class DocumentInfo(BaseModel):
 
 
 class DocumentDetail(DocumentInfo):
-    """``GET /documents/{hash}`` の詳細 (メタ＋チャンク本文)。"""
+    """GET /documents/{hash} の詳細 (メタ＋チャンク本文)。"""
 
     chunks: list[str]
 
 
 class DocumentPatch(BaseModel):
-    """``PATCH /documents/{hash}``＝メタ更新 (現状は source_kind のみ。D3)。"""
+    """PATCH /documents/{hash}＝メタ更新 (現状は source_kind のみ)。"""
 
     source_kind: str
 
 
 # --------------------------------------------------------------------------- #
-# 全体面：/documents/{hash}/analyze・/apply・/draft (設計 §3-3〜§3-4・レビュー UI 用)。
-# span は「解析 (平坦化後) 座標」＝候補のオフセット。analyze の occurrences/auto_selection と
-# apply の selection は同じ座標系で、選択の部分集合をそのまま渡せる (案2)。
+# レビュー API：/documents/{hash}/analyze・/apply・/draft。
+# span は「解析 (平坦化後) 座標」＝候補のオフセット。
+# analyze の occurrences / auto_selection と apply の selection は同じ座標系なので、
+# 選択の部分集合をそのまま渡せる。
 # --------------------------------------------------------------------------- #
 class AnalyzeRequest(BaseModel):
-    """``POST /documents/{hash}/analyze`` のリクエスト (設計 §3-3)。"""
+    """POST /documents/{hash}/analyze のリクエスト。"""
 
     detection: str = DEFAULT_DETECTION
     mask_level: str = DEFAULT_MASK_LEVEL
     flatten_tables: bool = True
     models: list[str] | None = None
-    refresh: bool = False  # True でキャッシュ無視の強制再解析 (D2)
+    refresh: bool = False  # True でキャッシュ無視の強制再解析
 
 
 class GroupOccurrence(BaseModel):
@@ -174,7 +176,7 @@ class GroupOccurrence(BaseModel):
 
 
 class CandidateGroupEntry(BaseModel):
-    """マスク候補の実体グループ 1 件 (設計 §3-3 の ``groups[]``)。"""
+    """マスク候補の実体グループ 1 件 (groups[] の 1 要素)。"""
 
     surface: str
     category: str
@@ -187,21 +189,22 @@ class CandidateGroupEntry(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    """``POST /documents/{hash}/analyze`` のレスポンス (設計 §3-3)。"""
+    """POST /documents/{hash}/analyze のレスポンス。"""
 
     groups: list[CandidateGroupEntry]
-    # mask_level に基づく既定選択 (実体単位・案2)。解析座標の span 集合。
+    # mask_level に基づく既定選択 (実体単位)。解析座標の span 集合。
     auto_selection: list[tuple[int, int]]
     # 平坦化後 (解析座標) のテキスト。occurrences / auto_selection の span はこの座標系。
-    # クライアントの色付き表示 (displaCy) ・原文プレビューに使う (設計 §2 の描画用テキスト)。
+    # クライアントの色付き表示や原文プレビューに使う。
     text: str
 
 
 class ApplyRequest(BaseModel):
-    """``POST /documents/{hash}/apply`` のリクエスト (設計 §3-4)。
+    """POST /documents/{hash}/apply のリクエスト。
 
-    ``selection`` は人が編集した最終選択 (解析座標の span 集合)。analyze と同じ検出条件で
-    再解析して座標を一致させるため、``detection`` / ``flatten_tables`` / ``models`` も受ける。
+    selection は人が編集した最終選択 (解析座標の span 集合)。
+    analyze と同じ検出条件で再解析して座標を一致させるため、
+    detection / flatten_tables / models も受ける。
     """
 
     selection: list[tuple[int, int]]
@@ -211,7 +214,7 @@ class ApplyRequest(BaseModel):
 
 
 class ApplyResponse(BaseModel):
-    """``POST /documents/{hash}/apply`` のレスポンス (masked_text＋復元用 mapping)。"""
+    """POST /documents/{hash}/apply のレスポンス (masked_text＋復元用 mapping)。"""
 
     masked_text: str
     mapping: list[MappingEntry]  # /mask と同じ形＝そのまま /unmask に渡せる
@@ -225,7 +228,7 @@ class DraftBody(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# 全体面：/allowlist・/dictionary (設計 §3-5・エディタ)。GET/PUT で同じ形を往復する。
+# 辞書・除外リスト API：/allowlist・/dictionary。GET/PUT で同じ形を往復する。
 # 中身は load/save_*entries の構造そのまま (round-trip 用)。
 # --------------------------------------------------------------------------- #
 class AllowlistEntry(BaseModel):
@@ -237,7 +240,7 @@ class AllowlistEntry(BaseModel):
 
 
 class AllowlistBody(BaseModel):
-    """``GET/PUT /allowlist`` の本体。"""
+    """GET/PUT /allowlist の本体。"""
 
     entries: list[AllowlistEntry] = Field(default_factory=list)
 
@@ -254,6 +257,6 @@ class DictionaryEntry(BaseModel):
 
 
 class DictionaryBody(BaseModel):
-    """``GET/PUT /dictionary`` の本体。"""
+    """GET/PUT /dictionary の本体。"""
 
     entries: list[DictionaryEntry] = Field(default_factory=list)

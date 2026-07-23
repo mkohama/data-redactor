@@ -1,14 +1,15 @@
-"""マスキング HTTP API (FastAPI)。設計 [docs-dev/mask-http-api設計.md] の B 案・最小面。
+"""マスキング HTTP API (FastAPI)。
 
-エンジン (GiNZA モデル) と ``data/cache.db`` の**所有者をこの 1 プロセスに集約**する
-(設計 B：Streamlit も外部アプリも HTTP クライアント)。エンドポイント：
+エンジン (GiNZA モデル) と ``data/cache.db`` の所有者を、この 1 プロセスに集約する。
+検出・マスクの本体はここが持ち、Streamlit の UI も外部アプリも HTTP クライアントとして接続する。
+エンドポイント：
 
-    最小面 (M2):
+    基本 (マスク・復元):
       GET  /health           死活・モデルロード状態
       GET  /config           既定モデル・detector_version・選択肢・対応拡張子
       POST /mask             parts (text / content_hash 参照 / 同梱ファイル) → 共有対応表でマスク
       POST /unmask           text＋mapping → 復元テキスト
-    全体面 (M5・Streamlit クライアント用。stateful):
+    文書を使い回す (UI のレビュー画面用。取り込んだ文書を content_hash で参照):
       POST   /documents              入力取込 → content_hash 発行 (JSON=text / multipart=file)
       GET    /documents              取込済み一覧
       GET    /documents/{h}          メタ＋チャンク
@@ -21,11 +22,10 @@
       GET/PUT /dictionary            マスク辞書 (エディタ・保存後は即反映)
 
     サーバは入力ソースに依存しない (text か file を受け取ってマスクするだけ)。kb-mcp
-    のような文書ソースからの取得はクライアント (UI) の責務＝クライアントが元ファイルを
-    取得して multipart/file で送る (設計 §4・2026-07-21 の設計見直し)。
+    のような文書ソースからの取得はクライアント (UI) の責務で、クライアントが元ファイルを
+    取得して multipart/file で送る。
 
-起動時にモデルを 1 回ロードする (lifespan、エンジン singleton)。残るは M5e (Streamlit を
-このAPIのクライアントへ移行・data-redactor dev 合体コマンド)。
+起動時にモデルを 1 回ロードする (lifespan、エンジン singleton)。
 
 起動：``uv run data-redactor serve`` (uvicorn ラッパ)。テストは ``create_app(ctx=...)`` に
 軽量な :class:`~src.api.service.ApiContext` を注入して GiNZA の実ロードを避ける。
@@ -89,7 +89,7 @@ from src.detector import LLM_MODEL, detector_version
 from src.masking import MaskAllowlist, MaskDictionary, MaskingEngine, NerCache
 from src.ner import AVAILABLE_MODELS
 
-# 既定パス (app.py＝Streamlit と同じ data/ を共有する＝cache.db を 2 つ持たない。設計 B)。
+# 既定パス (UI と同じ data/ を共有し、cache.db を 2 つ持たないようにする)。
 #   Docker/実機では env で差し替える (名前付きボリューム共有・書き込みは api のみ)。
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_CACHE_DB = os.getenv(
@@ -207,7 +207,7 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
         return run_unmask(req)
 
     # ----------------------------------------------------------------- #
-    # 全体面：/documents 系 (設計 §2-B)。取込→content_hash 発行 (D1)。
+    # 文書 API：/documents 系。取込→content_hash 発行。
     # ----------------------------------------------------------------- #
     @app.post("/documents", response_model=DocumentInfo)
     async def documents_ingest(request: Request) -> DocumentInfo:
@@ -215,8 +215,8 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
 
         JSON (application/json) ＝テキスト取込、multipart/form-data＝ファイル取込
         (``file`` にファイル本体、任意で ``source_name``) を content-type で分岐する。
-        サーバはソース非依存＝kb-mcp 等からの取得はクライアントが行い、ファイルは
-        multipart/file で送る (設計 §4)。
+        サーバはソースに依存しない。kb-mcp 等からの取得はクライアントが行い、ファイルは
+        multipart/file で送る。
         """
         ctype = request.headers.get("content-type", "")
         try:
@@ -280,7 +280,7 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
         return save_document_draft(app.state.ctx, content_hash, body)
 
     # ----------------------------------------------------------------- #
-    # 全体面：/allowlist・/dictionary (設計 §3-5・エディタ)。書き込みは api のみ。
+    # 辞書・除外リスト API：/allowlist・/dictionary (エディタ)。書き込みは api のみ。
     # ----------------------------------------------------------------- #
     @app.get("/allowlist", response_model=AllowlistBody)
     def allowlist_get() -> AllowlistBody:
