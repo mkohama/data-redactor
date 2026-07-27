@@ -165,7 +165,8 @@ res = client.mask(parts=[
 
 for mp in res["masked_parts"]:      # 入力と同じ順・同じ id で返る
     print(mp["id"], mp["masked_text"])
-# 同じ会社はどのファイルでも同じ番号（SONY=[社1]）。res["mapping"] が共有の対応表。
+# 同じ表記はどのファイルでも同じ番号（SONY=[社1]）。表記が違えば別番号（Sony=[社2]・ソニー=[社3]）。
+# res["mapping"] が共有の対応表で、復元は元の表記に戻る。
 ```
 
 ### 復元（restore）
