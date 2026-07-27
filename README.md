@@ -356,6 +356,9 @@ Python クライアント `MaskClient` は [src/client/](src/client/)（`from sr
 UI も外部アプリもこれを使う）。curl 例・実行できるデモは [examples/](examples/)
 （`uv run python examples/roundtrip_demo.py`）。
 
+**呼び出し方の簡潔なリファレンス**（エンドポイント・値の定義・エラー・最小例）は
+[docs/guide/api-usage.md](docs/guide/api-usage.md) を参照。
+
 ---
 
 ## マスク辞書・除外リスト・キャッシュ（ローカル専用）
