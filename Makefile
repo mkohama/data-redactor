@@ -43,28 +43,33 @@ docker-build:
 	env UID=$(HOST_UID) GID=$(HOST_GID) docker compose build
 
 # pii-masker（submodule）を取り込んでからイメージを再ビルドする（ビルド/配布機向け）。
+# 未取得の状態から実行できる（--init 付き）ので、clone 直後はこれ 1 つで済む。
 # ★ ホスト側 .venv を作らない: sync-pii-masker（uv run）と違い git + perl だけで機械的に済ませる。
-#    イメージに効くのは 2 つ (a) external/pii-masker/src の更新 (b) app.py の pii-masker@<hash> だけで、
-#    どちらも venv 不要。ENE ドリフト検査 / ruff / mypy / pytest は開発機の `sync-pii-masker` に委ねる。
+#    イメージに効くのは 2 つ (a) external/pii-masker/src の更新
+#    (b) src/detector.py の _DETECTOR_STATIC にある pii-masker@<hash> だけで、どちらも venv 不要。
+#    ENE ドリフト検査 / ruff / mypy / pytest は開発機の `sync-pii-masker` に委ねる。
 #    置換は perl（Git Bash 同梱）で行う: sed -i は CRLF を LF に潰すが perl -i -pe は改行を保持する。
 # 既定は追跡ブランチの最新へ更新。特定の版に固定するなら: make docker-sync-build PII_REF=<commit/tag/branch>
+DETECTOR_FILE := src/detector.py
+
 docker-sync-build:
 	@echo "Syncing pii-masker submodule (venv-free)..."
 	@if [ -n "$(PII_REF)" ]; then \
+		git submodule update --init external/pii-masker; \
 		git -C external/pii-masker fetch && git -C external/pii-masker checkout "$(PII_REF)"; \
 	else \
-		git submodule update --remote external/pii-masker; \
+		git submodule update --init --remote external/pii-masker; \
 	fi
 	@HASH=$$(git -C external/pii-masker rev-parse --short HEAD); \
 	 echo "pii-masker HEAD: $$HASH"; \
-	 OLD=$$(perl -ne 'if (/pii-masker\@([0-9a-fA-F]+)/) { print $$1; last }' app.py); \
+	 OLD=$$(perl -ne 'if (/pii-masker\@([0-9a-fA-F]+)/) { print $$1; last }' $(DETECTOR_FILE)); \
 	 if [ -z "$$OLD" ]; then \
-		echo "WARNING: pii-masker@<hash> not found in app.py; skipped rewrite (check _DETECTOR_STATIC)"; \
+		echo "WARNING: pii-masker@<hash> not found in $(DETECTOR_FILE); skipped rewrite (check _DETECTOR_STATIC)"; \
 	 elif [ "$$OLD" = "$$HASH" ]; then \
-		echo "app.py detector hash already latest (pii-masker@$$HASH); no change, LLM cache stays valid"; \
+		echo "detector hash already latest (pii-masker@$$HASH); no change, LLM cache stays valid"; \
 	 else \
-		perl -i -pe "s/pii-masker\@[0-9a-fA-F]+/pii-masker\@$$HASH/" app.py; \
-		echo "Rewrote app.py detector hash pii-masker@$$OLD -> pii-masker@$$HASH (LLM cache will auto-miss)"; \
+		perl -i -pe "s/pii-masker\@[0-9a-fA-F]+/pii-masker\@$$HASH/" $(DETECTOR_FILE); \
+		echo "Rewrote $(DETECTOR_FILE) detector hash pii-masker@$$OLD -> pii-masker@$$HASH (LLM cache will auto-miss)"; \
 	 fi
 	@$(MAKE) docker-build
 
