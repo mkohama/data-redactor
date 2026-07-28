@@ -105,6 +105,107 @@ def _llm_model_name() -> str:
     return str(_server_config().get("llm_model") or "LLM")
 
 
+# --- 重い処理の実行中は画面をロックする ------------------------------------------------
+#
+# Streamlit は処理を実行している最中でも、ブラウザに出ているウィジェットを操作できる。
+# 途中でタブやステージを切り替えられると新しい実行が始まり、走っていた処理は次の st 呼び出しで
+# 打ち切られる (解析が消える・結果が中途半端になる)。これを防ぐため、重い処理は 2 段階で走らせる。
+#
+#   1. ボタンを押した時点では処理せず、やることだけ記録して画面を描き直す (_start_job)。
+#   2. 描き直したフレームではウィジェットを操作できない状態 (disabled) にする (_busy)。
+#      画面を全部描き終えてから、記録した処理を実行する (_defer_job / _run_deferred_job)。
+#      終わったら記録を消して、もう一度描き直して通常の画面に戻す。
+#
+# 処理を「ボタンのある位置」で実行してはいけない。まだ描き直していない画面下部のウィジェットが
+# 前のフレームのまま残って押せてしまうため。必ずフレームの末尾で実行する。
+_JOB_KEY = "busy_job"  # 実行待ち/実行中の処理 {"id": ..., "payload": {...}}
+_JOB_STARTED_KEY = "busy_job_started"  # このフレームで予約したばかり (実行はまだ先)
+_JOB_FN_KEY = "busy_job_fn"  # このフレームの末尾で実行する処理 (フレーム内の受け渡し)
+_FLASH_KEY = "job_flash"  # 実行結果のメッセージ (描き直しをまたいで出すために貯める)
+
+
+def _busy() -> bool:
+    """重い処理の実行待ち/実行中か。True の間はウィジェットを操作できない状態で描く。"""
+    return st.session_state.get(_JOB_KEY) is not None
+
+
+def _start_job(job_id: str, **payload: object) -> None:
+    """重い処理を予約し、操作できない画面を描き直す (この呼び出しで再実行に入る)。
+
+    job_id は予約する側と実行する側で同じ文字列を使う。payload は実行時に渡す引数。
+    """
+    st.session_state[_JOB_KEY] = {"id": job_id, "payload": payload}
+    st.session_state[_JOB_STARTED_KEY] = True
+    st.rerun()
+
+
+def _claim_job(job_id: str) -> dict | None:
+    """このフレームで実行すべき処理なら予約時の引数を返す。別の処理や待ちなしなら None。"""
+    job = st.session_state.get(_JOB_KEY)
+    if job is None or job["id"] != job_id:
+        return None
+    payload: dict = job["payload"]
+    return payload
+
+
+def _defer_job(
+    fn: Callable[..., None], *, area: object = None, **kwargs: object
+) -> None:
+    """処理を「画面を全部描き終えたあと」へ回す。
+
+    area に st.empty() を渡すと、その位置にスピナーやメッセージが出る (渡さなければ末尾)。
+    """
+    st.session_state[_JOB_FN_KEY] = (fn, kwargs, area)
+
+
+def _run_deferred_job() -> None:
+    """予約された重い処理を実行してロックを解く。main の最後で必ず呼ぶ。"""
+    started = st.session_state.pop(_JOB_STARTED_KEY, False)
+    entry = st.session_state.pop(_JOB_FN_KEY, None)
+    if entry is None:
+        if started or not _busy():
+            return  # 予約した直後のフレーム / そもそも実行待ちが無い
+        # 予約はあるのに実行する場所が今の画面に無い (入力を切り替えた・文書が消えた等)。
+        # ロックしたままにしない。
+        st.session_state.pop(_JOB_KEY, None)
+        st.rerun()
+        return
+    fn, kwargs, area = entry
+    try:
+        if area is None:
+            fn(**kwargs)
+        else:
+            with area.container():
+                fn(**kwargs)
+    except Exception as e:  # noqa: BLE001  想定外の失敗でもロックは必ず解く
+        _flash("error", f"処理中にエラーが発生しました: {e}")
+    st.session_state.pop(_JOB_KEY, None)
+    st.rerun()
+
+
+def _flash(kind: str, message: str) -> None:
+    """処理の結果メッセージを貯める (kind は error / warning / success / info)。
+
+    重い処理はフレームの末尾で実行し、終わると画面を描き直すので、その場に出したメッセージは
+    消えてしまう。いったん貯めておき、次のフレームで _render_flash が出す。
+    """
+    st.session_state.setdefault(_FLASH_KEY, []).append((kind, message))
+
+
+def _render_flash() -> bool:
+    """貯めたメッセージを出して捨てる。1 件でも出したら True。"""
+    messages = st.session_state.pop(_FLASH_KEY, [])
+    renderers = {
+        "error": st.error,
+        "warning": st.warning,
+        "success": st.success,
+        "info": st.info,
+    }
+    for kind, message in messages:
+        renderers.get(kind, st.info)(message)
+    return bool(messages)
+
+
 def _render_connection_status() -> bool:
     """サイドバー上部に API サーバの接続状態を表示し、接続できているかを返す。
 
@@ -204,15 +305,19 @@ def _select_table_fragment(
     (一覧の取得時に固定して、以後は変えない)。
     """
     st.caption(caption)
+    busy = _busy()
     event = st.dataframe(
         df,
         hide_index=True,
         width="stretch",
-        on_select="rerun",
+        # 重い処理の実行中は行クリックを受け付けない (選び直しで処理が打ち切られるため)。
+        on_select="ignore" if busy else "rerun",
         selection_mode="single-row",
         column_config=column_config,
         key=key,
     )
+    if busy:
+        return  # 実行中は選択を書き換えない (今実行している文書の選択をそのまま保つ)
     rows = event.selection.rows
     st.session_state[sel_key] = ids[rows[0]] if rows else None
 
@@ -258,17 +363,23 @@ def _cache_picker_fragment(docs: list) -> None:
         f"キャッシュ済み: {len(docs)} 文書（行をクリックして選択）。"
         "LLM 列: **✓**=現行版で有効／**⚠ 要更新**=キャッシュはあるが窓ポリシー等が変わり再検出が必要／**—**=無し。"
     )
+    busy = _busy()
     event = st.dataframe(
         df,
         hide_index=True,
         width="stretch",
-        on_select="rerun",
+        # 重い処理の実行中は行クリックを受け付けない (選び直しで処理が打ち切られるため)。
+        on_select="ignore" if busy else "rerun",
         selection_mode="single-row",
         key="cache_pick",
     )
-    rows = event.selection.rows
-    sel_hash = docs[rows[0]]["content_hash"] if rows else None
-    st.session_state["cache_sel"] = sel_hash
+    if busy:
+        # 実行中は選択を書き換えず、今実行している文書の選択をそのまま保つ。
+        sel_hash = st.session_state.get("cache_sel")
+    else:
+        rows = event.selection.rows
+        sel_hash = docs[rows[0]]["content_hash"] if rows else None
+        st.session_state["cache_sel"] = sel_hash
     if sel_hash is None:
         st.caption("👆 行をクリックして文書を選択してください。")
         return
@@ -311,6 +422,7 @@ def render_input(
         uploaded_file = st.file_uploader(
             f"対応形式: {', '.join(SUPPORTED_EXTENSIONS)}",
             type=SUPPORTED_EXTENSIONS,
+            disabled=_busy(),
         )
         if uploaded_file is not None:
             input_id = ("file", uploaded_file.name, uploaded_file.size)
@@ -332,9 +444,10 @@ def render_input(
         url = st.text_input(
             "kb-mcp サーバー URL",
             value=st.session_state.get("kb_url", DEFAULT_KB_MCP_URL),
+            disabled=_busy(),
         )
         st.session_state["kb_url"] = url
-        if st.button("文書リストを取得"):
+        if st.button("文書リストを取得", disabled=_busy()):
             try:
                 with st.spinner("文書一覧を取得中 ..."):
                     st.session_state["kb_docs"] = list_documents_sync(url)
@@ -457,7 +570,9 @@ def render_input(
         )
 
     # テキスト入力 (単一チャンクとして扱う。長文でもエンジン側で安全分割される)
-    input_text = st.text_area("解析するテキスト", value=SAMPLE_TEXT, height=200)
+    input_text = st.text_area(
+        "解析するテキスト", value=SAMPLE_TEXT, height=200, disabled=_busy()
+    )
     if input_text.strip():
 
         def get_text_chunks(t=input_text) -> list[str]:
@@ -531,6 +646,7 @@ def _render_extracted_text(chunks: list[str]) -> None:
             text,
             file_name="extracted.txt",
             mime="text/plain",
+            disabled=_busy(),
         )
 
 
@@ -755,9 +871,12 @@ def _render_by_entity(groups, confidences, sel, ver, stored):
             key=f"mask_entity_{ver}",
         )
         col_a, col_b, col_c = st.columns([1, 1, 1])
-        applied = col_a.form_submit_button("✅ マスクを反映", type="primary")
-        excl = col_b.form_submit_button("🚫 選択を除外リストへ")
-        reg = col_c.form_submit_button("📒 選択を辞書へ登録")
+        busy = _busy()
+        applied = col_a.form_submit_button(
+            "✅ マスクを反映", type="primary", disabled=busy
+        )
+        excl = col_b.form_submit_button("🚫 選択を除外リストへ", disabled=busy)
+        reg = col_c.form_submit_button("📒 選択を辞書へ登録", disabled=busy)
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
     registers = edited["辞書登録"].tolist()
@@ -870,9 +989,12 @@ def _render_by_occurrence(groups, confidences, sel, ver, stored, text):
             key=f"mask_occurrence_{ver}",
         )
         col_a, col_b, col_c = st.columns([1, 1, 1])
-        applied = col_a.form_submit_button("✅ マスクを反映", type="primary")
-        excl = col_b.form_submit_button("🚫 選択を除外リストへ")
-        reg = col_c.form_submit_button("📒 選択を辞書へ登録")
+        busy = _busy()
+        applied = col_a.form_submit_button(
+            "✅ マスクを反映", type="primary", disabled=busy
+        )
+        excl = col_b.form_submit_button("🚫 選択を除外リストへ", disabled=busy)
+        reg = col_c.form_submit_button("📒 選択を辞書へ登録", disabled=busy)
     masks = edited["マスク"].tolist()
     excludes = edited["除外"].tolist()
     registers = edited["辞書登録"].tolist()
@@ -1242,6 +1364,7 @@ def render_masking_result(stored: dict) -> None:
             horizontal=True,
             help="実体ごと=同じ語は文書内の全出現を一括マスク。"
             "出現ごと=各出現を個別に選ぶ（同形異義語＝フランク等の使い分け用）。",
+            disabled=_busy(),
         )
     with col_conf:
         confidences = set(
@@ -1251,6 +1374,7 @@ def render_masking_result(stored: dict) -> None:
                 default=_CONFIDENCE_DEFAULT,
                 help="微弱＝コードらしき誤検出（`Em_NoYes`・`~C02`・`7-410` 等）。既定で非表示。"
                 "見たいときは『微弱』を選択（取りこぼし確認用。データは保持されています）。",
+                disabled=_busy(),
             )
         )
     by_entity = unit.startswith("実体")
@@ -1379,6 +1503,7 @@ def render_masking_result(stored: dict) -> None:
         )
     except MaskApiError as e:
         _show_analyze_error(e, detection)
+        _render_flash()  # ここは重い処理の中ではないので、その場で出す
         return
     except httpx.HTTPError as e:
         st.error(f"マスキング API に接続できません: {e}")
@@ -1402,7 +1527,10 @@ def render_masking_result(stored: dict) -> None:
 
     with col_main:
         view = st.radio(
-            "表示", ["色付き（元文）", "マスク済み", "元テキスト"], horizontal=True
+            "表示",
+            ["色付き（元文）", "マスク済み", "元テキスト"],
+            horizontal=True,
+            disabled=_busy(),
         )
         if view.startswith("色付き"):
             spans = [
@@ -1424,6 +1552,7 @@ def render_masking_result(stored: dict) -> None:
             masked_text,
             file_name="masked.txt",
             mime="text/plain",
+            disabled=_busy(),
         )
 
     st.subheader(f"対応表（マスク {len(mapping)} 種）")
@@ -1518,25 +1647,45 @@ def _render_detect_buttons(
 ) -> None:
     """NER/LLM タブ共通：実行済み / キャッシュ済み / 未 の 3 状態でボタンを出し分ける。
 
-    ``run(refresh)`` を押下時に呼ぶ (refresh=True でサーバのキャッシュを無視して再解析)。
+    run(refresh) を解析の本体として呼ぶ (refresh=True でサーバのキャッシュを無視して再解析)。
+    押した時点では実行せず、画面をロックしたフレームの末尾で実行する (_start_job の説明を参照)。
     """
+    job_id = f"{key_prefix}_analyze"
+    busy = _busy()
     if in_session:
         st.caption(f"{label} 状態: ✅ 実行済み（このセッション）")
-        if st.button("🔄 再実行（キャッシュ無視）", key=f"{key_prefix}_rerun"):
-            run(True)
+        if st.button(
+            "🔄 再実行（キャッシュ無視）", key=f"{key_prefix}_rerun", disabled=busy
+        ):
+            _start_job(job_id, refresh=True)
     elif cached:
         st.caption(f"{label} 状態: 📂 {cached_caption}")
         c1, c2 = st.columns(2)
         if c1.button(
-            "📂 キャッシュの結果を表示", type="primary", key=f"{key_prefix}_show"
+            "📂 キャッシュの結果を表示",
+            type="primary",
+            key=f"{key_prefix}_show",
+            disabled=busy,
         ):
-            run(False)
-        if c2.button("🔄 再実行（キャッシュ無視）", key=f"{key_prefix}_rerun"):
-            run(True)
+            _start_job(job_id, refresh=False)
+        if c2.button(
+            "🔄 再実行（キャッシュ無視）", key=f"{key_prefix}_rerun", disabled=busy
+        ):
+            _start_job(job_id, refresh=True)
     else:
         st.caption(f"{label} 状態: ⬜ {idle_caption}")
-        if st.button(f"▶ {label} 解析を実行", type="primary", key=f"{key_prefix}_run"):
-            run(False)
+        if st.button(
+            f"▶ {label} 解析を実行",
+            type="primary",
+            key=f"{key_prefix}_run",
+            disabled=busy,
+        ):
+            _start_job(job_id, refresh=False)
+
+    payload = _claim_job(job_id)
+    if payload is not None:
+        # スピナーはボタンのすぐ下に出したいので、この位置に置き場所を作って処理へ渡す。
+        _defer_job(run, area=st.empty(), refresh=payload["refresh"])
 
 
 def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
@@ -1571,7 +1720,7 @@ def _render_ner_tab(stored: dict, flatten_tables: bool) -> None:
             _show_analyze_error(e, "ner")
             return
         except httpx.HTTPError as e:
-            st.error(f"マスキング API に接続できません: {e}")
+            _flash("error", f"マスキング API に接続できません: {e}")
             return
         # マージは NER 票込みで作り直す必要があるので無効化 (マージタブで再実行を促す)。
         stored.pop("analysis_json", None)
@@ -1658,7 +1807,7 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
             _show_analyze_error(e, "llm")
             return
         except httpx.HTTPError as e:
-            st.error(f"マスキング API に接続できません: {e}")
+            _flash("error", f"マスキング API に接続できません: {e}")
             return
         # マージは LLM 票込みで作り直す必要があるので無効化 (マージタブで再実行を促す)。
         stored.pop("analysis_json", None)
@@ -1709,27 +1858,34 @@ def _render_llm_tab(stored: dict, flatten_tables: bool) -> None:
 
 
 def _show_analyze_error(e: MaskApiError, detection: str) -> None:
-    """`/analyze` (や `/apply`) の MaskApiError をユーザ向けメッセージにして表示する。"""
+    """`/analyze` (や `/apply`) の MaskApiError をユーザ向けメッセージにする。
+
+    解析は画面をロックしたフレームの末尾で走り、終わると画面を描き直す。その場に出すと
+    メッセージが消えるので、_flash に貯めて次のフレームで出す。
+    """
     code = e.status_code
     if code == 502 and detection in ("llm", "both"):
-        st.error(
+        _flash(
+            "error",
             "LLM 検出でエラーが発生しました（サーバの Azure 認証・接続の問題）。\n"
             "実機で `az login` 済みか、サーバの .env（RESOURCE_NAME_GPT41_MINI）を確認してください。\n"
             "LLM 抜きで進めるには 🤖 LLM検出 を使わず、マージは NER のみで実行されます。\n"
-            f"（詳細: {e.detail}）"
+            f"（詳細: {e.detail}）",
         )
     elif code == 503:
-        st.error(
+        _flash(
+            "error",
             "サーバの NER モデルがまだロード中です。少し待ってから再実行してください。\n"
-            f"（詳細: {e.detail}）"
+            f"（詳細: {e.detail}）",
         )
     elif code == 404:
-        st.error(
+        _flash(
+            "error",
             "この文書がサーバに見つかりません（未取込）。もう一度『読み込む』からやり直してください。\n"
-            f"（詳細: {e.detail}）"
+            f"（詳細: {e.detail}）",
         )
     else:
-        st.error(f"解析に失敗しました（HTTP {code}）: {e.detail}")
+        _flash("error", f"解析に失敗しました（HTTP {code}）: {e.detail}")
 
 
 def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
@@ -1747,9 +1903,16 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
     llm_wanted = _llm_available(client, chash, flatten_tables) or "llm_json" in stored
     detection = "both" if llm_wanted else "ner"
 
+    # 実行は押した時点では走らせず、画面をロックしたフレームの末尾で走らせる (_start_job 参照)。
+    job_merge = "merge_analyze"
+    job_reapply = "merge_reapply"
+
     if "analysis_json" not in stored:
-        clicked = st.button("▶ マージ&確信度を実行", type="primary", key="run_merge")
-        if not clicked:
+        if st.button(
+            "▶ マージ&確信度を実行", type="primary", key="run_merge", disabled=_busy()
+        ):
+            _start_job(job_merge)
+        if _claim_job(job_merge) is None:
             chans = "辞書＋正規表現＋NER" + ("＋LLM" if llm_wanted else "")
             msg = f"『▶ マージ&確信度を実行』で **{chans}** の票を集約し確信度づけします。"
             if not llm_wanted:
@@ -1763,28 +1926,35 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
             )
             st.info(msg)
             return
-        try:
-            with st.spinner(
-                "候補を集約・確信度づけ中 ...（NER/LLM はサーバのキャッシュ再利用）"
-            ):
-                stored["analysis_json"] = client.analyze_document(
-                    chash,
-                    detection=detection,
-                    mask_level="strong",
-                    flatten_tables=flatten_tables,
-                    models=models,
-                )
-        except MaskApiError as e:
-            _show_analyze_error(e, detection)
-            return
-        except httpx.HTTPError as e:
-            st.error(f"マスキング API に接続できません: {e}")
-            return
-        stored["analysis_detection"] = detection
-        stored["analysis_channels"] = {"ner": True, "llm": detection == "both"}
-        stored.pop("mask_sel", None)
-        stored.pop("_draft_saved", None)
-        stored["mask_ver"] = 0
+
+        def _run_merge() -> None:
+            try:
+                with st.spinner(
+                    "候補を集約・確信度づけ中 ...（NER/LLM はサーバのキャッシュ再利用）"
+                ):
+                    stored["analysis_json"] = client.analyze_document(
+                        chash,
+                        detection=detection,
+                        mask_level="strong",
+                        flatten_tables=flatten_tables,
+                        models=models,
+                    )
+            except MaskApiError as e:
+                _show_analyze_error(e, detection)
+                return
+            except httpx.HTTPError as e:
+                _flash("error", f"マスキング API に接続できません: {e}")
+                return
+            stored["analysis_detection"] = detection
+            stored["analysis_channels"] = {"ner": True, "llm": detection == "both"}
+            stored.pop("mask_sel", None)
+            stored.pop("_draft_saved", None)
+            stored["mask_ver"] = 0
+
+        # 結果はまだ無いので、このフレームの描画はここまで。処理は末尾で走る。
+        _defer_job(_run_merge, area=st.empty())
+        return
+
     used = stored.get("analysis_channels", {"ner": True, "llm": detection == "both"})
     st.caption(
         "合流したチャネル: 辞書＋正規表現"
@@ -1801,30 +1971,37 @@ def _render_merge_tab(stored: dict, flatten_tables: bool) -> None:
         key="reapply_merge",
         help="📒 マスク辞書 / 🚫 除外リスト の編集をこの結果に反映します。"
         "重い NER/LLM はサーバのキャッシュを再利用するので軽い再解析です。",
+        disabled=_busy(),
     ):
-        try:
-            with st.spinner(
-                "辞書・除外を反映して再解析中 ...（NER/LLM はサーバのキャッシュ再利用）"
-            ):
-                stored["analysis_json"] = client.analyze_document(
-                    chash,
-                    detection=stored.get("analysis_detection", detection),
-                    mask_level="strong",
-                    flatten_tables=flatten_tables,
-                    models=models,
-                )
-        except MaskApiError as e:
-            _show_analyze_error(e, detection)
-            return
-        except httpx.HTTPError as e:
-            st.error(f"マスキング API に接続できません: {e}")
-            return
-        # auto 選択が変わり得る (辞書追加＝確定増／除外＝候補減)。手動差分 (draft) から
-        # 作り直すため mask_sel を捨てて render 側で再構築させる。
-        stored.pop("mask_sel", None)
-        stored["mask_ver"] = stored.get("mask_ver", 0) + 1
-        st.success("辞書・除外の変更を反映しました。")
-        st.rerun()
+        _start_job(job_reapply)
+
+    if _claim_job(job_reapply) is not None:
+
+        def _run_reapply() -> None:
+            try:
+                with st.spinner(
+                    "辞書・除外を反映して再解析中 ...（NER/LLM はサーバのキャッシュ再利用）"
+                ):
+                    stored["analysis_json"] = client.analyze_document(
+                        chash,
+                        detection=stored.get("analysis_detection", detection),
+                        mask_level="strong",
+                        flatten_tables=flatten_tables,
+                        models=models,
+                    )
+            except MaskApiError as e:
+                _show_analyze_error(e, detection)
+                return
+            except httpx.HTTPError as e:
+                _flash("error", f"マスキング API に接続できません: {e}")
+                return
+            # auto 選択が変わり得る (辞書追加＝確定増／除外＝候補減)。手動差分 (draft) から
+            # 作り直すため mask_sel を捨てて render 側で再構築させる。
+            stored.pop("mask_sel", None)
+            stored["mask_ver"] = stored.get("mask_ver", 0) + 1
+            _flash("success", "辞書・除外の変更を反映しました。")
+
+        _defer_job(_run_reapply, area=st.empty())
 
     render_masking_result(stored)
 
@@ -1843,8 +2020,11 @@ def _render_pipeline(stored: dict, flatten_tables: bool) -> None:
         horizontal=True,
         key="pipeline_stage",
         label_visibility="collapsed",
+        # 重い処理の実行中はステージを切り替えられない (切り替えると処理が打ち切られるため)。
+        disabled=_busy(),
     )
     st.divider()
+    _render_flash()  # 直前に実行した処理のメッセージ (エラー・完了)
     if stage.startswith("📄"):
         _render_extracted_text(stored["chunks"])
     elif stage.startswith("🔍"):
@@ -1859,7 +2039,17 @@ def main() -> None:
     st.set_page_config(
         page_title="data-redactor — マスキング", page_icon="🔒", layout="wide"
     )
+    try:
+        _render_app()
+    finally:
+        # 予約した重い処理は、画面を全部描き終えてから実行する。途中で走らせると、まだ描き直して
+        # いない画面下部のウィジェットが前のフレームのまま押せてしまい、処理が打ち切られる。
+        # 画面がどの経路で終わっても実行する (ロックしたまま戻れなくなるのを防ぐ)。
+        _run_deferred_job()
 
+
+def _render_app() -> None:
+    """画面の描画一式 (重い処理は予約するだけで、実行は main の末尾で行う)。"""
     with st.sidebar:
         _render_connection_status()
         st.divider()
@@ -1868,6 +2058,8 @@ def main() -> None:
         "モード",
         ["🔒 マスキング", "📒 マスク辞書", "🚫 除外リスト", "🗂 キャッシュ"],
         horizontal=True,
+        # 重い処理の実行中はモードを切り替えられない (切り替えると処理が打ち切られるため)。
+        disabled=_busy(),
     )
     cache_mode = mode.startswith("🗂")
     dict_mode = mode.startswith("📒")
@@ -1926,6 +2118,7 @@ def main() -> None:
             help="表の `|` を句読点に直して**検出精度を上げる**処理（検出専用）。"
             "マスク結果は `|` を含む原文のまま＝セル内の語だけが伏せ字になり、"
             "`|` は区切りとして残ります（出力の体裁を保持）。既定 ON（表が無ければ無影響）。",
+            disabled=_busy(),
         )
 
     st.title("🔒 機密情報マスキング")
@@ -1944,6 +2137,8 @@ def main() -> None:
             "🗂 キャッシュから選択",
         ],
         horizontal=True,
+        # 重い処理の実行中は入力方法を切り替えられない (切り替えると処理が打ち切られるため)。
+        disabled=_busy(),
     )
     input_id, input_kind, source_label, get_chunks = render_input(input_mode)
 
@@ -1982,7 +2177,10 @@ def main() -> None:
     can_analyze = can_fresh or can_reuse_stored or can_select_list
     # 「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
     action_label = "📥 読み込む"
-    clicked = st.button(action_label, type="primary", disabled=not can_analyze)
+    job_load = "load_document"
+    clicked = st.button(
+        action_label, type="primary", disabled=not can_analyze or _busy()
+    )
     if not can_analyze:  # なぜ押せないかを明示 (モデル未ロード / 入力未指定)
         if not models:
             st.caption(
@@ -1997,26 +2195,29 @@ def main() -> None:
     output = st.empty()
 
     if clicked:
-        with (
-            output.container()
-        ):  # 旧フレームの内容を即座に置換 (スピナーをこの位置に出す)
+        # 読み込みはサーバへの送信・テキスト化を伴って重い。画面をロックしてから実行する。
+        _start_job(job_load)
+
+    if _claim_job(job_load) is not None:
+        # 実行は画面を全部描き終えたあと。メッセージは _flash に貯めて、終了後の描き直しで出す。
+        def _run_load(prev=stored) -> None:
             src_label, in_kind, in_sig = source_label, input_kind, input_id
             if can_fresh:
                 try:
                     chunks = get_chunks()  # type: ignore[misc]  # can_fresh で None 除外済み
                 except Exception as e:  # noqa: BLE001
-                    st.error(f"入力の取得に失敗しました: {e}")
+                    _flash("error", f"入力の取得に失敗しました: {e}")
                     chunks = None
             elif can_reuse_stored:
                 # ファイル入力で file_uploader が空 (別タブ往復でクリア)。同じファイルの
-                # テキスト化済みチャンク (stored) を再解析する (file 限定＝別文書の誤解析を防ぐ)。
-                src_label = stored["source_label"]  # type: ignore[index]
-                in_kind = stored["input_kind"]  # type: ignore[index]
-                in_sig = stored["input_sig"]  # type: ignore[index]
-                chunks = stored["chunks"]  # type: ignore[index]
+                # テキスト化済みチャンク (prev) を再解析する (file 限定＝別文書の誤解析を防ぐ)。
+                src_label = prev["source_label"]
+                in_kind = prev["input_kind"]
+                in_sig = prev["input_sig"]
+                chunks = prev["chunks"]
             else:
                 # cache/kb で未選択のままクリック (選択は一覧の行クリックで行う)。
-                st.warning("一覧から行をクリックして文書を選択してください。")
+                _flash("warning", "一覧から行をクリックして文書を選択してください。")
                 chunks = None
             if chunks:
                 # パイプラインは「読み込み」＝チャンク確定のみ。NER/LLM/マージは各タブで個別に実行する。
@@ -2033,11 +2234,14 @@ def main() -> None:
                     "models": models,
                 }
 
-    stored = st.session_state.get(slot)  # クリックで更新された可能性があるので取り直す
+        _defer_job(_run_load, area=output)
+
     if not stored:
-        # クリック時はハンドラ側が案内 (未選択) やエラーを output に表示済み。上書きしない。
-        if not clicked:
-            output.info(f"入力を指定して [{action_label}] を押してください。")
+        # 実行待ちのときは、このあと output にスピナーが出るので案内は出さない。
+        if not _busy():
+            with output.container():
+                if not _render_flash():  # 直前の読み込みのエラー・案内
+                    st.info(f"入力を指定して [{action_label}] を押してください。")
         return
 
     # 永続化したスロットが指す文書がサーバにまだあるか確認する。🗂 で削除された等で消えていれば、
