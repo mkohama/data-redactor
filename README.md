@@ -1,29 +1,135 @@
 # data-redactor
 
-data-redactor は GiNZA ベースの**日本語ドキュメント機密マスキング**ツールです。
+data-redactor は、**日本語ドキュメントの機密情報を伏せ字に置き換える**ツールです。
 
-LLM へ渡す前の前処理として、人名・社名・商標・連絡先（メール等）などの機密情報を検出し、
-伏せ字（`[社1]` など）に置き換えることを目標にしています。
+外部の LLM に文書を渡したいが、そのままでは渡せない——という場面のための前処理を担います。
+人名・社名・商標・連絡先 (メール等) などを検出して伏せ字 (`[社1]` など) に置き換え、
+LLM の応答を受け取ったあとで元の表記に戻します。
 
-検出は複数チャネルの合議で行います。チャネルは独立していて、**走ったチャネルだけを集約**します。
+入力はファイル (`.txt` / `.md` / `.pdf` / `.docx` / `.xlsx` / `.pptx` など)・貼り付けテキスト・
+kb-mcp に登録済みの文書に対応します。
+いずれも、kb-mcp から移植した `DocumentLoader` でテキスト化し、チャンクに分割してから解析します。
 
-- **ルールベース（常時）**: マスク辞書（社名・商標・人名の名簿）＋ 連絡先の正規表現（メール）。
-- **NER（任意・重い）**: Sudachi 品詞 ＋ GiNZA NER（`ja_ginza_electra` と `ja_ginza` の 2 モデル）。
-- **LLM（任意・要 `az login`）**: pii-masker（Azure OpenAI `gpt-4.1-mini`）による文脈判定。
-  人名/地名/外国人名/誤記など、辞書・NER で詰めきれない**文脈依存**の検出が得意。
+## 検出の 3 チャネル
 
-そのうえで確信度に応じて「自動マスク／要レビュー／非表示」に振り分けます。
-**recall 最優先**（マスク漏れ＝漏洩）の設計で、不確実なものは伏せずに人のレビューへ回します。
+検出は、性格の違う 3 つの手段 (チャネル) を組み合わせて行います。
+チャネルは互いに独立していて、**実際に走らせたものだけを集約**します。
 
-> LLM は任意です。辞書＋正規表現＋NER だけでも動きます（その場合 LLM のセットアップは不要）。
+- **辞書・正規表現**  
+  伏せると決めてある語の名簿 (社名・商標・人名) と、メールアドレスのように形が決まっている情報を拾います。 
 
-> 📘 **確信度（強・中・弱…）の決まり方とマスク確定の手順は [judgment-rules.md](judgment-rules.md) に集約**しています
-> （カテゴリ・2系統合議・取り扱いモード・既知の課題の早見表）。
+- **固有表現抽出**   
+  日本語の固有表現解析 (GiNZA の 2 モデルと Sudachi の品詞) で、名簿に無い人名・地名・組織名を拾い、
+  名簿の抜けを補います。
 
-入力は、`.txt` / `.md` / `.pdf` / `.docx` / `.xlsx` / `.pptx` などのファイル、貼り付けテキスト、
-kb-mcp の文書に対応します（kb-mcp から移植した `DocumentLoader` でテキスト化 → チャンク分割 → 解析）。
+- **LLM**   
+  LLMに文脈を読ませて判定させます。名簿にも無く、固有表現としても取りにくいもの——
+  紛らわしい表記や誤記、肩書きから人物と分かる語など——が対象です。  
+  検出処理そのものは別リポジトリの **[pii-masker](https://github.com/eiuske-saeki/pii-masker)** に委譲し、
+  本リポジトリは呼び出し側の薄いアダプタだけを持ちます。
+  原文をそのまま読ませる工程なので、**渡す先は機密情報を入力してよい LLM に限ります** (社内・ローカル運用など)。  
+  接続先の設定は [docs/guide/llm-detection.md](docs/guide/llm-detection.md) を参照してください。
 
-> 設計・経緯の詳細はローカルの `docs-dev/`（git 管理外）と [CLAUDE.md](CLAUDE.md) を参照してください。
+> 必ず走るのは辞書・正規表現だけで、固有表現抽出と LLM は選択的に実行できます。
+> ただし固有表現抽出が `uv sync` だけで使えるのに対し、
+> LLM は追加の準備 (submodule の取得・接続先の設定・認証) が要ります。
+
+## 確信度をつけて振り分ける
+
+チャネルはそれぞれ勝手に候補を出すので、**どのチャネルが同じ語を指したか**を突き合わせて、
+「どのくらい機密らしいか」＝**確信度**を決めます。
+そのうえで、自動でマスクするか、人のレビューに回すかを振り分けます。
+
+- **確定** … 辞書 (名簿) に載っている語。自動でマスクします。
+- **強** … 固有表現抽出と LLM の両方が指した語、正規表現で拾った連絡先。自動でマスクします。
+- **中** … 固有表現抽出と LLM のどちらか片方だけが指した語。人がレビューします。
+- **弱** … 地名やその他。人がレビューします。
+- **微弱・除外** … コードらしき誤検出や、除外リストで外した語。既定では表示しません。
+
+見立ての違う 2 つ (固有表現抽出と LLM) が揃って初めて「強い証拠」とみなすので、
+片方だけの検出を自動で伏せることはありません。
+逆に、**マスク漏れはそのまま漏洩になる**ので、判断に迷うものを切り捨てず、レビューに回す方へ倒しています。
+
+> 📘 確信度の決め方の詳細 (カテゴリの決まり方、2 系統の合議、取り扱いの一覧、既知の課題) は、
+> **[docs/judgment-rules.md](docs/judgment-rules.md)** に集約しています。
+
+## ドキュメント
+
+この README は概要と起動方法までです。詳しいことは以下にあります。
+
+| 読みたいこと | ドキュメント |
+| --- | --- |
+| 画面の使い方 (マスキング UI の全操作) | [docs/guide/masking-ui.md](docs/guide/masking-ui.md) |
+| HTTP API の呼び出し方 (エンドポイント・値の定義・エラー) | [docs/guide/api-usage.md](docs/guide/api-usage.md) |
+| 稼働中の API を呼ぶ手順 (プロンプト＋ファイルをまとめて) | [docs/guide/api-quickstart.md](docs/guide/api-quickstart.md) |
+| LLM 検出のセットアップと運用 (pii-masker・キャッシュの版) | [docs/guide/llm-detection.md](docs/guide/llm-detection.md) |
+| Docker で動かす | [docs/guide/docker.md](docs/guide/docker.md) |
+| コマンド一覧 (CLI からのマスキング・調査・保守) | [docs/guide/cli.md](docs/guide/cli.md) |
+| 仕組み (検出ロジック・キャッシュ・ディレクトリ構成) | [docs/guide/internals.md](docs/guide/internals.md) |
+| 確信度とマスク確定の判定ルール | [docs/judgment-rules.md](docs/judgment-rules.md) |
+| 開発の約束ごと (環境・ワークフロー・地雷) | [CLAUDE.md](CLAUDE.md) |
+
+> 設計の経緯・試行錯誤の記録はローカルの `docs-dev/` (git 管理外) にあります。
+
+---
+
+## 全体像
+
+```mermaid
+flowchart LR
+    subgraph CLIENT["使う側"]
+        UI["UI (ブラウザ画面)"]
+        APP["外部アプリ"]
+    end
+
+    subgraph SERVER["マスキング API (data-redactor serve)"]
+        direction TB
+        LOAD["テキスト化 → チャンク分割"]
+        subgraph CH["検出チャネル (走らせたものだけ集約)"]
+            direction LR
+            C1["辞書・正規表現"]
+            C2["固有表現抽出<br/>GiNZA 2モデル + Sudachi"]
+            C3["LLM 検出"]
+        end
+        MERGE["合流・確信度づけ<br/>確定 / 強 / 中 / 弱 / 微弱 / 除外"]
+        MASK["伏せ字化 (/mask)"]
+        UNMASK["復元 (/unmask)"]
+        DB[("cache.db<br/>重い層の結果を保存")]
+    end
+
+    CLIENT == "① 原文 (ファイル・テキスト・kb-mcp の文書)" ==> LOAD
+    LOAD --> CH --> MERGE --> MASK
+    MASK == "② 伏せ字テキスト ＋ 対応表" ==> CLIENT
+    CLIENT == "③ 伏せ字テキストだけ渡す" ==> EXT["外部の LLM<br/>(原文は渡さない)"]
+    EXT == "④ 応答 (伏せ字のまま)" ==> CLIENT
+    CLIENT == "⑤ 応答 ＋ 対応表" ==> UNMASK
+    UNMASK == "⑥ 元の表記に戻したテキスト" ==> CLIENT
+
+    C2 <-.-> DB
+    C3 <-.-> DB
+    C3 -- "検出を委譲" --> PM["pii-masker (submodule)"]
+    PM -- "原文を読ませる" --> SAFE["機密情報を<br/>入力してよい LLM"]
+```
+
+data-redactor は **マスキング API サーバ**として動きます。
+付属の UI も外部アプリも、HTTP でリクエストを送って応答を受け取るクライアントです。
+検出エンジン (GiNZA モデル) と解析結果 (`cache.db`) を持つのはサーバのプロセスだけなので、
+クライアントが増えても重いモデルを何重にも抱えることはありません。
+
+やりとりは 2 往復です。
+まず**原文を送ると、伏せ字にしたテキストと対応表が返ります** (`/mask`。①②)。
+クライアントはその伏せ字テキストで外部の LLM を使い (③④)、
+**応答と対応表を送り返すと、元の表記に戻ったテキストが返ります** (`/unmask`。⑤⑥)。
+対応表を持っているのはクライアント側で、サーバは復元のたびにそれを受け取ります。
+
+> 伏せ字テキストを渡す LLM と、原文を読ませる LLM は別物です。
+> ③ で外部の LLM に渡すのは、伏せ字にしたテキストだけです。
+> 一方、図の下側にある検出用の LLM (pii-masker 経由) は原文を読むので、
+> 機密情報を入力してよいものに限ります。
+
+> CLI の `mask` だけは例外で、サーバを介さずエンジンを直接呼びます。
+
+ディレクトリ構成は [docs/guide/internals.md](docs/guide/internals.md) を参照してください。
 
 ---
 
@@ -34,457 +140,127 @@ uv sync
 ```
 
 Python 3.11 / spaCy 3.7 系 / numpy 1.x に固定しています
-（`ja_ginza_electra` の依存と GiNZA 5.2 の制約のため。3.12 や spaCy 3.8・numpy 2 では動作しません）。
+(`ja_ginza_electra` の依存と GiNZA 5.2 の制約のため。3.12 や spaCy 3.8・numpy 2 では動作しません)。
 
-これで **辞書＋正規表現＋NER** のマスキングは動きます（LLM は不要）。
+これで **辞書＋正規表現＋固有表現抽出** のマスキングは動きます (LLM は不要)。
 
-### LLM 検出を使う場合（任意・実機）
+### LLM 検出を使う場合 (任意)
 
-LLM 検出は **pii-masker**（別リポジトリ）を git submodule として取り込み、Azure OpenAI `gpt-4.1-mini` を呼びます。
-`uv sync` だけでは動きません。次の 4 つが必要です。
+LLM 検出は、pii-masker (別リポジトリ) を submodule として取り込み、そこへ委譲します。
 
-```powershell
-# 1) pii-masker のソースを external/pii-masker に取得（git submodule）
-git submodule update --init
-#    ※新規 clone なら `git clone --recurse-submodules <url>` で 1 と同時に取得できます
-
-# 2) 依存をインストール（openai / azure-identity / pydantic などが入る）
-uv sync
-
-# 3) .env に Azure リソースを設定（.env.example をコピーして実値を入れる）
-#    RESOURCE_NAME_GPT41_MINI=<Azure リソース名>
-#    DEFAULT_LLM_MODEL=gpt-4.1-mini
-#    ※ pii-masker は呼び出し元（data-redactor）の .env を読むので、**ここ**に置きます
-
-# 4) Azure 認証（DefaultAzureCredential が使う）
-az login
-```
-
-仕組み（B2 方式）: pii-masker は `[build-system]` を持たない PoC なので pip インストールせず、
-`src/llm/_paths.py` が `external/pii-masker/src` を `sys.path` に通して `import pii_masker` を解決します
-（submodule 未取得なら自動でスキップ＝LLM 無しで動作）。LLM 検出の本体（プロンプト・Azure・locate）は
-pii-masker 側にあり、data-redactor は薄いアダプタ（[src/llm/](src/llm/)）から呼ぶだけです。
-
-> LLM のみ実機が別環境のとき: 本物の対象データ・`data/cache.db` は実機にしかありません。
-> このリポジトリ側（開発機）でも仕組みの動作確認はできますが、Azure 実呼び出しには `az login` と
-> `RESOURCE_NAME_GPT41_MINI` が必要です。
-
-#### detector_version の運用ルール（キャッシュ無効化）
-
-LLM 検出キャッシュは `(content_hash, model, flatten, detector_version)` をキーにします。
-**検出結果に影響する設定を変えたら detector_version を変える**——こうするとキャッシュが不一致になり自動で
-再検出されます（変え忘れると古い結果が使い回される＝最大の落とし穴）。
-
-detector_version（例 `pii-masker@9d9942e|win15000ov0|tgtall`）は **3 つの版**を `|` 区切りで持ち、
-`src/detector.py` の `detector_version()` が合成します。**変える契機も方法もそれぞれ別**です:
-
-| 部分 | 変える契機 | 方法 |
-|---|---|---|
-| `pii-masker@<hash>` | pii-masker（submodule）を更新したとき | `sync-pii-masker` が新ハッシュに**自動置換**（`src/detector.py` の `_DETECTOR_STATIC`） |
-| `win…` | 窓ポリシー（窓の大きさ）を変えたいとき | **環境変数を設定するだけ**（下記）。値から `win…` が自動合成され、キャッシュも自動無効化 |
-| `tgt…` | LLM 検出対象（`all`↔`pii`）を変えたいとき | **環境変数を設定するだけ**（下記）。`tgt<target>` が自動合成され、キャッシュは target 別に分かれる |
-
-> 技術的に効いているのは「**文字列全体が前回と変わること**」だけ（変わればキャッシュキーが不一致＝再検出）。
-> `win…` は実値（例 `win6000ov400`）が埋め込まれるので、どのキャッシュがどの窓ポリシーで作られたか
-> 後から分かります。どちらも手で数字をバンプする必要はありません（hash は自動・win… は env から自動）。
-
-> **type-map（`_ENE_TO_CATEGORY`）は detector_version に含めません。** ENE type→カテゴリの対応づけは
-> 解析（マージ）時に毎回当たる**後段変換**で、LLM 検出キャッシュ（保存するのは生 `ene_type` のみ）には
-> 影響しないからです。よって `_ENE_TO_CATEGORY` を変えても**版バンプは不要**——次の解析で自動的に反映されます
-> （キャッシュ済みの生検出に新しいマップを当て直すだけ＝Azure 再呼び出しも不要）。
-
-##### 窓ポリシー（窓の大きさ）の調整 — 環境変数
-
-LLM に本文を渡す前の「窓」分割の大きさは **`.env` の環境変数だけで調整**できます（コード編集・コミット不要）。
-
-| 環境変数 | 既定 | 意味 |
-|---|---|---|
-| `LLM_WINDOW_MAX_TOKENS` | 15000 | 1 窓の上限トークン数（小さいほど窓が増え API 回数↑だが mini の長文取りこぼしは減る）。15000≒散文1.1〜1.6万文字/窓 |
-| `LLM_WINDOW_OVERLAP_TOKENS` | 0 | 窓間の重なり（**0=重なり無し**。窓の継ぎ目で先行文脈を次窓へ持ち越したいなら 100〜200。窓化は段落境界で割るので実体は切れない） |
-
-値を変えると detector_version の `win…` が自動で変わり、**LLM 検出キャッシュが自動で無効化＝再検出**されます。
-値を元に戻せば元のキャッシュに再びヒットします。既定（`src/llm/windows.py` の `DEFAULT_MAX_TOKENS` /
-`DEFAULT_OVERLAP_TOKENS`）はコミット済みのベースラインで、env はそれを上書きするだけです。
-
-> `win…`（env）は pii-masker の更新有無に関係なく、こちら都合で変える設定です（下の pii-masker
-> 追従手順とは別物）。逆に pii-masker を更新しても、窓ポリシーを触っていなければ `win…` は変わりません。
-
-##### LLM 検出対象（target）の切替 — 環境変数
-
-LLM（pii-masker）に「何を抜かせるか」を **`.env` の環境変数だけで切替**できます（コード編集・コミット不要）。
-
-| 環境変数 | 既定 | 意味 |
-|---|---|---|
-| `LLM_DETECT_TARGET` | `all` | `all`＝人名/社名/商標の調教済み3種（高精度。実際にマスクしたいのがこの3種なので既定）。`pii`＝従来の全type汎用（地名/連絡先/ID も拾うが精度はやや落ちる・単一プロンプト）。認識値は `all`/`pii` のみ・不正値は安全側の `all` へ |
-
-値を変えると detector_version の `tgt…` が自動で変わり、**LLM 検出キャッシュが target 別に分かれて自動で無効化＝再検出**されます。
-地名/連絡先/ID 系は GiNZA・regex でも補えるため、既定 `all` でも recall の主目的（人名/社名/商標）は満たします。
-全type を LLM からも拾いたいときだけ `LLM_DETECT_TARGET=pii` にします。
-
-> `tgt…`（env）も `win…` と同じくこちら都合で変える設定で、pii-masker の更新有無とは無関係です。
-
-#### pii-masker が更新されたら（追従手順）
-
-pii-masker（submodule）を更新するときの手順。それを取り込み、LLM 検出キャッシュを正しく無効化します。
-更新を反映する経路は **2 つ**あり、マシンの役割で使い分けます。
-
-- **開発機（`.venv` あり・検証まで回す）** → `sync-pii-masker`（下記）。取り込み＋ENE ドリフト検査＋
-  ruff/mypy/pytest まで一括で回し、目視して **commit** します。検証はここに属する作業です。
-- **ビルド/配布機（`.venv` を作りたくない）** → `make docker-sync-build`（後述の「Docker で起動」節）。
-  git + perl だけで submodule ポインタと `src/detector.py` のハッシュを書き換え、そのままイメージを再ビルドします。
-  ホスト側 `.venv` を一切作らず、検証は開発機のコミット済み状態に委ねます。
-
-機械的な部分は **`sync-pii-masker` サブコマンド**が自動化します。
-
-```powershell
-# 追跡ブランチの最新へ（特定のコミット/タグにするなら: data-redactor sync-pii-masker <ref>）
-uv run data-redactor sync-pii-masker
-```
-
-自動で実行されること:
-
-1. submodule のポインタを更新（`<ref>` 省略時は追跡ブランチの最新）
-2. 新 HEAD の短縮ハッシュを取得
-3. `src/detector.py` の `_DETECTOR_STATIC` の `pii-masker@<hash>` を書き換え（= LLM 検出キャッシュが
-   `(content_hash, model, flatten, detector_version)` 不一致で**自動ミス→再取得**になる。ここを忘れると
-   検出器が変わっても古いキャッシュが使い回される＝最大の落とし穴）
-4. **ENE type ドリフト検査**（pii-masker のプロンプトの型 vs `src/masking/engine.py` の
-   `_ENE_TO_CATEGORY`）。マップに無い新 type は「その他」に落ちて recall 漏れになるため警告する
-5. submodule の変更点（`targets.py`＝プロンプト/型 / `detector_llm.py` / `schema.py` / `locate.py` 等）を表示
-6. `external/pii-masker` と `src/detector.py` を **stage**（コミットはしない）
-7. `ruff` / `mypy` / `pytest` を実行
-
-自動化できない（**人手で確認してからコミット**する）部分:
-
-- インターフェース契約の変更（`detect` / `locate_all` の戻り値）→ [src/llm/](src/llm/) のアダプタを修正
-- 新しい ENE type が増えていたら → `_ENE_TO_CATEGORY` に追加（版バンプ不要・次の解析で自動反映。上の運用ルール）
-- 実機（`az login` 済み）で 🤖 LLM検出 を回して件数/カテゴリを目視
-- 問題なければ `git commit`
-
-> 窓ポリシー（`win…`）は pii-masker 更新では通常触りません。変えるのは windows.py を編集したときで、
-> その手順は上の「detector_version の運用ルール」を参照。
-
-> `--no-update`（更新せず現在の HEAD で検査・検証だけ）、`--skip-tests`（ruff/mypy/pytest を省略）も使えます。
+submodule の取得・接続先の設定・検出キャッシュを作り直すための運用ルールは、
+**[docs/guide/llm-detection.md](docs/guide/llm-detection.md)** にまとめています。
 
 ---
 
-## Web UI（Streamlit）
+## Web UI
+
+**ふだんはこれ 1 つで起動します。**
 
 ```powershell
-uv run data-redactor ui
+uv run data-redactor dev
+```
+
+API サーバと UI をまとめて起動します。
+API が GiNZA を読み終えて応答できるようになってから UI を開くので、起動直後に「接続できません」と出ません。
+`Ctrl+C` で両方止まります。
+
+UI は API のクライアントなので、**UI だけを起動しても API が無ければ何もできません**。
+サーバは常駐・UI は必要なときだけ、のように別々に動かす場合はこちらです。
+
+```powershell
+uv run data-redactor serve     # 先に API を起動 (既定 http://127.0.0.1:8509)
+uv run data-redactor ui        # 別ターミナルで UI を起動
 ```
 
 ブラウザで http://localhost:8501 が開きます。上部のモードで画面を切り替えます。
 
-- **🔒 マスキング** … 本ツールの主機能。
+- **🔒 マスキング** … 本ツールの主機能。文書を読み込み、検出を実行し、伏せ字にして取り出す。
 - **📒 マスク辞書** … 確定マスクする社名・商標・社員名の名簿を編集。
 - **🚫 除外リスト** … マスク「しない」語の名簿を編集。
-- **🗂 キャッシュ** … 解析（NER）をキャッシュ済みの文書を一覧・削除。
+- **🗂 キャッシュ** … 解析済みの文書を一覧・削除。入力として再利用もできる。
 
-### マスキングの流れ（1ソース＝1パイプライン）
-
-マスキング画面は「入力ソースを 1 つ選び、パイプラインの各ステージをタブで覗く」構成です。
-
-1. 入力方法（✏️ テキスト / 📄 ファイル / 📚 kb-mcp / 🗂 キャッシュから選択）を選び、**[📥 読み込む]** を押す
-   （チャンクを確定するだけ。重い解析はまだ走りません）。
-2. 状態ヘッダーと 4 タブが出ます。**各タブが独立した実行ボタン**を持ちます。
-   - **📄 平文** … テキスト化結果。
-   - **🔍 NER検出** … **[▶ NER 解析を実行]**（GiNZA 2 モデル。重い）。NER 由来候補の独立ビュー。
-   - **🤖 LLM検出** … **[▶ LLM 検出を実行]**（pii-masker / `gpt-4.1-mini`。要 `az login`）。LLM 単独の結果（出口1）。
-   - **🔒 マージ&確信度** … **[▶ マージ&確信度を実行]**。**辞書＋正規表現（常時）＋実行済みのチャネル**
-     （NER・LLM）を集約して候補化（出口2）。**GiNZA は NER 検出を実行したときだけ回ります**
-     （未実行なら辞書＋regex＋LLM で軽く完結）。
-3. マージ&確信度タブの候補表で確信度フィルタをかけつつチェックでマスク対象を選び、**[✅ マスクを反映]**。
-   候補表の `ja_ginza` / `electra` / `Sudachi` / `LLM` / `辞書` 列で、どのチャネルが投票したか分かります。
-   誤検出は「除外」→ **[🚫 選択を除外リストへ]** で以後どの文書でも候補外にできます。
-   常に伏せたい社名・商標・人名は「辞書登録」→ **[📒 選択を辞書へ登録]** でその語のカテゴリで辞書に登録でき、
-   その場で再マージして確定マスクとして即反映されます（以後どの文書でも確定）。
-4. 結果は「色付き／マスク済み／原文」で確認・ダウンロードできます。
-
-確信度フィルタの既定は 確定・強・中・弱（**微弱・除外は既定で非表示**）。
-表（`|` 区切り）は検出のときだけ平文化し、**マスクは `|` 入りの原文に当てて体裁を保持**します。
-
-### kb-mcp 連携
-
-「📚 kb-mcp から選択」を使うには、kb-mcp を HTTP サーバとして起動しておきます。
-
-```powershell
-# kb-mcp プロジェクト側で
-uv run kb-mcp-server --transport http --port 8000
-```
-
-UI で URL（既定 `http://localhost:8000/mcp`）を指定し、「文書リストを取得」→ 文書を選択 →「📥 読み込む」。
-本文は**チャンク単位**で取得します（kb-mcp は格納時に分割済みなので、結合せずそのまま解析します）。
+マスキング画面は、入力を 1 つ選び、処理の各ステージ (平文 / NER検出 / LLM検出 / マージ&確信度) を
+切替バーで覗く構成です。
+入力方法の選び方、各ステージの実行と結果の見方、候補の選択と反映、辞書・除外リストの編集まで、
+**画面ごとの操作手順は [docs/guide/masking-ui.md](docs/guide/masking-ui.md) にまとめています**。
 
 ---
 
 ## Docker で起動
 
-設計 B に沿って **API（エンジン）と UI（純クライアント）を別コンテナ・別イメージ**で動かします
-（`data-redactor-api` = torch/GiNZA を持つ重イメージ、`data-redactor-ui` = spaCy/torch を含まない軽イメージ）。
-UI は `MASK_API_URL=http://data-redactor-api:8509` で API を参照します。`make` は `id -u` を使うため
-**Git Bash / WSL 等の POSIX シェル**から実行してください。
+API と UI を別コンテナで動かします。
+手順とイメージの決めごとは、**[docs/guide/docker.md](docs/guide/docker.md)** を参照してください。
 
 ```bash
-# 1) ビルド前提: submodule（pii-masker）を取得しておく（イメージに COPY されます）
-git submodule update --init
-
-# 2) .env を用意（LLM 経路を使う場合。.env.example をコピーして実値を入れる）
-#    RESOURCE_NAME_GPT41_MINI / DEFAULT_LLM_MODEL / KB_MCP_URL / LLM_WINDOW_* / LLM_DETECT_TARGET を設定
-cp .env.example .env
-
-# 3) 起動（ビルド＋デタッチ）。初回は api の torch＋ELECTRA 重み prewarm で時間がかかります
-#    api（:8509）が healthy になってから ui（:8508）が起動します（depends_on: service_healthy）
-make docker-up        # UI → http://localhost:8508（ホスト 8508 → コンテナ 8501）/ API → :8509
-
-make docker-logs      # ログ追従
-make docker-down      # 停止・削除
-make clean            # コンテナ＋ボリュームごと削除
+cp .env.example .env    # LLM 検出を使う場合のみ
+make docker-sync-build  # pii-masker の取得・更新まで面倒を見てビルド
+make docker-up          # UI → http://localhost:8508 / API → :8509
 ```
-
-### pii-masker を取り込んで再ビルド（ビルド/配布機向け・venv 不要）
-
-pii-masker（submodule）の更新を反映してイメージを作り直したいだけなら、`make docker-sync-build` を使います。
-
-```bash
-# 追跡ブランチの最新を取り込んで再ビルド
-make docker-sync-build
-
-# 特定のコミット/タグ/ブランチに固定して取り込む
-make docker-sync-build PII_REF=<commit/tag/branch>
-```
-
-`uv run data-redactor sync-pii-masker` と違い **git + perl だけ**で動くため、**ホスト側に `.venv` を作りません**
-（`uv run` は `.venv` を自動生成するので、ビルド機ではそれを避けたい）。やることは 2 つだけです。
-
-1. `git submodule update --remote external/pii-masker`（`PII_REF` 指定時はその版へ `checkout`）
-2. `src/detector.py` の `_DETECTOR_STATIC` の `pii-masker@<hash>` を新 HEAD に書き換え（LLM 検出キャッシュを自動ミスさせる）
-
-そのまま `make docker-build` に続きます。イメージに効くのはこの 2 点（`external/pii-masker/src` の中身と
-`src/detector.py` のハッシュ）だけで、どちらも venv 不要だからこう割り切れます。
-
-> **ENE ドリフト検査・ruff/mypy/pytest・契約変更の目視は回りません**（それらは `.venv` が要る開発機の作業）。
-> ビルド機は「開発機で `sync-pii-masker` → 目視 → commit 済み」の状態を取り込む前提で使ってください。
-> `.venv` すら要らない最小構成なら、コミット済みなら `git pull && make docker-build` だけでも反映できます
-> （`docker-sync-build` は、まだコミットされていない submodule 最新を取りに行きたいとき用）。
->
-> perl を使うのは `sed -i` が CRLF を LF に潰すのを避けるため（Git Bash 同梱の perl は改行を保持する）。
-
-成果物: [docker/Dockerfile.api](docker/Dockerfile.api)・[docker/Dockerfile.ui](docker/Dockerfile.ui)・
-[docker/requirements-ui.txt](docker/requirements-ui.txt)・[.dockerignore](.dockerignore)・
-[compose.yaml](compose.yaml)・[Makefile](Makefile)。
-
-ポイント（data-redactor 固有）:
-
-- **2 イメージ（設計 B）**：`Dockerfile.api` はエンジン（torch/spaCy/GiNZA/pii-masker/Azure CLI）を持つ重
-  イメージ、`Dockerfile.ui` は UI が実際に import する分だけ（`requirements-ui.txt`＝streamlit/pandas/httpx/
-  mcp/pyyaml）の軽イメージで **spaCy/torch/langchain/openai を含まない**。UI イメージのビルド時スモークで
-  「UI が engine 抜きで import でき、重依存が混入しない」ことを保証する（新 UI 依存の載せ忘れをビルドで検知）。
-  UI 依存は Docker 専用の最小リストで、ローカル開発（`uv sync`）には影響しない。
-- **Python 3.11 固定**（ja-ginza-electra の制約）。イメージは `python:3.11-slim`。
-- **`ja_ginza_electra` はビルド時に prewarm**（torch＋ELECTRA 重みをイメージに焼く）。実行時はネット不要・
-  recall 既定（electra）を担保。代償にイメージは数 GB。軽量運用に振るなら別途 `ja_ginza` 既定化を検討。
-- **pii-masker（submodule）は `external/pii-masker/src` を COPY** し、`PYTHONPATH=/app` の path-injection
-  （[src/llm/_paths.py](src/llm/_paths.py)）で `import pii_masker` を解決。`.dockerignore` で `external/` は除外しない。
-- **機密データ `./data` はボリュームマウント**（`cache.db` / `mask_dict.yaml` / `mask_allowlist.yaml`＝git 管理外）。
-  イメージには焼かない（`.dockerignore` で `data/` を除外）。
-- **kb-mcp** はコンテナに載せず `.env` の `KB_MCP_URL` で外部接続。ホスト側 kb-mcp に繋ぐなら
-  `localhost` ではなく `host.docker.internal` を使う（Linux は `compose.yaml` の `extra_hosts` を有効化）。
-- **Azure 認証**は Azure CLI 同梱。ホストの `az login` キャッシュを使うなら `compose.yaml` の
-  `~/.azure` マウントを有効化する。
-- `.dockerignore` は spec-summarizer の `docker/.dockerignore` と違い **リポジトリ直下**に置く
-  （build context が `.` のため Docker が確実に参照する位置）。
 
 ---
 
-## CLI
+## マスキング HTTP API (`serve`)
 
-統一コマンド `data-redactor`（実体は [src/cli.py](src/cli.py)。`uv run main.py <サブコマンド>` でも可）。
-
-```powershell
-# API サーバ＋Streamlit UI をまとめて起動（ローカル開発向け）。
-# API が起動して healthy（GiNZA ロード完了）になってから UI が開くので、初回の接続エラーが出ない。
-uv run data-redactor dev
-
-# Streamlit UI だけを起動（API のクライアント。別ターミナルで serve が動いている前提）。
-uv run data-redactor ui
-
-# マスキング（ファイル or --text）。既定で data/mask_dict.yaml を自動読込
-uv run data-redactor mask report.pdf
-uv run data-redactor mask --text "本文をここに貼り付け"
-uv run data-redactor mask report.docx --out masked.txt   # マスク済みを書き出し
-uv run data-redactor mask report.docx --audit            # 候補の票分布・確信度（表層なし＝共有OK）
-uv run data-redactor mask report.docx --audit-surface    # 監査に表層も付ける（機密・共有禁止）
-uv run data-redactor mask report.docx --no-flatten       # 表の平文化を切る
-
-# NER → displaCy の HTML（ner.html）。--open で既定ブラウザ表示・--serve でサーバ表示
-uv run data-redactor ner report.pdf --open
-
-# 各トークンの Sudachi 品詞 / NER ラベルを並べて観察（recall の穴を見る）
-uv run data-redactor debug report.pdf --both-models --all-tokens
-
-# 品質ゲート（ruff + mypy）
-uv run data-redactor check
-```
-
-> LLM 検出は現状 **UI（🤖 LLM検出 タブ）のみ**で、CLI の `mask` は 辞書＋正規表現＋NER で動きます。
-
----
-
-## マスキング HTTP API（`serve`）
-
-外部アプリ向けに、マスク（伏せ字化）と復元を HTTP で提供します
-（設計 [docs-dev/mask-http-api設計.md] の「B：1エンジン・多クライアント」。エンジン＝GiNZA モデルと
-`cache.db` の所有者を 1 プロセスに集約）。
+外部アプリ向けに、マスク (伏せ字化) と復元を HTTP で提供します。
+エンジン (GiNZA モデルと `cache.db`) を持つのはこのサーバプロセスだけで、
+UI も外部アプリも、同じ API を呼ぶクライアントになります。
 
 ```powershell
 uv run data-redactor serve                 # 既定 http://127.0.0.1:8509
 uv run data-redactor serve --port 8510     # ポート変更
 ```
 
-最小面のエンドポイント:
+主なエンドポイント:
 
 | メソッド | パス | 役割 |
 | --- | --- | --- |
-| GET  | `/health` | 死活・モデルロード状態 |
-| GET  | `/config` | 既定モデル・`detector_version`・選択肢 |
-| POST | `/mask`   | parts（text / content_hash / 同梱ファイル）→ 束共有 mapping でマスク |
-| POST | `/unmask` | text＋mapping → 復元 |
+| GET  | `/health` | 死活・モデルのロード状態 |
+| GET  | `/config` | 既定モデル・`detector_version`・選べる値 |
+| POST | `/mask`   | 入力 (テキスト / 取込済み文書 / 同梱ファイル) をまとめてマスク。対応表は全体で 1 つ |
+| POST | `/unmask` | テキスト＋対応表 → 元に戻す |
 
-典型的な使い方は **`/mask` → LLM 呼び出し → `/unmask`**（LLM には伏せ字のまま渡す）。
-Python クライアント `MaskClient` は [src/client/](src/client/)（`from src.client import MaskClient`。
-UI も外部アプリもこれを使う）。curl 例・実行できるデモは [examples/](examples/)
-（`uv run python examples/roundtrip_demo.py`）。
+典型的な使い方は **`/mask` → LLM 呼び出し → `/unmask`** です (LLM には伏せ字のまま渡します)。
+Python クライアント `MaskClient` は [src/client/](src/client/) にあり (`from src.client import MaskClient`)、
+UI も外部アプリもこれを使います。
+curl の例と実行できるデモは [examples/](examples/) にあります (`uv run python examples/roundtrip_demo.py`)。
 
-**呼び出し方の簡潔なリファレンス**（エンドポイント・値の定義・エラー・最小例）は
-[docs/guide/api-usage.md](docs/guide/api-usage.md) を参照。
+さらに詳しくは、次の 2 つを参照してください。
+
+- [docs/guide/api-usage.md](docs/guide/api-usage.md) … 呼び出し方の簡潔なリファレンス (エンドポイント・値の定義・エラー・最小例)
+- [docs/guide/api-quickstart.md](docs/guide/api-quickstart.md) … 稼働中の API を呼ぶ手順 (プロンプト＋複数ファイルをまとめてマスクし、復元するまで)
 
 ---
 
-## マスク辞書・除外リスト・キャッシュ（ローカル専用）
+## マスク辞書・除外リスト・キャッシュ (ローカル専用)
 
 機密のため、`data/*.yaml` と `data/cache.db` は **git 管理外**です。各マシンで用意します。
 
-- **マスク辞書** `data/mask_dict.yaml`
-  社名・商標・社員名の名簿。一致語は**確定マスク**（文書内の全出現）。
-  別表記（英語↔カタカナ・略称）は 1 つの代表表記にまとめて**検出**します（どの表記も伏せ字対象）。
-  ただし伏せ字（プレースホルダ）は**表記ごと**に別で、復元は元の表記に戻ります
-  （`置換` を指定した語だけは、その 1 つの固定値に統一）。
+- **マスク辞書** `data/mask_dict.yaml` —
+  社名・商標・社員名の名簿で、一致語は文書内の全出現が**確定マスク**になります。
+  別表記 (英語↔カタカナ・略称) は 1 つの代表表記にまとめて**検出**しますが、
+  伏せ字は**表記ごと**に振るので、復元すると元の表記に戻ります
+  (`置換` を指定した語だけは 1 つの固定値に統一されます)。
   雛形 `data/mask_dict.sample.yaml` をコピーして実値を入れてください。
 
-- **除外リスト** `data/mask_allowlist.yaml`
-  マスク「しない」語の名簿。一致した候補を「除外」に落とします。
-  **守るのは辞書（名簿）だけ**で、連絡先の誤検出（`20181210112500@MH01R2.sdf` 型など）は外せます。
-  UI の 🚫 除外リスト タブ、またはマスキング画面の「除外」操作で追加できます。
+- **除外リスト** `data/mask_allowlist.yaml` —
+  マスク「しない」語の名簿で、一致した候補を「除外」に落とします。
+  **守るのは辞書 (名簿) だけ**なので、連絡先の誤検出 (`20181210112500@MH01R2.sdf` 型など) は外せます。
+  UI の 🚫 除外リスト、またはマスキング画面の「除外」操作で追加できます。
 
-- **キャッシュ** `data/cache.db`（SQLite・自動生成）
-  後述の解析キャッシュ。🗂 キャッシュ画面で一覧・削除できます。
-
----
-
-## 解析キャッシュ（速度）
-
-解析は **NER 層（GiNZA 2 モデル＝重い）** と **マスキング層（辞書照合・確信度づけ＝軽い）** に分かれます。
-本ツールは **NER 層だけをキャッシュ**し、マスキング層は毎回再計算します。
-
-- キーは「内容ハッシュ × モデル × 平文化」。**未確定でも解析時に自動保存**されます。
-- 同じ文書を再解析すると NER をスキップして一瞬で終わります。
-- **辞書・除外リストを変えても再 NER は不要**（軽い層だけ再計算）。
-- 入力方法の **「🗂 キャッシュから選択」** で、保存済み文書をそのまま入力に再利用できます。
-
-> 補足: `src/masking` などの自作モジュールを編集したときは、Streamlit を**再起動**してください
-> （`src/ui/app.py` 以外はホットリロードされません）。
+- **キャッシュ** `data/cache.db` (SQLite・自動生成) —
+  重い解析 (固有表現抽出・LLM 検出) の結果を保存します。🗂 キャッシュ画面で一覧・削除できます。
 
 ---
 
-## 検出ロジックの要点
+## 仕組みを詳しく知りたいとき
 
-- **候補生成（チャネル）**: マスク辞書 ∪ 連絡先の正規表現（常時）∪ Sudachi 品詞 ∪ NER 2 モデル（NER 実行時）
-  ∪ LLM（pii-masker。実行時）。**走ったチャネルだけを集約**します（GiNZA は NER 検出を実行したときだけ）。
-- **確信度**（解決カテゴリへ投票した独立チャネル数で合議）:
-  - **確定** … 実辞書（名簿）一致のみ。自動マスク。
-  - **強** … 2 チャネル一致／昇格／連絡先の正規表現一致。自動マスク。
-  - **中** … 単独チャネル（LLM 単独など）。要レビュー。
-  - **弱** … 地名・その他。要レビュー。
-  - **微弱** … コードらしき誤検出（`Em_NoYes` / `~C02` / `7-410` / 漢字以外の 1 文字 など）。既定で非表示。
-    ただし **LLM が識別子（社員番号/アカウント/IP）と判定したものは免除**（弱で残す＝レビュー可視）。
-  - **除外** … 除外リスト一致。既定で非表示。
-- **自動マスク対象は 確定／強**。中・弱はレビュー、微弱・除外は確信度フィルタで既定非表示。
-- **LLM は「文脈を読む 1 票」**として合流します（単独→中＝レビュー／NER と相乗り→強）。
-  確定は名簿のみで、LLM 単独で自動マスクはしません（過剰マスク回避）。
-- 伏せ字（プレースホルダ）は**表記ごと**に振ります（同じ表記は同じ番号、表記が違えば別番号）。
-  復元は元の表記に正確に戻ります（辞書で `置換` を指定した語だけは 1 つの固定値に統一）。
+**[docs/guide/internals.md](docs/guide/internals.md)** にまとめています。
 
----
+- 検出ロジック (チャネルと確信度)
+- 解析キャッシュ
+- ディレクトリ構成
+- チャンク分割、ファイルのテキスト変換、表の扱い
 
-## アーキテクチャ（エンジンと表示層の分離）
-
-エンジン（UI 非依存）と、表示層（CLI / Streamlit）・入力アダプタを分離しています。
-エンジンはライブラリとして再利用できます。
-
-```
-src/
-  masking/             ← マスキングエンジン（UI 非依存）
-    engine.py            MaskingEngine（候補生成→確信度→マスク適用。analyze(run_ner=...) で NER 任意）
-    dictionary.py        MaskDictionary（社名・商標・人名の名簿）
-    allowlist.py         MaskAllowlist（除外リスト）
-    cache.py             NerCache（NER 層 + LLM 検出層キャッシュ・文書インデックス／SQLite）
-  ner/                 ← NER エンジン（UI 非依存）
-    engine.py            NerEngine / sudachi_analyze_chunks（GiNZA 抜きの軽量トークナイズ）
-    preprocess.py        テーブル平文化＋ build_body（spaCy 非依存の本文/オフセット構築）
-    rendering.py         displaCy の色マップ・HTML 生成
-  llm/                 ← LLM 検出アダプタ（pii-masker を呼ぶ薄い層。任意）
-    detect_layer.py      Stage A: 窓化→pii_masker.detect/locate_all→全文スパン／cached_detect
-    windows.py           本文を ~6-8k トークン窓に分割
-    schema.py            LlmSpan / LlmDetection（(de)シリアライズ）
-    _paths.py            external/pii-masker/src を sys.path へ（submodule path-injection）
-  sources/             ← 入力アダプタ（チャンクのリストを返す）
-    files.py             ファイル → チャンク（DocumentLoader + Splitter）
-    kb_mcp.py            kb-mcp からの取得（分割済みチャンクをそのまま使う）
-  core/document/       ← テキスト変換＋チャンク分割（kb-mcp から移植）
-  config.py            ← ChunkingConfig（チャンクサイズ設定）
-  detector.py          ← LLM 検出の版・窓ポリシー・run_llm_detection（UI 非依存の共有層）
-  api/                 ← マスキング HTTP API（FastAPI サーバ。設計 B）
-  client/              ← MaskClient（api へのクライアント。httpx のみ・src 非依存）
-  ui/app.py            ← Streamlit UI（api のクライアント。data-redactor ui で起動）
-external/pii-masker/   ← git submodule（LLM 検出の本体。コピーせず参照）
-main.py                ← 後方互換 CLI シム（実体は src/cli.py）
-```
-
----
-
-## チャンク分割について（長文対策）
-
-GiNZA 内部の SudachiPy は **1 回の解析で 49,149 バイト（≒16,000 文字弱）まで**しか扱えず、
-長文を丸ごと渡すと `SudachiError: Input is too long` で落ちます。
-
-そこで解析前に `SemanticRAGTextSplitter`
-（[src/core/document/text_splitter.py](src/core/document/text_splitter.py)）で
-**ファイルタイプ別にチャンク分割**し、各チャンクの結果を文字位置補正してマージします。
-kb-mcp 経由の文書は格納時に分割済みなので、結合せずそのまま使います。
-
----
-
-## ファイルのテキスト変換
-
-`DocumentLoader`（[src/core/document/document_loader.py](src/core/document/document_loader.py)）が
-拡張子ごとに最適なローダーへ振り分けます（kb-mcp から移植）。
-
-| 拡張子 | ローダー | 備考 |
-| --- | --- | --- |
-| `.txt`, `.md` | CustomTextLoader | UTF-8 / Shift-JIS 等を自動判定 |
-| `.pdf` | PdfLoader | pdfminer.six で日本語 PDF の文字化けを回避 |
-| `.docx` | WordToMarkdownLoader | 見出し・表・リストを Markdown 化 |
-| `.xlsx`, `.xlsm`, `.xls` | ExcelToMarkdownLoader | 各シートを Markdown テーブル化 |
-| `.pptx` | PowerPointLoader | スライド・表・ノートを抽出 |
-| `.html`, `.xml` | Unstructured*Loader | 別途 `uv add unstructured` が必要 |
-
----
-
-## 表（テーブル）の扱い
-
-GiNZA は自然文で学習しているため、Markdown のテーブル記法（`|` 区切り）をそのまま渡すと、
-セル内の語を取りこぼします。
-
-そこで検出のときだけ `|` を句読点に直して平文化し（[src/ner/preprocess.py](src/ner/preprocess.py)）、
-**マスクは `|` 入りの原文に当てて体裁を保持**します（平文化は検出専用の内部処理です）。
+判定ルール (確信度の決まり方とマスク確定の手順) は、
+**[docs/judgment-rules.md](docs/judgment-rules.md)** が正本です。
