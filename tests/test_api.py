@@ -151,6 +151,102 @@ def test_mask_content_hash_reference(
     assert "SONY" not in masked and "Canon" not in masked
 
 
+# --------------------------------------------------------------------------- #
+# NER キャッシュの粒度
+#
+# キャッシュの単位は **part 1 つ**（バンドル全体ではない）。呼び出し側にファイル単位の
+# キャッシュを約束する以上、粒度はテストで固定しておく（連結して 1 part で送ると
+# キャッシュが効かない、という説明の根拠でもある）。
+# --------------------------------------------------------------------------- #
+_PROMPT = "次の資料を要約して。"
+_DOC_A = "SONYの新型センサはCanonを上回る。"
+_DOC_B = "Canonのレンズは堅実との評価。"
+
+
+def _mask_parts(client: TestClient, texts: dict[str, str]) -> None:
+    """text part だけのバンドルを /mask に投げる（200 を確認するだけ）。"""
+    r = client.post(
+        "/mask",
+        json={
+            "parts": [{"id": pid, "text": t} for pid, t in texts.items()],
+            "detection": "ner",
+        },
+    )
+    assert r.status_code == 200
+
+
+def test_mask_ner_cache_key_is_per_part(client: TestClient) -> None:
+    """part ごとに (content_hash, model, flatten) で NER キャッシュが入る。
+
+    バンドル全体を 1 つの鍵にはしない＝part を分ければファイル単位で使い回せる。
+    """
+    _mask_parts(client, {"prompt": _PROMPT, "docA": _DOC_A, "docB": _DOC_B})
+
+    cache = client.app.state.ctx.cache
+    for text in (_PROMPT, _DOC_A, _DOC_B):
+        # flatten は /mask の既定（flatten_tables=True）。
+        assert cache.get(content_hash([text]), "ja_ginza", True) is not None
+    # 連結した全体は鍵にならない（バンドル単位でキャッシュしていないことの裏取り）。
+    assert cache.get(content_hash([_PROMPT, _DOC_A, _DOC_B]), "ja_ginza", True) is None
+
+
+def test_mask_ner_cache_reuses_unchanged_parts(
+    client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """プロンプトだけ差し替えたとき、変わっていない part は再解析されない。
+
+    GiNZA を呼ぶ :meth:`NerEngine.analyze_chunks` の呼び出し回数で見る（所要時間で測ると
+    マシン差で不安定なため）。
+    """
+    ner_engine = _engine.engines[0]
+    analyzed: list[str] = []
+    original = ner_engine.analyze_chunks
+
+    def counting(chunks, **kwargs):  # type: ignore[no-untyped-def]
+        chunks = list(chunks)
+        analyzed.append("".join(chunks))
+        return original(chunks, **kwargs)
+
+    monkeypatch.setattr(ner_engine, "analyze_chunks", counting)
+
+    _mask_parts(client, {"prompt": _PROMPT, "docA": _DOC_A})
+    assert analyzed == [_PROMPT, _DOC_A]  # 初回は 2 part とも解析
+
+    analyzed.clear()
+    _mask_parts(client, {"prompt": "この資料の課題を3点で。", "docA": _DOC_A})
+    assert analyzed == ["この資料の課題を3点で。"]  # docA はキャッシュ命中＝再解析なし
+
+    analyzed.clear()
+    _mask_parts(client, {"prompt": _PROMPT, "docA": _DOC_A})
+    assert analyzed == []  # 同一バンドルの再送は全 part 命中
+
+
+def test_mask_ner_cache_misses_when_parts_are_concatenated(
+    client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1 つの part に連結して送ると、変わらない部分もまとめて再解析される。
+
+    呼び出し側へ「parts に分けてほしい」と依頼する根拠。連結したテキストは全体で 1 つの
+    content_hash になるため、プロンプトが 1 文字変わるだけで全体がミスする。
+    """
+    ner_engine = _engine.engines[0]
+    analyzed: list[str] = []
+    original = ner_engine.analyze_chunks
+
+    def counting(chunks, **kwargs):  # type: ignore[no-untyped-def]
+        chunks = list(chunks)
+        analyzed.append("".join(chunks))
+        return original(chunks, **kwargs)
+
+    monkeypatch.setattr(ner_engine, "analyze_chunks", counting)
+
+    _mask_parts(client, {"all": f"{_PROMPT}\n{_DOC_A}"})
+    analyzed.clear()
+    _mask_parts(client, {"all": f"この資料の課題を3点で。\n{_DOC_A}"})
+    # docA は前回と同じ内容だが、連結された全体が別の鍵になるので再解析されている。
+    assert analyzed == [f"この資料の課題を3点で。\n{_DOC_A}"]
+
+
 def test_mask_multipart_file(client: TestClient) -> None:
     """同梱ファイル（multipart）を DocumentLoader でテキスト化してマスクする。"""
     manifest = '{"parts": [{"id": "fileA", "file": {"filename": "memo.txt"}}], "detection": "ner"}'
