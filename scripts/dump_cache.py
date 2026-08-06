@@ -29,6 +29,11 @@
 
     # 機械処理向け（JSON。本文は preview のみ）
     python scripts/dump_cache.py --json
+
+    # 1 エントリの本文を見る（content_hash は先頭一致でよい）。
+    # キャッシュ 1 エントリ ＝ /mask の part 1 つなので、その part に何が入っていたかが分かる。
+    uv run python scripts/dump_cache.py --show 2b5107017ae1 --out part.txt
+    uv run python scripts/dump_cache.py --show 2b5107017ae1 --head 0 --out part.txt  # 全文
 """
 
 from __future__ import annotations
@@ -55,6 +60,22 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone()
     return row is not None
+
+
+def _body_text(
+    conn: sqlite3.Connection, content_hash: str, doc_row: tuple | None
+) -> str:
+    """1 文書の本文を返す。documents のチャンクが最優先で、無ければ ner の解析結果から復元する。"""
+    if doc_row is not None and doc_row[6]:
+        return "".join(json.loads(doc_row[6]))
+    row = conn.execute(
+        "SELECT analysis_json FROM ner WHERE content_hash=? ORDER BY created_at LIMIT 1",
+        (content_hash,),
+    ).fetchone()
+    if row is None:
+        return ""
+    analysis = json.loads(row[0])
+    return analysis.get("original_text") or analysis.get("text") or ""
 
 
 def collect(conn: sqlite3.Connection, preview_width: int) -> list[dict]:
@@ -97,15 +118,7 @@ def collect(conn: sqlite3.Connection, preview_width: int) -> list[dict]:
             is not None
         )
 
-        # 本文は documents のチャンクが最優先。無ければ ner の解析結果から復元する。
-        if d is not None and d[6]:
-            text = "".join(json.loads(d[6]))
-        elif ner:
-            analysis = json.loads(ner[0][1])
-            text = analysis.get("original_text") or analysis.get("text") or ""
-        else:
-            text = ""
-
+        text = _body_text(conn, h, d)
         created = (
             d[5]
             if d is not None
@@ -161,6 +174,59 @@ def render(rows: list[dict], db_path: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def show(conn: sqlite3.Connection, prefix: str, head: int) -> str:
+    """1 文書の本文を全文（または先頭 head 文字）表示する。content_hash は先頭一致で指定する。
+
+    キャッシュ 1 エントリ ＝ /mask の part 1 つなので、本文を見れば「その part に何が入って
+    いたか」が分かる。1 エントリの中に文書の見出しが何度も現れるなら、呼び出し側が複数の
+    文書を 1 つの part に連結して送っている（＝ファイル単位のキャッシュが効かない）。
+    その判定材料として、先頭行と同じ行が本文中に何回現れるかも数える。
+    """
+    hashes = sorted(
+        {
+            r[0]
+            for t in _TABLES
+            if _table_exists(conn, t)
+            for r in conn.execute(
+                f"SELECT DISTINCT content_hash FROM {t} WHERE content_hash LIKE ?",
+                (prefix + "%",),
+            )
+        }
+    )
+    if not hashes:
+        return f"該当する content_hash がありません: {prefix}\n"
+    if len(hashes) > 1:
+        listed = "\n".join(f"  {h}" for h in hashes)
+        return f"content_hash の指定があいまいです（{len(hashes)} 件一致）:\n{listed}\n"
+
+    h = hashes[0]
+    doc = conn.execute(
+        "SELECT content_hash, source_kind, source_name, char_count, chunk_count, "
+        "created_at, chunks_json FROM documents WHERE content_hash=?",
+        (h,),
+    ).fetchone()
+    text = _body_text(conn, h, doc)
+
+    lines = text.splitlines()
+    first = next((line for line in lines if line.strip()), "")
+    repeats = sum(1 for line in lines if line == first) if first else 0
+
+    out = [
+        f"content_hash : {h}",
+        f"documents    : {'登録あり（' + str(doc[2]) + '）' if doc else '未登録'}",
+        f"本文         : {len(text)}字 / {len(lines)}行",
+        f"先頭行       : {first}",
+        f"先頭行と同じ行の出現回数: {repeats}"
+        + ("（1 なら 1 文書・2 以上なら複数文書の連結を疑う）" if repeats else ""),
+        "-" * 70,
+    ]
+    body = text if head <= 0 else text[:head]
+    out.append(body)
+    if head > 0 and len(text) > head:
+        out.append(f"…（残り {len(text) - head} 字は省略。全文は --head 0）")
+    return "\n".join(out) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="cache.db の文書を孤児（documents 未登録）も含めて一覧する"
@@ -178,6 +244,18 @@ def main() -> int:
     )
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
     parser.add_argument(
+        "--show",
+        metavar="HASH",
+        help="1 文書の本文を表示する（content_hash は先頭一致でよい）。"
+        "その part に何が入っていたかを確かめる用",
+    )
+    parser.add_argument(
+        "--head",
+        type=int,
+        default=2000,
+        help="--show で表示する先頭文字数（既定 2000。0 で全文）",
+    )
+    parser.add_argument(
         "--preview", type=int, default=70, help="本文プレビューの文字数（既定 70）"
     )
     parser.add_argument(
@@ -194,18 +272,19 @@ def main() -> int:
 
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)  # 読み取り専用で開く
     try:
-        rows = collect(conn, args.preview)
+        if args.show:
+            text = show(conn, args.show, args.head)
+        else:
+            rows = collect(conn, args.preview)
+            if args.orphans_only:
+                rows = [r for r in rows if not r["registered"]]
+            text = (
+                json.dumps(rows, ensure_ascii=False, indent=2) + "\n"
+                if args.json
+                else render(rows, str(db))
+            )
     finally:
         conn.close()
-
-    if args.orphans_only:
-        rows = [r for r in rows if not r["registered"]]
-
-    text = (
-        json.dumps(rows, ensure_ascii=False, indent=2) + "\n"
-        if args.json
-        else render(rows, str(db))
-    )
 
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
