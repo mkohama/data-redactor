@@ -34,6 +34,11 @@
     # キャッシュ 1 エントリ ＝ /mask の part 1 つなので、その part に何が入っていたかが分かる。
     uv run python scripts/dump_cache.py --show 2b5107017ae1 --out part.txt
     uv run python scripts/dump_cache.py --show 2b5107017ae1 --head 0 --out part.txt  # 全文
+
+    # 孤児を掃除する（まず確認表示、次に --yes で実行）。
+    # 1 件だけ消すなら API の DELETE /documents/<hash> でもよい（4 テーブルまとめて消える）。
+    uv run python scripts/dump_cache.py --delete-orphans
+    uv run python scripts/dump_cache.py --delete-orphans --yes
 """
 
 from __future__ import annotations
@@ -227,9 +232,67 @@ def show(conn: sqlite3.Connection, prefix: str, head: int) -> str:
     return "\n".join(out) + "\n"
 
 
+def delete_orphans(conn: sqlite3.Connection, execute: bool) -> str:
+    """孤児（documents に行が無い content_hash）を 4 テーブルから削除する。
+
+    ``execute=False`` なら消さずに対象を並べるだけ（既定）。実際に削除するのは ``--yes`` を
+    付けたときだけにしている。確認プロンプトを出さないのは、このスクリプトをコンテナへ
+    標準入力で流し込んで実行するため（stdin がスクリプト本体で埋まり、入力を読めない）。
+
+    documents に行がある文書には触れない。消すのは解析結果だけで、元ファイルには影響しない
+    （同じ内容を送り直せば再解析されて入り直す）。
+    """
+    tables = [t for t in _TABLES if _table_exists(conn, t)]
+    targets = sorted(
+        {
+            r[0]
+            for t in tables
+            if t != "documents"
+            for r in conn.execute(
+                f"SELECT DISTINCT content_hash FROM {t} WHERE content_hash NOT IN "
+                "(SELECT content_hash FROM documents)"
+            )
+        }
+    )
+    if not targets:
+        return "孤児はありません。削除するものはありません。\n"
+
+    out = [f"孤児 {len(targets)} 件:"]
+    total = {t: 0 for t in tables if t != "documents"}
+    for h in targets:
+        counts = {
+            t: conn.execute(
+                f"SELECT COUNT(*) FROM {t} WHERE content_hash=?", (h,)
+            ).fetchone()[0]
+            for t in total
+        }
+        for t, n in counts.items():
+            total[t] += n
+        body = _body_text(conn, h, None)
+        detail = " ".join(f"{t}={n}" for t, n in counts.items() if n)
+        out.append(f"  {h[:12]}  {detail}  {_preview(body, 40) or '（本文なし）'}")
+
+    out.append("")
+    out.append("削除する行数: " + ", ".join(f"{t} {n}行" for t, n in total.items()))
+
+    if not execute:
+        out.append("")
+        out.append("これは確認表示です。実際に削除するには --yes を付けてください。")
+        return "\n".join(out) + "\n"
+
+    with conn:  # まとめて 1 トランザクション（途中で失敗したら全部戻す）
+        for t in total:
+            conn.executemany(
+                f"DELETE FROM {t} WHERE content_hash=?", [(h,) for h in targets]
+            )
+    out.append("")
+    out.append("削除しました。")
+    return "\n".join(out) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="cache.db の文書を孤児（documents 未登録）も含めて一覧する"
+        description="cache.db の文書を孤児（documents 未登録）も含めて一覧・削除する"
     )
     parser.add_argument(
         "db",
@@ -259,6 +322,23 @@ def main() -> int:
         "--preview", type=int, default=70, help="本文プレビューの文字数（既定 70）"
     )
     parser.add_argument(
+        "--delete-orphans",
+        action="store_true",
+        help="孤児（documents 未登録）を 4 テーブルから削除する。"
+        "既定は確認表示のみで、実際に消すには --yes も付ける",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="--delete-orphans を実際に実行する（確認プロンプトは出さない）",
+    )
+    parser.add_argument(
+        "--vacuum",
+        action="store_true",
+        help="削除後に VACUUM してファイルを縮める。"
+        "書き込みを排他ロックするので API を止めてから実行すること",
+    )
+    parser.add_argument(
         "--out",
         help="出力先ファイル（UTF-8）。省略すると標準出力"
         "（Windows のコンソールは cp932 で化けるのでファイル推奨）",
@@ -270,9 +350,27 @@ def main() -> int:
         print(f"cache.db が見つかりません: {db}", file=sys.stderr)
         return 1
 
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)  # 読み取り専用で開く
+    # 削除するときだけ書き込みで開く（それ以外は読み取り専用＝API 稼働中でも安全）。
+    writing = args.delete_orphans and args.yes
+    conn = (
+        sqlite3.connect(str(db), timeout=30)  # 他プロセスのロック待ちを 30 秒許す
+        if writing
+        else sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    )
     try:
-        if args.show:
+        if args.delete_orphans:
+            text = delete_orphans(conn, execute=args.yes)
+            if writing:
+                # 削除だけでは file が縮まない（SQLite が空き領域を再利用する）。
+                if args.vacuum:
+                    conn.execute("VACUUM")
+                    text += "VACUUM してファイルを縮めました。\n"
+                else:
+                    text += (
+                        "ファイルサイズは縮んでいません。縮めるなら --vacuum を"
+                        "付けて実行してください（API を止めてから）。\n"
+                    )
+        elif args.show:
             text = show(conn, args.show, args.head)
         else:
             rows = collect(conn, args.preview)
