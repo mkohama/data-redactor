@@ -27,12 +27,17 @@ YAML 形式 (data/mask_dict.yaml。書式は data/mask_dict.sample.yaml 参照)�
         mask: 〔社A〕                  # 置換後の固定文字列 (無ければ null＝自動採番)
         partial: false                 # 他の語の中でも拾うか (true/false)
         case_sensitive: false          # 大小を区別するか (true/false)
+        note: 2026-07 顧客Aの要望で登録  # 備考 (無ければ null)
     Trademark:
       - canonical: STS
         aliases: null
         mask: null
         partial: false
         case_sensitive: true           # 略語：大文字の STS だけ拾う (Sts/sts は拾わない)
+        note: null
+
+``note`` は人が読むための備考 (登録理由・出典・登録日など)。**照合には一切使わない**ので、
+書き換えてもマスク結果は変わらない。
 
 ``case_sensitive: true``＝**大小を区別** (NFKC のみ・casefold しない)。略語 ``STS`` は ``STS`` のみ
 一致し ``Sts`` (Status の略かも) /``sts`` は拾わない。既定 ``false`` は従来どおり大小無視。
@@ -540,8 +545,10 @@ _SECTION_ORDER_OUT = ("Company", "Trademark", "Person")
 def load_entries(path: str | Path) -> list[dict]:
     """YAML を**構造のまま**読み込む (UI 編集・round-trip 用)。
 
-    返り値は ``{"category", "canonical", "aliases": list[str], "mask": str, "partial": bool}`` の列。
+    返り値は ``{"category", "canonical", "aliases": list[str], "mask": str, "note": str,
+    "partial": bool, "case_sensitive": bool}`` の列。
     ``partial`` は YAML キー ``部分一致`` (旧 ``embed``) のどちらからでも読む (後方互換)。
+    ``note`` (備考) は無ければ空文字。
     (:meth:`MaskDictionary.load` はこれを正規化表層マップに畳む)
 
     旧バグで置換に書かれてしまった文字列 ``"nan"`` は空 (未指定) として読み込む (自己修復。
@@ -560,6 +567,7 @@ def load_entries(path: str | Path) -> list[dict]:
                         "canonical": item,
                         "aliases": [],
                         "mask": "",
+                        "note": "",
                         "partial": False,
                         "case_sensitive": False,
                     }
@@ -574,6 +582,8 @@ def load_entries(path: str | Path) -> list[dict]:
                         "canonical": item.get("canonical") or item.get("name") or "",
                         "aliases": list(item.get("aliases") or []),
                         "mask": mask,
+                        # 備考 (人が読むメモ。登録理由・出典など)。照合には一切使わない。
+                        "note": str(item.get("note") or ""),
                         # `partial` (新・英語) 優先・`部分一致`／`embed` (旧) も受理
                         "partial": bool(
                             item.get("partial")
@@ -600,8 +610,9 @@ def save_entries(path: str | Path, entries: list[dict]) -> None:
     """構造化エントリを YAML に書き出す (UI 保存用)。
 
     **全エントリを同一フォーマット (フルセット) で書く**：各エントリは必ず
-    ``canonical`` / ``aliases`` / ``mask`` / ``partial`` / ``case_sensitive`` の全キーを持つ。
-    未定義は明示的に ``aliases: null`` / ``mask: null``、真偽値 (``partial`` / ``case_sensitive``) は
+    ``canonical`` / ``aliases`` / ``mask`` / ``partial`` / ``case_sensitive`` / ``note`` の全キーを持つ。
+    未定義は明示的に ``aliases: null`` / ``mask: null`` / ``note: null``、
+    真偽値 (``partial`` / ``case_sensitive``) は
     ``false`` と書く (＝手入力時にどのキーが使えるか一目で分かる)。キーは英語で統一、セクションも
     英語 (Company / Trademark / Person → (その他) )。各セクション内は代表表記の辞書順にソート。
     canonical が空のエントリは捨てる。
@@ -615,6 +626,7 @@ def save_entries(path: str | Path, entries: list[dict]) -> None:
         section = _CATEGORY_SECTION.get(category, category)
         aliases = [a.strip() for a in (e.get("aliases") or []) if a.strip()]
         mask = (e.get("mask") or "").strip()
+        note = (e.get("note") or "").strip()
         # 内部フィールドは `partial`。旧来の `embed` フィールドも受理 (後方互換)。
         partial = bool(e.get("partial") or e.get("embed"))
         case_sensitive = bool(e.get("case_sensitive"))
@@ -625,6 +637,7 @@ def save_entries(path: str | Path, entries: list[dict]) -> None:
             "mask": mask or None,
             "partial": partial,
             "case_sensitive": case_sensitive,
+            "note": note or None,
         }
         sections.setdefault(section, []).append((canonical, obj))
 

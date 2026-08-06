@@ -22,9 +22,13 @@ surface / partial の全キーを持つ (辞書と統一。キー・セクショ
       - surface: Em_NoYes        # 完全一致で除外
         partial: false
         case_sensitive: false
+        note: 変数名 (2026-07 レビューで確認)   # 備考 (無ければ null)
       - surface: FB              # 部分一致: FB を含む複合語 (GetFBData 等) も丸ごと除外
         partial: true
         case_sensitive: false
+        note: null
+
+``note`` は人が読むための備考 (除外した理由・判断した人など)。**照合には一切使わない**。
 
 ``case_sensitive: true`` は辞書と同じく**大小を区別** (略語 ``STS`` は ``STS`` のみ・``Sts`` は除外しない)。
 読み込みは旧形式も後方互換で受ける：セクションの日本語 (``除外``)、文字列だけの簡潔形、
@@ -145,8 +149,10 @@ class MaskAllowlist:
 def load_allowlist_entries(path: str | Path) -> list[dict]:
     """YAML を**構造のまま**読み込む (UI 編集・round-trip 用)。
 
-    返り値は ``{"surface": str, "partial": bool}`` の列。文字列だけの項目は ``partial=False``。
+    返り値は ``{"surface": str, "partial": bool, "case_sensitive": bool, "note": str}`` の列。
+    文字列だけの項目は ``partial=False``。
     ``partial`` は YAML キー ``部分一致`` (旧 ``embed``) のどちらからでも読む (後方互換)。
+    ``note`` (備考) は無ければ空文字。
     旧 ``"nan"`` 等の空相当は捨てる。重複 (surface 単位) ・空白のみは除く。
     """
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
@@ -162,14 +168,18 @@ def load_allowlist_entries(path: str | Path) -> list[dict]:
             s = str(item.get("surface") or "").strip()
             partial = _read_partial(item)
             cs = bool(item.get("case_sensitive"))
+            note = str(item.get("note") or "")
         else:
             s = str(item).strip()
             partial = False
             cs = False
+            note = ""
         if not s or s.lower() == "nan" or s in seen:
             continue
         seen.add(s)
-        out.append({"surface": s, "partial": partial, "case_sensitive": cs})
+        out.append(
+            {"surface": s, "partial": partial, "case_sensitive": cs, "note": note}
+        )
     return out
 
 
@@ -186,28 +196,37 @@ def save_allowlist_entries(path: str | Path, entries: Iterable[str | dict]) -> N
     """除外語リストを YAML に書き出す (UI 保存用)。空白除去・重複排除・正規化辞書順にソート。
 
     **全エントリ同一フォーマット**＝各エントリは ``surface`` / ``partial`` / ``case_sensitive``
-    の全キーを持つ (辞書 :func:`dictionary.save_entries` と統一。キー・セクションは英語)。
-    ``entries`` は文字列 or ``{surface, partial|部分一致|embed, case_sensitive}`` を混在可 (後方互換)。
+    / ``note`` の全キーを持つ (辞書 :func:`dictionary.save_entries` と統一。キー・セクションは英語)。
+    未指定の ``note`` は ``null`` と書く。
+    ``entries`` は文字列 or ``{surface, partial|部分一致|embed, case_sensitive, note}`` を
+    混在可 (後方互換)。
     """
-    kept: list[tuple[str, bool, bool]] = []
+    kept: list[tuple[str, bool, bool, str]] = []
     seen: set[str] = set()
     for e in entries:
         if isinstance(e, dict):
             s = str(e.get("surface") or "").strip()
             partial = _read_partial(e)
             cs = bool(e.get("case_sensitive"))
+            note = (e.get("note") or "").strip()
         else:
             s = str(e).strip()
             partial = False
             cs = False
+            note = ""
         if not s or s in seen:
             continue
         seen.add(s)
-        kept.append((s, partial, cs))
+        kept.append((s, partial, cs, note))
     kept.sort(key=lambda t: sort_key(t[0]))
     items = [
-        {"surface": s, "partial": partial, "case_sensitive": cs}
-        for s, partial, cs in kept
+        {
+            "surface": s,
+            "partial": partial,
+            "case_sensitive": cs,
+            "note": note or None,
+        }
+        for s, partial, cs, note in kept
     ]
     Path(path).write_text(
         yaml.safe_dump(

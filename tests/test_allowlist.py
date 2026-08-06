@@ -101,7 +101,9 @@ def test_legacy_embed_key_still_read(tmp_path: Path) -> None:
     p = tmp_path / "al.yaml"
     p.write_text("除外:\n  - surface: NSR\n    embed: true\n", encoding="utf-8")
     entries = load_allowlist_entries(p)
-    assert entries == [{"surface": "NSR", "partial": True, "case_sensitive": False}]
+    assert entries == [
+        {"surface": "NSR", "partial": True, "case_sensitive": False, "note": ""}
+    ]
 
 
 def test_partial_separator_and_merged_token() -> None:
@@ -122,6 +124,29 @@ def test_case_sensitive_exclusion() -> None:
     alp = MaskAllowlist([{"surface": "STS", "partial": True, "case_sensitive": True}])
     assert alp.matches("STSMap", ["STSMap"])
     assert not alp.matches("StsMap", ["StsMap"])
+
+
+def test_note_roundtrips_and_does_not_affect_exclusion(tmp_path: Path) -> None:
+    """備考（note）は round-trip で保存・復元され、除外判定には影響しない。"""
+    p = tmp_path / "al.yaml"
+    save_allowlist_entries(
+        p,
+        [
+            {"surface": "FB", "partial": True, "note": "変数名。2026-07 レビュー済み"},
+            {"surface": "Reject"},
+        ],
+    )
+    text = p.read_text(encoding="utf-8")
+    assert "note: 変数名。2026-07 レビュー済み" in text
+    assert "note: null" in text  # 未指定はフルセットの null
+
+    by = {e["surface"]: e["note"] for e in load_allowlist_entries(p)}
+    assert by == {"FB": "変数名。2026-07 レビュー済み", "Reject": ""}
+
+    # 備考があっても除外の効き方は変わらない。
+    al = MaskAllowlist(load_allowlist_entries(p))
+    assert al.matches("GetFBData", ["GetFBData"])  # partial: true が効く
+    assert al.matches("Reject")
 
 
 def test_plain_string_entries_load_as_non_partial(tmp_path: Path) -> None:

@@ -220,6 +220,44 @@ def test_yaml_writes_full_set_english(tmp_path) -> None:
     assert entries["iAS"]["case_sensitive"] is False
 
 
+def test_note_roundtrips_and_does_not_affect_matching(tmp_path) -> None:
+    """備考（note）は round-trip で保存・復元され、照合には影響しない。"""
+    p = tmp_path / "d.yaml"
+    save_entries(
+        p,
+        [
+            {
+                "category": "商標",
+                "canonical": "iAS",
+                "aliases": [],
+                "mask": "",
+                "partial": True,
+                "note": "用語集から登録（2026-07）",
+            },
+            {"category": "社名", "canonical": "社B", "aliases": [], "mask": ""},
+        ],
+    )
+    text = p.read_text(encoding="utf-8")
+    assert "note: 用語集から登録（2026-07）" in text
+    assert "note: null" in text  # 未指定はフルセットの null
+
+    entries = {e["canonical"]: e for e in load_entries(p)}
+    assert entries["iAS"]["note"] == "用語集から登録（2026-07）"
+    assert entries["社B"]["note"] == ""
+
+    # 備考を書いても照合結果は変わらない（照合表の構築は note を見ない）。
+    d = MaskDictionary.load(p)
+    assert d.canonical_of("iAS") == "iAS"
+    assert d.partial_matches(_toks("iASMap"))
+
+
+def test_note_absent_in_old_yaml_reads_as_empty(tmp_path) -> None:
+    """note の無い既存 YAML もそのまま読める（前方・後方互換）。"""
+    p = tmp_path / "d.yaml"
+    p.write_text("Company:\n  - canonical: 社A\n", encoding="utf-8")
+    assert load_entries(p)[0]["note"] == ""
+
+
 # --------------------------------------------------------------------------- #
 # 大小区別（case_sensitive）: 略語は大文字の出現だけ拾う。
 # --------------------------------------------------------------------------- #

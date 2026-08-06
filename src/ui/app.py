@@ -1058,11 +1058,21 @@ def render_dict_editor() -> None:
             "置換": e["mask"],
             "部分一致": e["partial"],
             "大小区別": e["case_sensitive"],
+            "備考": e.get("note", ""),
         }
         for e in entries
     ]
     df = pd.DataFrame(
-        rows, columns=["カテゴリ", "代表表記", "別名", "置換", "部分一致", "大小区別"]
+        rows,
+        columns=[
+            "カテゴリ",
+            "代表表記",
+            "別名",
+            "置換",
+            "部分一致",
+            "大小区別",
+            "備考",
+        ],
     )
     edited = st.data_editor(
         df,
@@ -1090,6 +1100,11 @@ def render_dict_editor() -> None:
                 help="ON にすると大文字・小文字を区別（略語向け）。例 STS は STS だけ拾い "
                 "Sts/sts は拾わない。OFF（既定）は大小無視（STS=sts=Sts）。",
             ),
+            "備考": st.column_config.TextColumn(
+                "備考",
+                help="登録の理由・出典・登録日など、人が読むためのメモ。"
+                "マスクの判定には一切使いません。",
+            ),
         },
     )
     if st.button("💾 辞書を保存", type="primary", key="dict_save"):
@@ -1109,6 +1124,7 @@ def render_dict_editor() -> None:
                 "case_sensitive": (
                     bool(r["大小区別"]) if not pd.isna(r["大小区別"]) else False
                 ),
+                "note": cell(r["備考"]),
             }
             for _, r in edited.iterrows()
         ]
@@ -1276,6 +1292,7 @@ def render_allowlist_editor() -> None:
             "除外語": pd.Series([e["surface"] for e in entries], dtype="string"),
             "部分一致": pd.Series([e["partial"] for e in entries], dtype="bool"),
             "大小区別": pd.Series([e["case_sensitive"] for e in entries], dtype="bool"),
+            "備考": pd.Series([e.get("note", "") for e in entries], dtype="string"),
         }
     )
     edited = st.data_editor(
@@ -1296,6 +1313,11 @@ def render_allowlist_editor() -> None:
                 default=False,
                 help="ON で大文字・小文字を区別（略語向け）。OFF（既定）は大小無視。",
             ),
+            "備考": st.column_config.TextColumn(
+                "備考",
+                help="除外した理由・判断した人・日付など、人が読むためのメモ。"
+                "除外の判定には一切使いません。",
+            ),
         },
         key="allowlist_editor",
     )
@@ -1305,11 +1327,13 @@ def render_allowlist_editor() -> None:
                 "surface": str(s).strip(),
                 "partial": bool(p) if not pd.isna(p) else False,
                 "case_sensitive": bool(c) if not pd.isna(c) else False,
+                "note": "" if pd.isna(n) else str(n).strip(),
             }
-            for s, p, c in zip(
+            for s, p, c, n in zip(
                 edited["除外語"].tolist(),
                 edited["部分一致"].tolist(),
                 edited["大小区別"].tolist(),
+                edited["備考"].tolist(),
             )
             if not pd.isna(s) and str(s).strip()
         ]

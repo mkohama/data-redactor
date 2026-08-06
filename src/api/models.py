@@ -237,6 +237,8 @@ class AllowlistEntry(BaseModel):
     surface: str
     partial: bool = False
     case_sensitive: bool = False
+    # 備考 (人が読むメモ。除外した理由など)。判定には使わない。
+    note: str = ""
 
 
 class AllowlistBody(BaseModel):
@@ -254,6 +256,8 @@ class DictionaryEntry(BaseModel):
     mask: str = ""
     partial: bool = False
     case_sensitive: bool = False
+    # 備考 (人が読むメモ。登録理由・出典など)。判定には使わない。
+    note: str = ""
 
 
 class DictionaryBody(BaseModel):

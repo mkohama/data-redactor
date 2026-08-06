@@ -6,7 +6,7 @@
 #
 # フォーマット（全エントリ同一・キーは英語で統一）:
 #   - セクションは Company / Trademark / Person（内部カテゴリは 社名/商標/人名。表示は日本語）。
-#   - 各エントリは canonical / aliases / mask / partial / case_sensitive の**全キーを必ず書く**
+#   - 各エントリは canonical / aliases / mask / partial / case_sensitive / note の**全キーを必ず書く**
 #     （手入力時に使えるキーが一目で分かるように）。未定義は明示的に null、真偽値は false。
 #     canonical      … 代表表記（必須）。
 #     aliases        … 別表記（カタカナ↔英語・略称・旧称）のリスト。無ければ null。同じ canonical に
@@ -14,6 +14,8 @@
 #     mask           … マスク後の置換語を固定（無ければ null＝[社1] 等を自動採番）。
 #     partial        … 「まるごと／部分」の選択（true/false）。↓
 #     case_sensitive … 大小を区別するか（true/false）。↓
+#     note           … 備考（登録理由・出典・登録日など、人が読むメモ）。無ければ null。
+#                       マスクの判定には一切使わないので、書き換えても結果は変わらない。
 #
 #   照合には2段あり、意識するのは「まるごと（partial:false）／部分一致（partial:true）」だけ:
 #   - partial: false（既定）＝**まるごと一致**: その語がまるごとの語として現れたときだけ隠す。
@@ -38,11 +40,13 @@ Company:
     mask: 〔メーカーA〕
     partial: false
     case_sensitive: false
+    note: 自社。2026-06 初期登録
   - canonical: 社B
     aliases: null
     mask: null
     partial: false
     case_sensitive: false
+    note: null
 
 Trademark:
   - canonical: 商標X
@@ -50,16 +54,19 @@ Trademark:
     mask: null
     partial: true                  # 他の語の中（例 商標XMark の 商標X）も伏字にする
     case_sensitive: false
+    note: null
   - canonical: IF-
     aliases: null
     mask: null
     partial: true                  # IF-X / IF-Y の「IF-」を伏字に（単独 IF は隠さない）
     case_sensitive: false
+    note: 接頭辞。用語集から登録
   - canonical: STS
     aliases: null
     mask: null
     partial: false
     case_sensitive: true           # 略語：大文字の STS だけ拾う（Sts/sts は拾わない）
+    note: null
 
 Person:
   - canonical: 姓A
@@ -67,8 +74,10 @@ Person:
     mask: null
     partial: false
     case_sensitive: false
+    note: null
   - canonical: 姓B
     aliases: null
     mask: null
     partial: false
     case_sensitive: false
+    note: null
