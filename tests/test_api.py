@@ -511,6 +511,82 @@ def test_documents_patch_source_kind(client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# /mask で解析した入力も文書一覧に出る
+# --------------------------------------------------------------------------- #
+def _doc_by_hash(client: TestClient, h: str) -> dict | None:
+    return next(
+        (d for d in client.get("/documents").json() if d["content_hash"] == h), None
+    )
+
+
+def test_mask_records_text_part_in_document_list(client: TestClient) -> None:
+    """/mask の text は種別 "api" で一覧に出る。NER 済みであることも一覧から分かる。
+
+    以前は NER キャッシュにだけ入り、一覧 (documents 起点) には出なかった。
+    """
+    text = "SONYとCanonの比較。"
+    client.post("/mask", json={"text": text, "detection": "ner"})
+    doc = _doc_by_hash(client, content_hash([text]))
+    assert doc is not None
+    assert doc["source_kind"] == "api" and doc["source_name"] == text
+    # 文書の hash と NER キャッシュの鍵が一致している (一覧で NER 済みと表示される)。
+    assert doc["ner_models"] == ["ja_ginza"]
+
+
+def test_mask_text_part_name_is_shortened_head(client: TestClient) -> None:
+    """text の文書名は本文の先頭。改行は空白にし、長ければ切り詰める。"""
+    text = "一行目のメモ。\n" + "あ" * 60
+    client.post("/mask", json={"text": text, "detection": "ner"})
+    name = _doc_by_hash(client, content_hash([text]))["source_name"]  # type: ignore[index]
+    assert "\n" not in name
+    assert name.startswith("一行目のメモ。 あ") and name.endswith("…")
+    assert len(name) == 41  # 40 文字＋省略記号
+
+
+def test_mask_records_file_part_with_filename(client: TestClient) -> None:
+    manifest = (
+        '{"parts": [{"id": "f", "file": {"filename": "memo.txt"}}], "detection": "ner"}'
+    )
+    client.post(
+        "/mask",
+        data={"manifest": manifest},
+        files={"f": ("memo.txt", "SONYの比較メモ。".encode(), "text/plain")},
+    )
+    docs = [d for d in client.get("/documents").json() if d["source_kind"] == "api"]
+    assert [d["source_name"] for d in docs] == ["memo.txt"]
+
+
+def test_mask_keeps_meta_of_ingested_document(client: TestClient) -> None:
+    """取込済みと同じ内容を /mask しても、取込時の種別・名前は "api" で上書きされない。"""
+    text = "SONYの話。"
+    h = client.post("/documents", json={"text": text, "source_name": "memo"}).json()[
+        "content_hash"
+    ]
+    client.post("/mask", json={"text": text, "detection": "ner"})
+    client.post(
+        "/mask", json={"parts": [{"id": "d", "content_hash": h}], "detection": "ner"}
+    )
+    docs = client.get("/documents").json()
+    assert [(d["source_kind"], d["source_name"]) for d in docs] == [("text", "memo")]
+
+
+def test_mask_does_not_record_on_error(client: TestClient) -> None:
+    """入力エラーで解析しなかったときは記録しない。"""
+    r = client.post(
+        "/mask",
+        json={
+            "parts": [
+                {"id": "a", "text": "SONYの話。"},
+                {"id": "b", "content_hash": "deadbeef"},
+            ],
+            "detection": "ner",
+        },
+    )
+    assert r.status_code == 404
+    assert client.get("/documents").json() == []
+
+
+# --------------------------------------------------------------------------- #
 # 検出中も他の要求は止まらない・重い検出は 1 件ずつ
 # --------------------------------------------------------------------------- #
 def _block_ner(

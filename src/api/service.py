@@ -300,6 +300,45 @@ def _wire_mapping(bundle: BundleMaskResult, part_ids: list[str]) -> list[Mapping
     ]
 
 
+# /mask 経由で記録した文書の種別。一覧で画面からの取込 (text / file) と見分けるために使う。
+MASK_SOURCE_KIND = "api"
+# text の part を記録するときに、文書名として使う本文の先頭の文字数。
+_MASK_NAME_HEAD = 40
+
+
+def _record_mask_part(
+    ctx: ApiContext,
+    part: Part,
+    chunks: list[str],
+    files: dict[str, tuple[str, bytes]],
+) -> None:
+    """/mask で解析した 1 part を文書として記録し、キャッシュ一覧に出るようにする。
+
+    記録しないと、NER・LLM の結果はキャッシュに入るのに文書一覧には出ない
+    (一覧は documents テーブルが起点のため)。それを防ぐために /mask でも記録する。
+
+    次の場合は記録しない。
+      - content_hash で参照した part (取込済みなので、すでに記録がある)。
+      - 本文が空白だけの part (取込でも 422 にする入力なので、一覧に出す意味がない)。
+      - 同じ内容の文書がすでに記録済みの場合。画面から取り込んだ文書の種別・名前を
+        "api" で上書きしないため。
+
+    文書名は、ファイルの part ならファイル名、text の part なら本文の先頭
+    (改行は空白にして _MASK_NAME_HEAD 文字まで) にする。
+    """
+    if part.content_hash is not None or not any(c.strip() for c in chunks):
+        return
+    chash = content_hash(chunks)
+    if ctx.cache.get_source(chash) is not None:
+        return
+    if part.text is not None:
+        head = " ".join(part.text.split())
+        name = head if len(head) <= _MASK_NAME_HEAD else head[:_MASK_NAME_HEAD] + "…"
+    else:
+        name = files[part.id][0]
+    ctx.cache.record_document(chash, MASK_SOURCE_KIND, name, chunks)
+
+
 def run_mask(
     ctx: ApiContext, req: MaskRequest, files: dict[str, tuple[str, bytes]]
 ) -> MaskResponse:
@@ -309,17 +348,21 @@ def run_mask(
     _validate_models(ctx, req.models)
 
     parts = _normalize_parts(req)
+    # 入力の誤り (404/422) は重い解析の前にまとめて返す。
+    part_chunks = [_resolve_chunks(p, ctx, files) for p in parts]
     part_results = [
         _analyze_part(
             ctx,
-            _resolve_chunks(p, ctx, files),
+            chunks,
             detection=req.detection,
             flatten=req.flatten_tables,
             mask_level=req.mask_level,
             refresh=req.refresh,
         )
-        for p in parts
+        for chunks in part_chunks
     ]
+    for p, chunks in zip(parts, part_chunks):
+        _record_mask_part(ctx, p, chunks, files)
     bundle = ctx.engine.mask_parts(
         [(analysis, selected) for analysis, selected, _ in part_results]
     )
