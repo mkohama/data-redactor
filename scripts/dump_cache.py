@@ -98,14 +98,18 @@ def _body_text(
     """1 文書の本文を返す。documents のチャンクが最優先で、無ければ ner の解析結果から復元する。"""
     if doc_row is not None and doc_row[6]:
         return "".join(json.loads(doc_row[6]))
-    row = conn.execute(
-        "SELECT analysis_json FROM ner WHERE content_hash=? ORDER BY created_at LIMIT 1",
-        (content_hash,),
-    ).fetchone()
-    if row is None:
-        return ""
-    analysis = json.loads(row[0])
-    return analysis.get("original_text") or analysis.get("text") or ""
+    return next((t for r in _ner_texts(conn, content_hash) for t in r[:2] if t), "")
+
+
+def _progress(i: int, total: int, content_hash: str) -> None:
+    """進み具合を標準エラーに 1 行出す。
+
+    cache.db が大きいと 1 件ごとに時間がかかり、何も出ないと止まって見えるため。
+    標準エラーに出すので、--out で結果をファイルに書いても進み具合は画面に出る。
+    """
+    print(
+        f"[{i}/{total}] {content_hash[:12]} を読み込み中…", file=sys.stderr, flush=True
+    )
 
 
 def collect(conn: sqlite3.Connection, preview_width: int) -> list[dict]:
@@ -124,13 +128,20 @@ def collect(conn: sqlite3.Connection, preview_width: int) -> list[dict]:
     }
 
     rows: list[dict] = []
-    for h in hashes:
+    for i, h in enumerate(sorted(hashes), 1):
+        _progress(i, len(hashes), h)
         d = docs.get(h)
-        ner = conn.execute(
-            "SELECT model, analysis_json, created_at FROM ner "
-            "WHERE content_hash=? ORDER BY created_at",
-            (h,),
-        ).fetchall()
+        # モデル名は索引だけで引ける (大きな analysis_json の行を読まずに済む)。
+        models = sorted(
+            {
+                r[0]
+                for r in conn.execute(
+                    "SELECT model FROM ner WHERE content_hash=?", (h,)
+                )
+            }
+        )
+        # 本文と日時のために ner の行を読むのは、documents に無い孤児のときだけ。
+        ner = _ner_texts(conn, h) if d is None else []
         llm = (
             conn.execute(
                 "SELECT DISTINCT detector_version, created_at FROM llm_detection "
@@ -148,12 +159,12 @@ def collect(conn: sqlite3.Connection, preview_width: int) -> list[dict]:
             is not None
         )
 
-        text = _body_text(conn, h, d)
-        created = (
-            d[5]
-            if d is not None
-            else min([r[2] for r in ner] + [r[1] for r in llm], default="")
-        )
+        if d is not None:
+            text = "".join(json.loads(d[6])) if d[6] else ""
+            created = d[5]
+        else:
+            text = next((t for r in ner for t in r[:2] if t), "")
+            created = min([r[2] for r in ner if r[2]] + [r[1] for r in llm], default="")
         rows.append(
             {
                 "content_hash": h,
@@ -162,7 +173,7 @@ def collect(conn: sqlite3.Connection, preview_width: int) -> list[dict]:
                 "source_name": d[2] if d is not None else None,
                 "char_count": d[3] if d is not None else len(text),
                 "chunk_count": d[4] if d is not None else None,
-                "ner_models": sorted({r[0] for r in ner}),
+                "ner_models": models,
                 "llm_versions": sorted({r[0] for r in llm}),
                 "has_draft": has_draft,
                 "created_at": created,
@@ -272,41 +283,76 @@ def _orphan_hashes(conn: sqlite3.Connection) -> list[str]:
     )
 
 
-def _recover_chunk(conn: sqlite3.Connection, content_hash: str) -> str | None:
-    """孤児の本文を ner の解析結果から取り出す。hash が一致したときだけ返す。
+# ner の解析結果から本文と日時だけを取り出す SQL。
+# analysis_json は全トークンの情報を含み、大きな文書だと 1 行で数十 MB になる。Python で丸ごと
+# json.loads すると時間もメモリも食うので、SQLite の json_extract で本文だけを取り出す。
+# 同じ行の created_at も一緒に読むのは、大きな行は読むだけで重いので 1 回で済ませるため
+# (created_at は analysis_json より後ろの列なので、別に読むと大きな行をもう一度たどることになる)。
+_SQL_NER_TEXTS = (
+    "SELECT json_extract(analysis_json, '$.original_text'), "
+    "json_extract(analysis_json, '$.text'), created_at "
+    "FROM ner WHERE content_hash=?"
+)
+
+
+def _ner_texts(
+    conn: sqlite3.Connection, content_hash: str
+) -> list[tuple[str | None, str | None, str]]:
+    """ner 行ごとの (original_text, text, created_at) を返す。
+
+    json_extract が使えない古い SQLite では、Python の json で読む (遅いが結果は同じ)。
+    """
+    try:
+        return conn.execute(_SQL_NER_TEXTS, (content_hash,)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+        for analysis_json, created_at in conn.execute(
+            "SELECT analysis_json, created_at FROM ner WHERE content_hash=?",
+            (content_hash,),
+        ):
+            analysis = json.loads(analysis_json)
+            rows.append(
+                (analysis.get("original_text"), analysis.get("text"), created_at)
+            )
+        return rows
+
+
+def _recover(
+    conn: sqlite3.Connection, content_hash: str
+) -> tuple[str | None, str, str]:
+    """孤児 1 件の (復元した本文, 表示用の本文, 最初にキャッシュされた日時) を返す。
 
     ner の analysis_json には解析した本文 (original_text と、表を平文化した後の text) が
     残っている。/mask の text 入力は 1 チャンクなので、本文から hash を計算し直して
     元の content_hash と一致すれば、その本文が元の入力そのものだと確かめられる。
 
-    次の場合は None を返す (復元できない)。
+    復元した本文が None になる (復元できない) のは次の場合。
       - ner 行が無い (LLM だけ実行した、手動選択の記録だけが残った)。
       - 複数チャンクの入力 (ファイルなど)。本文はつながった形でしか残っておらず、
         チャンクの区切りが分からないので hash が一致しない。
+    表示用の本文は、復元できなくても残っている本文があればそれを返す (無ければ空)。
+    日時は ner と llm_detection の created_at のうち最も古いもの。
     """
-    for (analysis_json,) in conn.execute(
-        "SELECT analysis_json FROM ner WHERE content_hash=?", (content_hash,)
-    ):
-        analysis = json.loads(analysis_json)
-        for key in ("original_text", "text"):
-            text = analysis.get(key)
-            if text and _content_hash([text]) == content_hash:
-                return text
-    return None
-
-
-def _first_cached_at(conn: sqlite3.Connection, content_hash: str) -> str:
-    """その文書が最初にキャッシュされた日時 (ner と llm_detection の最も古い created_at)。"""
-    tables = [t for t in ("ner", "llm_detection") if _table_exists(conn, t)]
-    times = [
-        r[0]
-        for t in tables
-        for r in conn.execute(
-            f"SELECT MIN(created_at) FROM {t} WHERE content_hash=?", (content_hash,)
-        )
-        if r[0]
-    ]
-    return min(times, default="")
+    recovered: str | None = None
+    shown = ""
+    times: list[str] = []
+    for original_text, text, created_at in _ner_texts(conn, content_hash):
+        if created_at:
+            times.append(created_at)
+        for candidate in (original_text, text):
+            if not candidate:
+                continue
+            shown = shown or candidate
+            if recovered is None and _content_hash([candidate]) == content_hash:
+                recovered = candidate
+    if _table_exists(conn, "llm_detection"):
+        row = conn.execute(
+            "SELECT MIN(created_at) FROM llm_detection WHERE content_hash=?",
+            (content_hash,),
+        ).fetchone()
+        if row[0]:
+            times.append(row[0])
+    return recovered, recovered or shown, min(times, default="")
 
 
 def restore_orphans(conn: sqlite3.Connection, execute: bool) -> str:
@@ -322,21 +368,27 @@ def restore_orphans(conn: sqlite3.Connection, execute: bool) -> str:
 
     ``execute=False`` なら登録せずに対象を並べるだけ (既定)。実際に登録するのは ``--yes`` を
     付けたときだけ。documents に行を足すだけで、ner などのキャッシュには触れない。
-    """
-    restorable: list[tuple[str, str]] = []
-    lost: list[str] = []
-    for h in _orphan_hashes(conn):
-        text = _recover_chunk(conn, h)
-        if text is None:
-            lost.append(h)
-        else:
-            restorable.append((h, text))
 
-    if not restorable and not lost:
+    cache.db が大きいと時間がかかるので、進み具合を標準エラーに出す
+    (--out で結果をファイルに書いても、進み具合は画面に出る)。
+    """
+    orphans = _orphan_hashes(conn)
+    if not orphans:
         return "孤児はありません。登録し直すものはありません。\n"
 
+    # (content_hash, 本文, 最初にキャッシュされた日時)
+    restorable: list[tuple[str, str, str]] = []
+    lost: list[tuple[str, str]] = []  # (content_hash, 表示用の本文)
+    for i, h in enumerate(orphans, 1):
+        _progress(i, len(orphans), h)
+        text, shown, first_at = _recover(conn, h)
+        if text is None:
+            lost.append((h, shown))
+        else:
+            restorable.append((h, text, first_at))
+
     out = [f"復元できる孤児 {len(restorable)} 件:"]
-    for h, text in restorable:
+    for h, text, _ in restorable:
         out.append(f"  {h[:12]}  {_preview(text, _RESTORE_NAME_HEAD)}")
     if lost:
         out.append("")
@@ -344,9 +396,8 @@ def restore_orphans(conn: sqlite3.Connection, execute: bool) -> str:
             f"復元できない孤児 {len(lost)} 件"
             "（本文が残っていない、または複数チャンクで区切りが分からない）:"
         )
-        for h in lost:
-            body = _body_text(conn, h, None)
-            out.append(f"  {h[:12]}  {_preview(body, 40) or '（本文なし）'}")
+        for h, shown in lost:
+            out.append(f"  {h[:12]}  {_preview(shown, 40) or '（本文なし）'}")
         out.append("これらは一覧に出せません。不要なら --delete-orphans で消せます。")
 
     if not execute:
@@ -354,6 +405,7 @@ def restore_orphans(conn: sqlite3.Connection, execute: bool) -> str:
         out.append("これは確認表示です。実際に登録するには --yes を付けてください。")
         return "\n".join(out) + "\n"
 
+    print(f"{len(restorable)} 件を登録中…", file=sys.stderr, flush=True)
     with conn:  # まとめて 1 トランザクション（途中で失敗したら全部戻す）
         conn.executemany(
             "INSERT OR IGNORE INTO documents "
@@ -366,10 +418,10 @@ def restore_orphans(conn: sqlite3.Connection, execute: bool) -> str:
                     _preview(text, _RESTORE_NAME_HEAD),
                     len(text),
                     1,
-                    _first_cached_at(conn, h),
+                    first_at,
                     json.dumps([text], ensure_ascii=False),
                 )
-                for h, text in restorable
+                for h, text, first_at in restorable
             ],
         )
     out.append("")
@@ -394,7 +446,8 @@ def delete_orphans(conn: sqlite3.Connection, execute: bool) -> str:
 
     out = [f"孤児 {len(targets)} 件:"]
     total = {t: 0 for t in tables if t != "documents"}
-    for h in targets:
+    for i, h in enumerate(targets, 1):
+        _progress(i, len(targets), h)
         counts = {
             t: conn.execute(
                 f"SELECT COUNT(*) FROM {t} WHERE content_hash=?", (h,)
@@ -415,6 +468,7 @@ def delete_orphans(conn: sqlite3.Connection, execute: bool) -> str:
         out.append("これは確認表示です。実際に削除するには --yes を付けてください。")
         return "\n".join(out) + "\n"
 
+    print(f"{len(targets)} 件を削除中…", file=sys.stderr, flush=True)
     with conn:  # まとめて 1 トランザクション（途中で失敗したら全部戻す）
         for t in total:
             conn.executemany(
@@ -514,6 +568,11 @@ def main() -> int:
             if writing:
                 # 削除だけでは file が縮まない（SQLite が空き領域を再利用する）。
                 if args.vacuum:
+                    print(
+                        "VACUUM 中…（ファイル全体を書き直すので、大きいと数分かかる）",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     conn.execute("VACUUM")
                     text += "VACUUM してファイルを縮めました。\n"
                 else:
