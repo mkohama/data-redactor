@@ -40,6 +40,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from src.api.enums import (
@@ -200,7 +201,9 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
                 req = MaskRequest.model_validate(await request.json())
         except ValidationError as e:
             raise HTTPException(422, e.errors()) from e
-        return run_mask(app.state.ctx, req, files)
+        # 重い解析はワーカースレッドで動かす。async def の中でそのまま呼ぶとイベントループが
+        # 止まり、解析が終わるまで一覧や /health など他の要求がすべて待たされるため。
+        return await run_in_threadpool(run_mask, app.state.ctx, req, files)
 
     @app.post("/unmask", response_model=UnmaskResponse)
     def unmask_endpoint(req: UnmaskRequest) -> UnmaskResponse:
@@ -231,7 +234,9 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
                 data = await upload.read()
                 name = upload.filename or "upload"
                 source_name = form.get("source_name")
-                return ingest_file(
+                # ファイルのテキスト化・チャンク分割は重いのでワーカースレッドで動かす (/mask と同じ理由)。
+                return await run_in_threadpool(
+                    ingest_file,
                     app.state.ctx,
                     name,
                     data,
@@ -244,7 +249,9 @@ def create_app(ctx: ApiContext | None = None) -> FastAPI:
             raise HTTPException(
                 422, "`text` を指定してください（バイナリは multipart）"
             )
-        return ingest_text(app.state.ctx, req.text, req.source_name)
+        return await run_in_threadpool(
+            ingest_text, app.state.ctx, req.text, req.source_name
+        )
 
     @app.get("/documents", response_model=list[DocumentInfo])
     def documents_list() -> list[DocumentInfo]:

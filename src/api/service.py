@@ -11,7 +11,8 @@ FastAPI のルーティング (:mod:`src.api.app`) はこの層を呼ぶだけ�
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import openai
@@ -89,6 +90,11 @@ class ApiContext:
     #   None ならエディタは未設定 (GET は空・PUT は 409)。書き込みは api のみ。
     dict_path: str | None = None
     allowlist_path: str | None = None
+    # 重い検出 (NER・LLM) を 1 件ずつ通すためのロック。
+    #   重いエンドポイントはワーカースレッドで動くので、/mask と analyze が同時に来ると
+    #   同じ GiNZA モデルを複数スレッドから使うことになる。それを避けるために順番待ちさせる。
+    #   一覧・/health などの軽い要求はこのロックを取らないので、検出中も待たされない。
+    detect_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _normalize_parts(req: MaskRequest) -> list[Part]:
@@ -165,26 +171,27 @@ def _analyze_part(
             503, "NER モデルが未ロードです（サーバ起動直後 or ロード失敗）"
         )
 
-    llm_detection = None
-    if use_llm:
-        try:
-            _, llm_detection = run_llm_detection(
-                ctx.cache, chunks, flatten, force=refresh
-            )
-        except (openai.OpenAIError, ImportError) as e:
-            raise HTTPException(
-                502, f"LLM 検出に失敗しました（資格情報・接続を確認）: {e}"
-            ) from e
+    with ctx.detect_lock:
+        llm_detection = None
+        if use_llm:
+            try:
+                _, llm_detection = run_llm_detection(
+                    ctx.cache, chunks, flatten, force=refresh
+                )
+            except (openai.OpenAIError, ImportError) as e:
+                raise HTTPException(
+                    502, f"LLM 検出に失敗しました（資格情報・接続を確認）: {e}"
+                ) from e
 
-    analysis = ctx.engine.analyze(
-        chunks,
-        flatten_tables=flatten,
-        allowlist=ctx.allowlist,
-        ner_cache=ctx.cache,
-        refresh_cache=refresh,
-        llm_detection=llm_detection,
-        run_ner=run_ner,
-    )
+        analysis = ctx.engine.analyze(
+            chunks,
+            flatten_tables=flatten,
+            allowlist=ctx.allowlist,
+            ner_cache=ctx.cache,
+            refresh_cache=refresh,
+            llm_detection=llm_detection,
+            run_ner=run_ner,
+        )
     groups = ctx.engine.group_candidates(analysis.candidates)
     threshold = set(confidences_at_or_above(mask_level))
     selected = [m for g in groups if g.confidence in threshold for m in g.members]

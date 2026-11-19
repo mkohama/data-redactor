@@ -13,6 +13,7 @@ GiNZA の実ロードを避けるため、軽量な :class:`~src.api.service.Api
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -507,6 +508,96 @@ def test_documents_patch_source_kind(client: TestClient) -> None:
     h = client.post("/documents", json={"text": "SONYの話。"}).json()["content_hash"]
     r = client.patch(f"/documents/{h}", json={"source_kind": "kb"})
     assert r.status_code == 200 and r.json()["source_kind"] == "kb"
+
+
+# --------------------------------------------------------------------------- #
+# 検出中も他の要求は止まらない・重い検出は 1 件ずつ
+# --------------------------------------------------------------------------- #
+def _block_ner(
+    _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[str], threading.Event, threading.Event]:
+    """GiNZA の解析を release がセットされるまで止める。
+
+    戻り値は (解析に入った本文の記録, 解析に入ったら立つ合図, 解析を再開させる合図)。
+    """
+    ner_engine = _engine.engines[0]
+    entered: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+    original = ner_engine.analyze_chunks
+
+    def blocking(chunks, **kwargs):  # type: ignore[no-untyped-def]
+        chunks = list(chunks)
+        entered.append("".join(chunks))
+        started.set()
+        release.wait(timeout=30)
+        return original(chunks, **kwargs)
+
+    monkeypatch.setattr(ner_engine, "analyze_chunks", blocking)
+    return entered, started, release
+
+
+def _post_in_thread(client: TestClient, text: str) -> threading.Thread:
+    t = threading.Thread(
+        target=client.post,
+        args=("/mask",),
+        kwargs={"json": {"text": text, "detection": "ner"}},
+    )
+    t.start()
+    return t
+
+
+def test_mask_does_not_block_other_requests(
+    client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/mask の解析中でも、文書一覧や /health はすぐ返る。
+
+    以前は async def の中で重い解析を直接呼んでいたため、イベントループが止まり、
+    解析が終わるまで他の要求がすべて待たされていた (画面がずっと読み込み中になる)。
+    with で TestClient を開くと、全スレッドの要求が同じイベントループで処理される
+    (本番の uvicorn と同じ条件になる)。
+    """
+    _entered, started, release = _block_ner(_engine, monkeypatch)
+    with client:
+        masker = _post_in_thread(client, "SONYの話。")
+        try:
+            assert started.wait(timeout=30)
+            results: list[int] = []
+            other = threading.Thread(
+                target=lambda: results.extend(
+                    [
+                        client.get("/health").status_code,
+                        client.get("/documents").status_code,
+                    ]
+                )
+            )
+            other.start()
+            other.join(timeout=10)
+            assert results == [200, 200]  # 解析の終了を待たずに返った
+        finally:
+            release.set()
+            masker.join(timeout=30)
+
+
+def test_mask_runs_heavy_detection_one_at_a_time(
+    client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2 つの /mask が同時に来ても、GiNZA の解析は 1 件ずつ順番に行う。"""
+    entered, started, release = _block_ner(_engine, monkeypatch)
+    with client:
+        first = _post_in_thread(client, "SONYの話。")
+        second: threading.Thread | None = None
+        try:
+            assert started.wait(timeout=30)
+            second = _post_in_thread(client, "Canonの話。")
+            second.join(timeout=1)
+            assert entered == ["SONYの話。"]  # 2 件目は 1 件目の解析が終わるまで待つ
+        finally:
+            release.set()
+            first.join(timeout=30)
+            if second is not None:
+                second.join(timeout=30)
+    assert entered == ["SONYの話。", "Canonの話。"]
 
 
 # --------------------------------------------------------------------------- #
