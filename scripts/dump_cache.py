@@ -35,6 +35,11 @@
     uv run python scripts/dump_cache.py --show 2b5107017ae1 --out part.txt
     uv run python scripts/dump_cache.py --show 2b5107017ae1 --head 0 --out part.txt  # 全文
 
+    # 孤児を文書として登録し直し、UI のキャッシュ一覧に出す（まず確認表示、次に --yes で実行）。
+    # 復元できない孤児（本文が残っていないもの）は、そのあと --delete-orphans で消せる。
+    uv run python scripts/dump_cache.py --restore-orphans
+    uv run python scripts/dump_cache.py --restore-orphans --yes
+
     # 孤児を掃除する（まず確認表示、次に --yes で実行）。
     # 1 件だけ消すなら API の DELETE /documents/<hash> でもよい（4 テーブルまとめて消える）。
     uv run python scripts/dump_cache.py --delete-orphans
@@ -44,6 +49,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import sys
@@ -51,6 +57,25 @@ from pathlib import Path
 
 # 集計対象のテーブル。content_hash 列を持つものすべて（documents に無い hash も拾うため）。
 _TABLES = ("documents", "ner", "llm_detection", "mask_draft")
+
+# 復元した文書の種別と、文書名に使う本文の先頭の文字数。
+# 孤児は /mask で処理されたものなので、API が /mask の入力を記録するときと同じ値にする
+# （src/api/service.py の MASK_SOURCE_KIND と _MASK_NAME_HEAD）。
+_RESTORE_SOURCE_KIND = "api"
+_RESTORE_NAME_HEAD = 40
+
+
+def _content_hash(chunks: list[str]) -> str:
+    """チャンク列の内容ハッシュ。src/masking/hashing.py の content_hash と同じ計算。
+
+    このスクリプトはプロジェクトを import せずに動かすので、同じ処理をここにも持つ。
+    両者が一致することは tests/test_dump_cache.py で確かめている。
+    """
+    h = hashlib.sha256()
+    for c in chunks:
+        h.update(c.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
 
 
 def _preview(text: str, width: int) -> str:
@@ -232,6 +257,126 @@ def show(conn: sqlite3.Connection, prefix: str, head: int) -> str:
     return "\n".join(out) + "\n"
 
 
+def _orphan_hashes(conn: sqlite3.Connection) -> list[str]:
+    """documents に行が無い content_hash を、documents 以外のテーブルから集める。"""
+    tables = [t for t in _TABLES if _table_exists(conn, t) and t != "documents"]
+    return sorted(
+        {
+            r[0]
+            for t in tables
+            for r in conn.execute(
+                f"SELECT DISTINCT content_hash FROM {t} WHERE content_hash NOT IN "
+                "(SELECT content_hash FROM documents)"
+            )
+        }
+    )
+
+
+def _recover_chunk(conn: sqlite3.Connection, content_hash: str) -> str | None:
+    """孤児の本文を ner の解析結果から取り出す。hash が一致したときだけ返す。
+
+    ner の analysis_json には解析した本文 (original_text と、表を平文化した後の text) が
+    残っている。/mask の text 入力は 1 チャンクなので、本文から hash を計算し直して
+    元の content_hash と一致すれば、その本文が元の入力そのものだと確かめられる。
+
+    次の場合は None を返す (復元できない)。
+      - ner 行が無い (LLM だけ実行した、手動選択の記録だけが残った)。
+      - 複数チャンクの入力 (ファイルなど)。本文はつながった形でしか残っておらず、
+        チャンクの区切りが分からないので hash が一致しない。
+    """
+    for (analysis_json,) in conn.execute(
+        "SELECT analysis_json FROM ner WHERE content_hash=?", (content_hash,)
+    ):
+        analysis = json.loads(analysis_json)
+        for key in ("original_text", "text"):
+            text = analysis.get(key)
+            if text and _content_hash([text]) == content_hash:
+                return text
+    return None
+
+
+def _first_cached_at(conn: sqlite3.Connection, content_hash: str) -> str:
+    """その文書が最初にキャッシュされた日時 (ner と llm_detection の最も古い created_at)。"""
+    tables = [t for t in ("ner", "llm_detection") if _table_exists(conn, t)]
+    times = [
+        r[0]
+        for t in tables
+        for r in conn.execute(
+            f"SELECT MIN(created_at) FROM {t} WHERE content_hash=?", (content_hash,)
+        )
+        if r[0]
+    ]
+    return min(times, default="")
+
+
+def restore_orphans(conn: sqlite3.Connection, execute: bool) -> str:
+    """孤児を documents に登録し直し、GET /documents と UI のキャッシュ一覧に出るようにする。
+
+    孤児は、以前の API が /mask の入力を documents に記録していなかったために生まれた
+    (NER・LLM の結果はキャッシュに入っているのに一覧に出ない)。本文を復元できたものを、
+    いまの API が /mask の入力を記録するときと同じ形で登録する。
+
+        種別     "api"
+        文書名   本文の先頭 40 文字 (改行は空白)
+        日時     最初にキャッシュされた日時 (復元した日時ではなく)
+
+    ``execute=False`` なら登録せずに対象を並べるだけ (既定)。実際に登録するのは ``--yes`` を
+    付けたときだけ。documents に行を足すだけで、ner などのキャッシュには触れない。
+    """
+    restorable: list[tuple[str, str]] = []
+    lost: list[str] = []
+    for h in _orphan_hashes(conn):
+        text = _recover_chunk(conn, h)
+        if text is None:
+            lost.append(h)
+        else:
+            restorable.append((h, text))
+
+    if not restorable and not lost:
+        return "孤児はありません。登録し直すものはありません。\n"
+
+    out = [f"復元できる孤児 {len(restorable)} 件:"]
+    for h, text in restorable:
+        out.append(f"  {h[:12]}  {_preview(text, _RESTORE_NAME_HEAD)}")
+    if lost:
+        out.append("")
+        out.append(
+            f"復元できない孤児 {len(lost)} 件"
+            "（本文が残っていない、または複数チャンクで区切りが分からない）:"
+        )
+        for h in lost:
+            body = _body_text(conn, h, None)
+            out.append(f"  {h[:12]}  {_preview(body, 40) or '（本文なし）'}")
+        out.append("これらは一覧に出せません。不要なら --delete-orphans で消せます。")
+
+    if not execute:
+        out.append("")
+        out.append("これは確認表示です。実際に登録するには --yes を付けてください。")
+        return "\n".join(out) + "\n"
+
+    with conn:  # まとめて 1 トランザクション（途中で失敗したら全部戻す）
+        conn.executemany(
+            "INSERT OR IGNORE INTO documents "
+            "(content_hash, source_kind, source_name, char_count, chunk_count, "
+            "created_at, chunks_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    h,
+                    _RESTORE_SOURCE_KIND,
+                    _preview(text, _RESTORE_NAME_HEAD),
+                    len(text),
+                    1,
+                    _first_cached_at(conn, h),
+                    json.dumps([text], ensure_ascii=False),
+                )
+                for h, text in restorable
+            ],
+        )
+    out.append("")
+    out.append(f"{len(restorable)} 件を登録しました。UI のキャッシュ一覧に出ます。")
+    return "\n".join(out) + "\n"
+
+
 def delete_orphans(conn: sqlite3.Connection, execute: bool) -> str:
     """孤児（documents に行が無い content_hash）を 4 テーブルから削除する。
 
@@ -243,17 +388,7 @@ def delete_orphans(conn: sqlite3.Connection, execute: bool) -> str:
     （同じ内容を送り直せば再解析されて入り直す）。
     """
     tables = [t for t in _TABLES if _table_exists(conn, t)]
-    targets = sorted(
-        {
-            r[0]
-            for t in tables
-            if t != "documents"
-            for r in conn.execute(
-                f"SELECT DISTINCT content_hash FROM {t} WHERE content_hash NOT IN "
-                "(SELECT content_hash FROM documents)"
-            )
-        }
-    )
+    targets = _orphan_hashes(conn)
     if not targets:
         return "孤児はありません。削除するものはありません。\n"
 
@@ -322,6 +457,12 @@ def main() -> int:
         "--preview", type=int, default=70, help="本文プレビューの文字数（既定 70）"
     )
     parser.add_argument(
+        "--restore-orphans",
+        action="store_true",
+        help="孤児を documents に登録し直し、UI のキャッシュ一覧に出す。"
+        "既定は確認表示のみで、実際に登録するには --yes も付ける",
+    )
+    parser.add_argument(
         "--delete-orphans",
         action="store_true",
         help="孤児（documents 未登録）を 4 テーブルから削除する。"
@@ -330,7 +471,8 @@ def main() -> int:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="--delete-orphans を実際に実行する（確認プロンプトは出さない）",
+        help="--restore-orphans / --delete-orphans を実際に実行する"
+        "（確認プロンプトは出さない）",
     )
     parser.add_argument(
         "--vacuum",
@@ -350,15 +492,24 @@ def main() -> int:
         print(f"cache.db が見つかりません: {db}", file=sys.stderr)
         return 1
 
-    # 削除するときだけ書き込みで開く（それ以外は読み取り専用＝API 稼働中でも安全）。
-    writing = args.delete_orphans and args.yes
+    if args.restore_orphans and args.delete_orphans:
+        print(
+            "--restore-orphans と --delete-orphans は同時に指定できません",
+            file=sys.stderr,
+        )
+        return 2
+
+    # 登録・削除するときだけ書き込みで開く（それ以外は読み取り専用＝API 稼働中でも安全）。
+    writing = (args.restore_orphans or args.delete_orphans) and args.yes
     conn = (
         sqlite3.connect(str(db), timeout=30)  # 他プロセスのロック待ちを 30 秒許す
         if writing
         else sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     )
     try:
-        if args.delete_orphans:
+        if args.restore_orphans:
+            text = restore_orphans(conn, execute=args.yes)
+        elif args.delete_orphans:
             text = delete_orphans(conn, execute=args.yes)
             if writing:
                 # 削除だけでは file が縮まない（SQLite が空き領域を再利用する）。
