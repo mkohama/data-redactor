@@ -102,12 +102,43 @@ _DEFAULT_ALLOWLIST = os.getenv(
 )
 
 
+def ner_models_from_env() -> tuple[str, ...]:
+    """API が起動時に読み込む NER モデルを、環境変数 DATA_REDACTOR_NER_MODELS から決める。
+
+    値はモデル名のカンマ区切り (例 "ja_ginza" / "ja_ginza_electra,ja_ginza")。
+    未設定・空なら AVAILABLE_MODELS の全モデル (既定。これまでどおり両モデル)。
+
+    戻り値の順は、指定の順ではなく AVAILABLE_MODELS の順にそろえる。
+    解析では先頭モデルの結果を Sudachi 品詞の票の元にするので、指定の書き方で
+    判定が変わらないようにするため。
+
+    AVAILABLE_MODELS に無い名前が含まれていたら ValueError を出す。
+    黙って無視すると、意図しないモデル構成で起動したことに気づけないため。
+
+    これは API だけの設定で、CLI (ner / debug / mask) が使えるモデルは変わらない。
+    """
+    raw = os.getenv("DATA_REDACTOR_NER_MODELS", "")
+    names = {n.strip() for n in raw.split(",") if n.strip()}
+    if not names:
+        return tuple(AVAILABLE_MODELS)
+    unknown = sorted(names - set(AVAILABLE_MODELS))
+    if unknown:
+        raise ValueError(
+            f"DATA_REDACTOR_NER_MODELS に未知のモデル名があります: {unknown}"
+            f"（指定できるのは {list(AVAILABLE_MODELS)}）"
+        )
+    return tuple(m for m in AVAILABLE_MODELS if m in names)
+
+
 def _load_context() -> ApiContext:
     """サーバ資源 (エンジン＝モデル1回ロード・cache.db・辞書・除外) を組み立てる。
 
     モデルロードに失敗しても API 自体は起動する (``models_ready=False``＝NER 要求は 503)。
     ``/unmask`` や既に解析済みの content_hash 参照はモデル無しでも動くため。
+    ただし DATA_REDACTOR_NER_MODELS の指定誤りは設定の誤りなので、起動を止める
+    (ner_models_from_env を参照)。
     """
+    model_names = ner_models_from_env()
     cache = NerCache(_DEFAULT_CACHE_DB)
     dictionary = (
         MaskDictionary.load(_DEFAULT_DICT)
@@ -119,7 +150,6 @@ def _load_context() -> ApiContext:
         if Path(_DEFAULT_ALLOWLIST).exists()
         else MaskAllowlist.empty()
     )
-    model_names = tuple(AVAILABLE_MODELS)
     engine = MaskingEngine(dictionary=dictionary, models=list(model_names))
     models_ready = True
     try:

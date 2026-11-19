@@ -78,7 +78,9 @@ make docker-sync-build PII_REF=<commit/tag/branch>
 - **Python 3.11 固定** (ja-ginza-electra の制約)。イメージは `python:3.11-slim`。
 - **`ja_ginza_electra` はビルド時に読み込んでおく** (torch＋ELECTRA 重みをイメージに焼く)。実行時はネット不要で、
   取りこぼしの少ない electra を既定のまま使える。代償にイメージは数 GB。
-  軽さを優先するなら別途 `ja_ginza` を既定にすることを検討。
+  API が読み込むモデルは `.env` の `DATA_REDACTOR_NER_MODELS` で絞れる (例 `ja_ginza` だけ。既定は両モデル)。
+  electra は ja_ginza より大幅に遅いが、外すと electra だけが人名・社名と判定していた箇所の確信度が下がる
+  (`.env.example` と [判定ルール](../judgment-rules.md) を参照)。変えたらコンテナを作り直す。
 - **pii-masker (submodule) は `external/pii-masker/src` を COPY** し、`PYTHONPATH=/app` の path-injection
   ([src/llm/_paths.py](../../src/llm/_paths.py)) で `import pii_masker` を解決。`.dockerignore` で `external/` は除外しない。
 - **機密データ `./data` はボリュームマウント** (`cache.db` / `mask_dict.yaml` / `mask_allowlist.yaml`＝git 管理外)。

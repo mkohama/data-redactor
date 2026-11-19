@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.app import create_app
+from src.api.app import create_app, ner_models_from_env
 from src.api.service import ApiContext
 from src.masking import (
     MaskAllowlist,
@@ -77,6 +77,39 @@ def test_config(client: TestClient) -> None:
     assert body["default_mask_level"] == "strong"
     # mask_levels は wire(ASCII) の下限候補（除外は含まない）。
     assert body["mask_levels"] == ["certain", "strong", "medium", "weak", "faint"]
+
+
+# --------------------------------------------------------------------------- #
+# 起動時に読み込む NER モデル (環境変数 DATA_REDACTOR_NER_MODELS)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("value", [None, "", " , "])
+def test_ner_models_default_is_all_models(
+    monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    """未設定・空なら、これまでどおり全モデル (electra と ja_ginza)。"""
+    if value is None:
+        monkeypatch.delenv("DATA_REDACTOR_NER_MODELS", raising=False)
+    else:
+        monkeypatch.setenv("DATA_REDACTOR_NER_MODELS", value)
+    assert ner_models_from_env() == ("ja_ginza_electra", "ja_ginza")
+
+
+def test_ner_models_ginza_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_REDACTOR_NER_MODELS", "ja_ginza")
+    assert ner_models_from_env() == ("ja_ginza",)
+
+
+def test_ner_models_keep_canonical_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """指定の順や空白に関係なく AVAILABLE_MODELS の順になる (判定が書き方で変わらない)。"""
+    monkeypatch.setenv("DATA_REDACTOR_NER_MODELS", " ja_ginza , ja_ginza_electra ")
+    assert ner_models_from_env() == ("ja_ginza_electra", "ja_ginza")
+
+
+def test_ner_models_unknown_name_stops_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未知の名前は黙って無視せず、起動を止める。"""
+    monkeypatch.setenv("DATA_REDACTOR_NER_MODELS", "ja_ginza,ja_ginza_eletra")
+    with pytest.raises(ValueError, match="ja_ginza_eletra"):
+        ner_models_from_env()
 
 
 # --------------------------------------------------------------------------- #
