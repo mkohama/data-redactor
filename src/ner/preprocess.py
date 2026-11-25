@@ -210,6 +210,11 @@ class _Piece:
     flat: str  # NER へ渡す (平坦化後) テキスト
     orig: str  # 対応する原文 (平坦化前。`|` 入り)
     cmap: tuple[int, ...]  # flat の各文字 → orig の文字位置 (挿入文字は -1)
+    # 本文を組むときに、この小片の前に置く区切り。
+    #   先頭の小片は ""。別のチャンクの先頭の小片は CHUNK_SEPARATOR。
+    #   同じチャンクを分けた続きの小片は "" (分けた位置の文字は小片の側に残してあるので、
+    #   何も足さずにつなげば元のチャンクに戻る)。
+    joiner: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,26 +236,36 @@ class Body:
 def _byte_safe_pieces(text: str, max_bytes: int = SAFE_CHUNK_BYTES) -> list[str]:
     """テキストを UTF-8 で ``max_bytes`` 以下の小片に分割する (保険的フォールバック)。
 
-    まず行 (``\\n``) 境界でまとめ、1 行で超える場合のみ文字単位で強制分割する。
+    まず行の境目でまとめ、1 行で超える場合のみ文字単位で強制分割する。
     通常はチャンク分割で十分小さいため、ここはほぼ素通りする。
+
+    戻り値の小片を何も足さずにつなぐと、元の ``text`` と完全に一致する
+    (行末の改行は捨てずに、その行を含む小片の末尾に残す)。
+    本文の座標が呼び出し側の原文とずれないようにするため。
     """
     if len(text.encode("utf-8")) <= max_bytes:
         return [text]
 
+    # 改行を行末に残したまま行に分ける (最後の行だけは改行が無いことがある)。
+    lines = text.split("\n")
+    lines = [line + "\n" for line in lines[:-1]] + [lines[-1]]
+
     pieces: list[str] = []
     buf = ""
-    for line in text.split("\n"):
-        candidate = f"{buf}\n{line}" if buf else line
-        if len(candidate.encode("utf-8")) <= max_bytes:
-            buf = candidate
+    buf_bytes = 0
+    for line in lines:
+        line_bytes = len(line.encode("utf-8"))
+        if buf_bytes + line_bytes <= max_bytes:
+            buf += line
+            buf_bytes += line_bytes
             continue
         if buf:
             pieces.append(buf)
-            buf = ""
-        if len(line.encode("utf-8")) > max_bytes:
+        if line_bytes > max_bytes:
             pieces.extend(_hard_split_by_bytes(line, max_bytes))
+            buf, buf_bytes = "", 0
         else:
-            buf = line
+            buf, buf_bytes = line, line_bytes
     if buf:
         pieces.append(buf)
     return pieces
@@ -285,36 +300,67 @@ def _prepare_pieces(
     """
     pieces: list[_Piece] = []
     for chunk in chunks:
+        chunk_pieces: list[_Piece] = []
         for orig in _byte_safe_pieces(chunk):
             # 括弧グルー対策の空白挿入は flatten の有無によらず常に適用する
             # (`姓A(社B)` の埋没＝辞書語の漏れを防ぐ)。flatten 時はテーブル平文化も。
             flat, cmap = prepare_for_ner_with_map(orig, flatten_tables=flatten_tables)
-            if flat.strip():
-                pieces.append(_Piece(flat, orig, tuple(cmap)))
+            chunk_pieces.append(_Piece(flat, orig, tuple(cmap)))
+        # 空のチャンクは丸ごと除く。チャンクの途中の小片は、空白だけでも除かない
+        # (除くとその分の文字が本文から消え、原文と座標がずれるため)。
+        if not any(p.flat.strip() for p in chunk_pieces):
+            continue
+        for i, p in enumerate(chunk_pieces):
+            if i == 0 and pieces:
+                joiner = CHUNK_SEPARATOR  # 別のチャンクとの間
+            else:
+                joiner = ""  # 先頭、または同じチャンクの続き
+            pieces.append(_Piece(p.flat, p.orig, p.cmap, joiner))
     return pieces
+
+
+def _flat_offsets(pieces: list[_Piece]) -> list[int]:
+    """各小片の flat が、本文 (Body.text) の何文字目から始まるかを返す。
+
+    本文は「区切り (joiner) ＋ flat」を順につないだものなので、その累積で決まる。
+    NER のトークン・エンティティの位置を本文の座標に直すときに使う
+    (本文の組み立て _body_from_pieces と同じ計算を 1 か所にまとめるため)。
+    """
+    offsets: list[int] = []
+    pos = 0
+    for piece in pieces:
+        pos += len(piece.joiner)
+        offsets.append(pos)
+        pos += len(piece.flat)
+    return offsets
 
 
 def _body_from_pieces(pieces: list[_Piece]) -> Body:
     """小片列から本文一式を組む (``NerEngine.analyze_chunks`` と同じオフセット計算)。
 
-    ``text`` は ``CHUNK_SEPARATOR`` で flat を連結。``offset_map`` は ``text`` の各文字 →
-    ``original_text`` の文字位置 (挿入は -1)。小片間の区切り (``CHUNK_SEPARATOR``) は
-    flat/orig 双方に入り原文側にも実在するため、-1 でなく実位置に対応づける。
+    ``text`` は各小片の「区切り (joiner) ＋ flat」をつないだもの。``offset_map`` は
+    ``text`` の各文字 → ``original_text`` の文字位置 (挿入は -1)。区切りは flat/orig 双方に
+    入り原文側にも実在するため、-1 でなく実位置に対応づける。
+
+    1 チャンクだけなら、``original_text`` は入力したチャンクと完全に一致する
+    (同じチャンクを分けた小片の間には何も足さないため)。
     """
     omap: list[int] = []
+    text_parts: list[str] = []
     orig_parts: list[str] = []
     orig_offset = 0  # 原文基準のオフセット
-    sep_len = len(CHUNK_SEPARATOR)
-    for idx, piece in enumerate(pieces):
-        if idx > 0:  # 小片の区切り (CHUNK_SEPARATOR) は flat/orig 双方に入る
-            omap.extend(orig_offset + k for k in range(sep_len))
-            orig_offset += sep_len
-            orig_parts.append(CHUNK_SEPARATOR)
+    for piece in pieces:
+        if piece.joiner:  # 区切りは flat/orig 双方に入る
+            omap.extend(orig_offset + k for k in range(len(piece.joiner)))
+            orig_offset += len(piece.joiner)
+            text_parts.append(piece.joiner)
+            orig_parts.append(piece.joiner)
         omap.extend(orig_offset + c if c != -1 else -1 for c in piece.cmap)
         orig_offset += len(piece.orig)
+        text_parts.append(piece.flat)
         orig_parts.append(piece.orig)
     return Body(
-        text=CHUNK_SEPARATOR.join(p.flat for p in pieces),
+        text="".join(text_parts),
         original_text="".join(orig_parts),
         offset_map=tuple(omap),
     )

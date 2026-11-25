@@ -10,7 +10,12 @@ build_body は「chunks → 解析対象の本文（text / original_text / offse
 
 from __future__ import annotations
 
-from src.ner.preprocess import CHUNK_SEPARATOR, build_body
+from src.ner.preprocess import (
+    CHUNK_SEPARATOR,
+    SAFE_CHUNK_BYTES,
+    _byte_safe_pieces,
+    build_body,
+)
 
 
 def _assert_map_invariant(b) -> None:
@@ -69,6 +74,71 @@ def test_blank_chunks_dropped() -> None:
     b = build_body(["   ", "本文", "\n\n"], flatten_tables=False)
     _assert_map_invariant(b)
     assert b.text == "本文"
+
+
+def _long_markdown(min_bytes: int) -> str:
+    """空行・字下げした箇条書きを含み、UTF-8 で min_bytes を超える Markdown。"""
+    sections = []
+    i = 0
+    while len("\n".join(sections).encode("utf-8")) <= min_bytes:
+        sections.append(
+            f"## 項目{i}\n\n田中さんが確認した内容を記す。\n\n  - 手順を確認する\n  - 結果を記録する\n"
+        )
+        i += 1
+    return "\n".join(sections)
+
+
+def test_byte_safe_pieces_concatenate_back_to_the_input() -> None:
+    """小片を何も足さずにつなぐと入力に戻り、各小片は上限以下に収まる。
+
+    以前は分けた位置の改行を捨て、つなぎ直すときに CHUNK_SEPARATOR ("\\n\\n") を
+    足していたため、区切りごとに改行が 1 つ (1 行の途中で切ると 2 つ) 増えていた。
+    """
+    cases = [
+        "一行目\n二行目\n\n  - 箇条\n最後の行",  # 行の境目で分かれる
+        "末尾に改行がある\n" * 8,  # 最後が改行で終わる
+        "改行の無い長い一行" * 10,  # 1 行の途中で切る
+        "\n\n\n先頭と途中に空行\n\n\n",  # 空行だけの行
+    ]
+    for text in cases:
+        pieces = _byte_safe_pieces(text, max_bytes=20)
+        assert len(pieces) > 1
+        assert "".join(pieces) == text
+        assert all(len(p.encode("utf-8")) <= 20 for p in pieces)
+
+
+def test_long_single_chunk_keeps_original_text() -> None:
+    """SAFE_CHUNK_BYTES を超える 1 チャンクでも、original_text は入力と完全に一致する。
+
+    /mask の text は 1 チャンクで来るので、ここがずれると masked_text と span が
+    呼び出し側の原文とずれる (2026-11-25 の不具合報告)。
+    """
+    text = _long_markdown(SAFE_CHUNK_BYTES * 2)
+    for flatten in (False, True):
+        b = build_body([text], flatten_tables=flatten)
+        _assert_map_invariant(b)
+        assert b.original_text == text
+    # 平坦化なし・括弧なしなら text も入力のまま
+    assert build_body([text], flatten_tables=False).text == text
+
+
+def test_long_single_line_keeps_original_text() -> None:
+    """改行の無い 1 行が上限を超えても、行の途中に改行を足さない。"""
+    text = "前置き\n" + "あ" * 13333 + "SONY" + "い" * 100
+    b = build_body([text], flatten_tables=False)
+    _assert_map_invariant(b)
+    assert b.original_text == text
+    assert "SONY" in b.text
+
+
+def test_long_chunk_among_chunks() -> None:
+    """長いチャンクを含んでも、チャンクの間にだけ CHUNK_SEPARATOR が入る。"""
+    long_text = _long_markdown(SAFE_CHUNK_BYTES + 1000)
+    b = build_body(["前のチャンク", long_text, "後のチャンク"], flatten_tables=False)
+    _assert_map_invariant(b)
+    assert b.original_text == CHUNK_SEPARATOR.join(
+        ["前のチャンク", long_text, "後のチャンク"]
+    )
 
 
 def test_empty_input() -> None:

@@ -49,6 +49,7 @@ from src.masking.dictionary import (
 )
 from src.ner import AVAILABLE_MODELS, AnalyzedToken, NerEngine
 from src.ner.engine import Analysis, ProgressCallback, sudachi_analyze_chunks
+from src.ner.preprocess import build_body
 
 if TYPE_CHECKING:  # 型のみ (実行時 import しない＝engine は src.llm/IO に依存しない)
     from src.llm.schema import LlmDetection
@@ -526,6 +527,16 @@ class MaskingEngine:
             n_models = len(self.engines)
             n_stages = n_models + 1  # 各モデル ＋ 候補集約
             chash = content_hash(chunks) if ner_cache is not None else ""
+            # キャッシュの解析が今の本文と同じ本文に対するものかを確かめるための、今の本文。
+            #   本文の組み方を直す前 (2026-11-25 より前) に保存した解析は、長いチャンクで
+            #   改行が足された本文の座標を持っている。そのまま使うと LLM・辞書の座標と食い違うので、
+            #   本文が一致しない解析はキャッシュに無いものとして解析し直す。
+            #   build_body は spaCy を呼ばないので軽い。
+            expected_text = (
+                build_body(chunks, flatten_tables=flatten_tables).text
+                if ner_cache is not None and not refresh_cache
+                else ""
+            )
             for idx, e in enumerate(self.engines):
                 # refresh_cache＝True はキャッシュ読みをスキップして再解析 (結果は下で put＝上書き)。
                 cached = (
@@ -533,6 +544,10 @@ class MaskingEngine:
                     if ner_cache is not None and not refresh_cache
                     else None
                 )
+                if cached is not None and cached.text != expected_text:
+                    cached = (
+                        None  # 古い本文の解析＝使わない (下で解析し直して上書きする)
+                    )
                 if (
                     progress is not None
                 ):  # 重い解析の前にこの段階を表示 (実行中に見える)

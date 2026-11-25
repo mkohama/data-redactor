@@ -23,7 +23,7 @@ from src.llm.detect_layer import LlmDetectionCache
 from src.llm.schema import LlmDetection
 from src.llm.windows import DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS
 from src.masking.cache import content_hash
-from src.ner.preprocess import build_body
+from src.ner.preprocess import SAFE_CHUNK_BYTES, build_body
 
 # detector_version の**静的部分**：pii-masker のコミット版 (``pii-masker@<hash>``) だけ。
 #   submodule 更新時に sync-pii-masker (src/cli.py) がこの hash 文字列を正規表現で置換する。
@@ -104,6 +104,11 @@ def run_llm_detection(
     """
     max_tokens, overlap = window_policy()
     body = build_body(chunks, flatten_tables=flatten_tables)
+    # 本文のハッシュを持たない古いキャッシュを使ってよいか。
+    #   2026-11-25 に、SAFE_CHUNK_BYTES を超えるチャンクを小片に分けてつなぎ直すときに
+    #   改行を足していた誤りを直した。本文が変わったのはそういうチャンクを含む入力だけで、
+    #   それ以外は修正の前後で本文が同じなので、古いキャッシュの座標もそのまま正しい。
+    trust_unhashed = all(len(c.encode("utf-8")) <= SAFE_CHUNK_BYTES for c in chunks)
     detection = cached_detect(
         cache,
         content_hash(chunks),
@@ -115,6 +120,7 @@ def run_llm_detection(
         overlap_tokens=overlap,
         progress=progress,
         force=force,
+        trust_unhashed=trust_unhashed,
     )
     return body.text, detection
 

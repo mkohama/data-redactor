@@ -6,6 +6,7 @@ pii-masker の型をそのまま外に漏らさない (依存をアダプタ境�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
@@ -37,6 +38,15 @@ class LlmDetection:
     not_found: tuple[tuple[str, str], ...]
     model: str
     detector_version: str
+    # 検出した本文 (Body.text) の SHA-256。spans はこの本文の座標なので、キャッシュから
+    # 読んだときに今の本文と同じかを確かめるために持つ。2026-11-25 より前に保存した
+    # 結果には無い (None)。
+    body_sha256: str | None = None
+
+
+def body_sha256(text: str) -> str:
+    """本文の SHA-256 (16 進)。LlmDetection.body_sha256 と比べるために使う。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def detection_to_json(d: LlmDetection) -> str:
@@ -45,6 +55,7 @@ def detection_to_json(d: LlmDetection) -> str:
         {
             "model": d.model,
             "detector_version": d.detector_version,
+            "body_sha256": d.body_sha256,
             "spans": [[s.start, s.end, s.ene_type, s.reason, s.how] for s in d.spans],
             "not_found": [[t, x] for t, x in d.not_found],
         },
@@ -63,12 +74,14 @@ def detection_from_json(s: str) -> LlmDetection:
         not_found=tuple((nf[0], nf[1]) for nf in d.get("not_found", [])),
         model=d.get("model", ""),
         detector_version=d.get("detector_version", ""),
+        body_sha256=d.get("body_sha256"),
     )
 
 
 __all__ = [
     "LlmSpan",
     "LlmDetection",
+    "body_sha256",
     "detection_to_json",
     "detection_from_json",
 ]

@@ -14,6 +14,7 @@ GiNZA の実ロードを避けるため、軽量な :class:`~src.api.service.Api
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from src.masking import (
     NerCache,
     content_hash,
 )
+from src.ner.preprocess import SAFE_CHUNK_BYTES
 
 
 @pytest.fixture(scope="module")
@@ -617,6 +619,83 @@ def test_mask_does_not_record_on_error(client: TestClient) -> None:
     )
     assert r.status_code == 404
     assert client.get("/documents").json() == []
+
+
+# --------------------------------------------------------------------------- #
+# 長いテキスト (SAFE_CHUNK_BYTES 超) でも、伏せた文書と位置が原文とずれない
+# --------------------------------------------------------------------------- #
+def _long_text() -> str:
+    """空行と字下げした箇条書きを含み、UTF-8 で SAFE_CHUNK_BYTES を超える Markdown。"""
+    sections = []
+    i = 0
+    while len("\n".join(sections).encode("utf-8")) <= SAFE_CHUNK_BYTES + 2000:
+        sections.append(
+            f"## 項目{i}\n\nSONY と Canon の比較を記す。\n\n  - 手順を確認する\n"
+        )
+        i += 1
+    return "\n".join(sections)
+
+
+def _rebuild(original: str, mapping: list[dict]) -> str:
+    """原文の occurrences の位置を placeholder に置き換えて組み立て直す。"""
+    spans = sorted(
+        (
+            (o["span"][0], o["span"][1], m["placeholder"])
+            for m in mapping
+            for o in m["occurrences"]
+        ),
+        reverse=True,
+    )
+    for start, end, ph in spans:
+        original = original[:start] + ph + original[end:]
+    return original
+
+
+def test_mask_long_text_spans_match_original(client: TestClient) -> None:
+    """長いテキストでも、span を原文に当てた結果が masked_text と一致し、復元は原文に戻る。
+
+    以前は SAFE_CHUNK_BYTES ごとに改行が足され、その後ろの span がずれていた
+    (2026-11-25 の不具合報告)。
+    """
+    text = _long_text()
+    body = client.post("/mask", json={"text": text, "detection": "ner"}).json()
+    masked = body["masked_parts"][0]["masked_text"]
+    assert masked.count("\n") == text.count("\n")
+    assert _rebuild(text, body["mapping"]) == masked
+    restored = client.post(
+        "/unmask", json={"text": masked, "mapping": body["mapping"]}
+    ).json()["restored_text"]
+    assert restored == text
+
+
+def test_stale_ner_cache_is_reanalyzed(
+    client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """キャッシュの解析が今の本文と違う本文に対するもの (修正前に保存したもの) なら使わない。"""
+    text = "SONYとCanonの比較。"
+    client.post("/mask", json={"text": text, "detection": "ner"})
+    cache = client.app.state.ctx.cache
+    chash = content_hash([text])
+    good = cache.get(chash, "ja_ginza", True)
+    assert good is not None
+    # 修正前の不具合で改行が足された本文を持つ解析に差し替える。
+    cache.put(chash, "ja_ginza", True, replace(good, text="\n" + good.text))
+
+    ner_engine = _engine.engines[0]
+    analyzed: list[str] = []
+    original = ner_engine.analyze_chunks
+
+    def counting(chunks, **kwargs):  # type: ignore[no-untyped-def]
+        chunks = list(chunks)
+        analyzed.append("".join(chunks))
+        return original(chunks, **kwargs)
+
+    monkeypatch.setattr(ner_engine, "analyze_chunks", counting)
+    client.post("/mask", json={"text": text, "detection": "ner"})
+    assert analyzed == [text]  # 古い解析は使わず解析し直した
+    assert cache.get(chash, "ja_ginza", True).text == good.text  # 正しい解析で上書き
+    client.post("/mask", json={"text": text, "detection": "ner"})
+    assert analyzed == [text]  # 上書き後はキャッシュを使う
 
 
 # --------------------------------------------------------------------------- #

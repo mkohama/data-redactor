@@ -22,6 +22,7 @@ import openai
 from src.llm.schema import (
     LlmDetection,
     LlmSpan,
+    body_sha256,
     detection_from_json,
     detection_to_json,
 )
@@ -211,6 +212,7 @@ def detect_document(
         ),  # 重複 (窓 overlap 由来) を畳む・順序保持
         model=model,
         detector_version=detector_version,
+        body_sha256=body_sha256(text),
     )
 
 
@@ -249,6 +251,7 @@ def cached_detect(
     locate_fn: LocateFn | None = None,
     progress: ProgressFn | None = None,
     force: bool = False,
+    trust_unhashed: bool = True,
 ) -> LlmDetection:
     """LLM 検出をキャッシュ越しに行う (NER 層と同じ「激重層だけキャッシュ」)。
 
@@ -258,11 +261,25 @@ def cached_detect(
     必ず ``detector_version`` にも target を織り込むこと** (版に入れないと別 target 同士でキャッシュが衝突する)。
     ``force=True`` でキャッシュを無視して再検出し上書きする (NER キャッシュには触れない)。
     ``progress(i, n)`` は detect_document へ渡る (キャッシュヒット時は呼ばれない＝即返り)。
+
+    キャッシュの結果は、今の本文 ``text`` と同じ本文に対するものだけを使う。
+    spans は検出した本文の座標なので、本文が違うと位置が食い違うため。
+      - 本文のハッシュ (body_sha256) を持つ結果は、``text`` のハッシュと一致したときだけ使う。
+      - 持たない結果 (2026-11-25 より前に保存したもの) は、``trust_unhashed`` が True の
+        ときだけ使う。呼び出し側は、本文の組み方を直す前後で本文が変わらない入力のときに
+        True を渡す (run_llm_detection を参照)。
+    使えなかったときは検出し直して上書きする。
     """
     if not force:
         hit = cache.get_llm(content_hash, model, flatten, detector_version)
         if hit is not None:
-            return detection_from_json(hit)
+            cached = detection_from_json(hit)
+            if cached.body_sha256 is None:
+                usable = trust_unhashed
+            else:
+                usable = cached.body_sha256 == body_sha256(text)
+            if usable:
+                return cached
     detection = detect_document(
         text,
         detector_version=detector_version,

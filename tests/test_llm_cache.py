@@ -13,6 +13,7 @@ from src.llm.detect_layer import cached_detect
 from src.llm.schema import (
     LlmDetection,
     LlmSpan,
+    body_sha256,
     detection_from_json,
     detection_to_json,
 )
@@ -179,3 +180,76 @@ def test_cached_detect_runs_once_then_hits_cache(tmp_path) -> None:
         force=True,
     )
     assert calls["n"] == 3
+
+
+# --- キャッシュの結果が今の本文に対するものかを確かめる --------------------- #
+def _counting_detect(tmp_path):  # type: ignore[no-untyped-def]
+    """検出の回数を数える cached_detect の呼び出し関数を返す。"""
+    cache = NerCache(tmp_path / "cache.db")
+    calls = {"n": 0}
+
+    def detect_fn(document: str, *, model: str):
+        calls["n"] += 1
+        return [_Ent("Person", "田中")] if "田中" in document else []
+
+    def locate_fn(window: str, ents):
+        out = []
+        for e in ents:
+            i = window.find(e.text)
+            if i >= 0:
+                out.append(_Match(i, i + len(e.text), e))
+        return out, []
+
+    def run(text: str, *, trust_unhashed: bool = True) -> LlmDetection:
+        return cached_detect(
+            cache,
+            "h",
+            text,
+            flatten=False,
+            detector_version="v1",
+            detect_fn=detect_fn,
+            locate_fn=locate_fn,
+            trust_unhashed=trust_unhashed,
+        )
+
+    return cache, calls, run
+
+
+def test_detection_records_body_hash(tmp_path) -> None:
+    """検出結果は、検出した本文のハッシュを持ち、JSON の往復でも保たれる。"""
+    _cache, _calls, run = _counting_detect(tmp_path)
+    d = run("田中さんの記録")
+    assert d.body_sha256 == body_sha256("田中さんの記録")
+    assert detection_from_json(detection_to_json(d)) == d
+
+
+def test_cached_detect_misses_when_body_differs(tmp_path) -> None:
+    """同じ鍵でも、保存した本文と今の本文が違えば使わず、検出し直す。"""
+    _cache, calls, run = _counting_detect(tmp_path)
+    run("田中さんの記録")
+    run("田中さんの記録")
+    assert calls["n"] == 1  # 本文が同じならキャッシュを使う
+    d = run("\n田中さんの記録")  # 鍵 (content_hash) は同じ "h" のまま本文だけ違う
+    assert calls["n"] == 2
+    assert d.spans[0].start == 1  # 今の本文の座標で検出し直している
+
+
+def test_cached_detect_unhashed_entry_follows_trust_flag(tmp_path) -> None:
+    """本文のハッシュを持たない古い結果は、trust_unhashed のときだけ使う。"""
+    cache, calls, run = _counting_detect(tmp_path)
+    old = LlmDetection(
+        spans=(LlmSpan(0, 2, "Person", None, "exact"),),
+        not_found=(),
+        model="gpt-4.1-mini",
+        detector_version="v1",
+    )
+    assert old.body_sha256 is None
+    cache.put_llm("h", "gpt-4.1-mini", False, "v1", detection_to_json(old))
+
+    assert run("田中さんの記録", trust_unhashed=True) == old
+    assert calls["n"] == 0
+    d = run("田中さんの記録", trust_unhashed=False)
+    assert calls["n"] == 1  # 信用しない＝検出し直して上書き
+    assert d.body_sha256 == body_sha256("田中さんの記録")
+    run("田中さんの記録", trust_unhashed=False)
+    assert calls["n"] == 1  # 上書き後はハッシュ付きなのでキャッシュを使う

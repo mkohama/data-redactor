@@ -25,8 +25,8 @@ from typing import Any
 import spacy
 
 from src.ner.preprocess import (
-    CHUNK_SEPARATOR,
     _body_from_pieces,
+    _flat_offsets,
     _prepare_pieces,
 )
 
@@ -224,10 +224,9 @@ class NerEngine:
 
         # 小片ごとに NER (nlp.pipe でバッチ処理) し、全文基準にオフセット補正
         entities: list[Entity] = []
-        offset = 0
-        sep_len = len(CHUNK_SEPARATOR)
-        for piece, doc in zip(
-            pieces, _pipe_in_batches(self.nlp, [p.flat for p in pieces])
+        for offset, doc in zip(
+            _flat_offsets(pieces),
+            _pipe_in_batches(self.nlp, [p.flat for p in pieces]),
         ):
             for ent in doc.ents:
                 entities.append(
@@ -238,10 +237,9 @@ class NerEngine:
                         end=ent.end_char + offset,
                     )
                 )
-            offset += len(piece.flat) + sep_len
 
         result = ExtractionResult(
-            text=CHUNK_SEPARATOR.join(p.flat for p in pieces),
+            text=_body_from_pieces(pieces).text,
             entities=tuple(entities),
         )
         if labels is not None:
@@ -308,13 +306,11 @@ class NerEngine:
         body = _body_from_pieces(pieces)  # text/original_text/offset_map (spaCy 非依存)
         tokens: list[AnalyzedToken] = []
         entities: list[Entity] = []
-        offset = 0  # 平坦化テキスト基準のオフセット (トークン/エンティティ用)
-        sep_len = len(CHUNK_SEPARATOR)
-        for idx, (piece, doc) in enumerate(
-            zip(pieces, _pipe_in_batches(self.nlp, [p.flat for p in pieces]))
+        # offset＝各小片の本文 (平坦化テキスト) 上の開始位置 (トークン/エンティティ用)
+        for offset, doc in zip(
+            _flat_offsets(pieces),
+            _pipe_in_batches(self.nlp, [p.flat for p in pieces]),
         ):
-            if idx > 0:  # 小片の区切り (CHUNK_SEPARATOR) の分だけ flat 座標を進める
-                offset += sep_len
             for tok in doc:
                 if tok.is_space:
                     continue
@@ -337,7 +333,6 @@ class NerEngine:
                         end=ent.end_char + offset,
                     )
                 )
-            offset += len(piece.flat)
         return Analysis(
             text=body.text,
             tokens=tuple(tokens),
@@ -401,11 +396,8 @@ def sudachi_analyze_chunks(
     body = _body_from_pieces(pieces)
     tk, mode = _sudachi_tokenizer()
     tokens: list[AnalyzedToken] = []
-    offset = 0  # 平坦化テキスト (body.text) 基準のオフセット
-    sep_len = len(CHUNK_SEPARATOR)
-    for idx, piece in enumerate(pieces):
-        if idx > 0:  # 小片の区切り (CHUNK_SEPARATOR) の分だけ進める
-            offset += sep_len
+    # offset＝各小片の本文 (body.text) 上の開始位置
+    for offset, piece in zip(_flat_offsets(pieces), pieces):
         for m in tk.tokenize(piece.flat, mode):
             tag = "-".join(p for p in m.part_of_speech() if p != "*")
             tokens.append(
@@ -417,7 +409,6 @@ def sudachi_analyze_chunks(
                     pos="",
                 )
             )
-        offset += len(piece.flat)
     return Analysis(
         text=body.text,
         tokens=tuple(tokens),
