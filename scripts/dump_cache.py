@@ -51,7 +51,8 @@
     # 書き込みを排他ロックするので API を止めてから実行する。一時的に同じくらいの空きディスクが要る。
     uv run python scripts/dump_cache.py --vacuum
 
-    # 実機で縮める（API を止めてから、同じイメージの使い捨てコンテナで実行する）
+    # 実機で縮める。make docker-vacuum が次の 3 行を行う
+    # （API を止め、同じイメージの使い捨てコンテナで実行し、API を起動し直す）
     docker compose stop data-redactor-api
     docker compose run --rm --no-deps -T data-redactor-api python - /app/data/cache.db \
         --vacuum < scripts/dump_cache.py

@@ -7,7 +7,7 @@
 # （`id -u` を使うため）。
 # =============================================================================
 
-.PHONY: help docker-build docker-sync-build docker-up docker-down docker-logs clean clean-images
+.PHONY: help docker-build docker-sync-build docker-up docker-down docker-logs docker-vacuum clean clean-images
 
 .DEFAULT_GOAL := help
 
@@ -31,6 +31,7 @@ help:
 	@echo ""
 	@echo "=== Maintenance ==="
 	@echo ""
+	@echo "  make docker-vacuum   Shrink data/cache.db (stops the API while running)"
 	@echo "  make clean           Remove container and volumes"
 	@echo "  make clean-images    Remove data-redactor image"
 	@echo ""
@@ -86,6 +87,31 @@ docker-down:
 
 docker-logs:
 	env UID=$(HOST_UID) GID=$(HOST_GID) docker compose logs -f
+
+# cache.db を縮める（VACUUM）。画面や API でキャッシュを消しても、ファイルは小さくならない
+# （SQLite は空いた領域をファイルの中に残して使い回す）。消した後にこれで縮める。
+#   - VACUUM の間は書き込みが止まるので、API が動いていれば止め、終わったら起動し直す
+#     （VACUUM が失敗しても起動し直す。もともと止まっていたなら止まったまま）。UI は止めない。
+#   - 同じイメージの使い捨てコンテナで scripts/dump_cache.py --vacuum を実行する
+#     （イメージに scripts/ は入っていないので標準入力で渡す）。
+#   - 一時的に今の cache.db と同じくらいの空きディスクが要る。数 GB だと数分かかる。
+API_SERVICE := data-redactor-api
+
+docker-vacuum:
+	@WAS_RUNNING=$$(env UID=$(HOST_UID) GID=$(HOST_GID) docker compose ps -q --status running $(API_SERVICE)); \
+	 if [ -n "$$WAS_RUNNING" ]; then \
+		echo "Stopping $(API_SERVICE)..."; \
+		env UID=$(HOST_UID) GID=$(HOST_GID) docker compose stop $(API_SERVICE) || exit 1; \
+	 fi; \
+	 echo "Vacuuming data/cache.db..."; \
+	 env UID=$(HOST_UID) GID=$(HOST_GID) docker compose run --rm --no-deps -T $(API_SERVICE) \
+		python - /app/data/cache.db --vacuum < scripts/dump_cache.py; \
+	 STATUS=$$?; \
+	 if [ -n "$$WAS_RUNNING" ]; then \
+		echo "Starting $(API_SERVICE)..."; \
+		env UID=$(HOST_UID) GID=$(HOST_GID) docker compose start $(API_SERVICE); \
+	 fi; \
+	 exit $$STATUS
 
 # =============================================================================
 # Maintenance
