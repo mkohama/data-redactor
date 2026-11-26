@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 from src.llm import cached_detect
 from src.llm.detect_layer import DEFAULT_MODEL as LLM_MODEL
-from src.llm.detect_layer import LlmDetectionCache
+from src.llm.detect_layer import LlmDetectionCache, detect_document
 from src.llm.schema import LlmDetection
 from src.llm.windows import DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS
 from src.masking.cache import content_hash
@@ -87,7 +87,7 @@ def detector_version() -> str:
 
 
 def run_llm_detection(
-    cache: LlmDetectionCache,
+    cache: LlmDetectionCache | None,
     chunks: list[str],
     flatten_tables: bool,
     *,
@@ -101,9 +101,21 @@ def run_llm_detection(
     ``force=True`` でキャッシュ無視の再検出 (LLM 層のみ。NER キャッシュには触れない)。
     ``progress(i, n)`` は窓ごとの進捗 (キャッシュヒット時は呼ばれない)。
     窓ポリシー (max_tokens/overlap) は env で上書き可 (window_policy)。版にも反映されるので整合する。
+    ``cache=None`` ならキャッシュを読みも書きもせず、毎回検出する
+    (/mask の text の part のように、使い捨ての入力をキャッシュに溜めないため)。
     """
     max_tokens, overlap = window_policy()
     body = build_body(chunks, flatten_tables=flatten_tables)
+    if cache is None:
+        detection = detect_document(
+            body.text,
+            detector_version=detector_version(),
+            target=detector_target(),
+            max_tokens=max_tokens,
+            overlap_tokens=overlap,
+            progress=progress,
+        )
+        return body.text, detection
     # 本文のハッシュを持たない古いキャッシュを使ってよいか。
     #   2026-11-25 に、SAFE_CHUNK_BYTES を超えるチャンクを小片に分けてつなぎ直すときに
     #   改行を足していた誤りを直した。本文が変わったのはそういうチャンクを含む入力だけで、

@@ -13,6 +13,7 @@ GiNZA の実ロードを避けるため、軽量な :class:`~src.api.service.Api
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -188,51 +189,42 @@ def test_mask_content_hash_reference(
 
 
 # --------------------------------------------------------------------------- #
-# NER キャッシュの粒度
+# /mask のキャッシュの単位
 #
-# キャッシュの単位は **part 1 つ**（バンドル全体ではない）。呼び出し側にファイル単位の
-# キャッシュを約束する以上、粒度はテストで固定しておく（連結して 1 part で送ると
-# キャッシュが効かない、という説明の根拠でもある）。
+# file の part は part 1 つ (バンドル全体ではない) を単位にキャッシュする。
+# text の part はキャッシュしない (毎回内容が変わるプロンプトなどを想定。_uses_cache)。
+# 呼び出し側には「キャッシュしたい文書は file で、part に分けて送る」と依頼しているので、
+# その説明の根拠をテストで固定しておく。
 # --------------------------------------------------------------------------- #
 _PROMPT = "次の資料を要約して。"
 _DOC_A = "SONYの新型センサはCanonを上回る。"
 _DOC_B = "Canonのレンズは堅実との評価。"
 
 
-def _mask_parts(client: TestClient, texts: dict[str, str]) -> None:
-    """text part だけのバンドルを /mask に投げる（200 を確認するだけ）。"""
+def _mask_bundle(
+    client: TestClient,
+    texts: dict[str, str],
+    files: dict[str, str],
+    detection: str = "ner",
+) -> None:
+    """text の part と file の part (中身は .txt) を 1 つのバンドルで /mask に投げる。"""
+    parts: list[dict] = [{"id": pid, "text": t} for pid, t in texts.items()]
+    parts += [{"id": pid, "file": {"filename": f"{pid}.txt"}} for pid in files]
     r = client.post(
         "/mask",
-        json={
-            "parts": [{"id": pid, "text": t} for pid, t in texts.items()],
-            "detection": "ner",
+        data={"manifest": json.dumps({"parts": parts, "detection": detection})},
+        files={
+            pid: (f"{pid}.txt", body.encode(), "text/plain")
+            for pid, body in files.items()
         },
     )
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
 
 
-def test_mask_ner_cache_key_is_per_part(client: TestClient) -> None:
-    """part ごとに (content_hash, model, flatten) で NER キャッシュが入る。
+def _count_ner(_engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """GiNZA を呼ぶ NerEngine.analyze_chunks に渡った本文を記録するようにする。
 
-    バンドル全体を 1 つの鍵にはしない＝part を分ければファイル単位で使い回せる。
-    """
-    _mask_parts(client, {"prompt": _PROMPT, "docA": _DOC_A, "docB": _DOC_B})
-
-    cache = client.app.state.ctx.cache
-    for text in (_PROMPT, _DOC_A, _DOC_B):
-        # flatten は /mask の既定（flatten_tables=True）。
-        assert cache.get(content_hash([text]), "ja_ginza", True) is not None
-    # 連結した全体は鍵にならない（バンドル単位でキャッシュしていないことの裏取り）。
-    assert cache.get(content_hash([_PROMPT, _DOC_A, _DOC_B]), "ja_ginza", True) is None
-
-
-def test_mask_ner_cache_reuses_unchanged_parts(
-    client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """プロンプトだけ差し替えたとき、変わっていない part は再解析されない。
-
-    GiNZA を呼ぶ :meth:`NerEngine.analyze_chunks` の呼び出し回数で見る（所要時間で測ると
-    マシン差で不安定なため）。
+    所要時間で測るとマシン差で不安定なので、呼び出しの記録で見る。
     """
     ner_engine = _engine.engines[0]
     analyzed: list[str] = []
@@ -244,43 +236,88 @@ def test_mask_ner_cache_reuses_unchanged_parts(
         return original(chunks, **kwargs)
 
     monkeypatch.setattr(ner_engine, "analyze_chunks", counting)
+    return analyzed
 
-    _mask_parts(client, {"prompt": _PROMPT, "docA": _DOC_A})
-    assert analyzed == [_PROMPT, _DOC_A]  # 初回は 2 part とも解析
+
+def test_mask_file_parts_are_cached_per_part(client: TestClient) -> None:
+    """file の part は part ごとに NER キャッシュが入り、文書一覧にも出る。text の part は入らない。"""
+    _mask_bundle(client, {"prompt": _PROMPT}, {"docA": _DOC_A, "docB": _DOC_B})
+
+    docs = client.get("/documents").json()
+    assert sorted((d["source_kind"], d["source_name"]) for d in docs) == [
+        ("api", "docA.txt"),
+        ("api", "docB.txt"),
+    ]
+    # 一覧の hash と NER キャッシュの鍵が一致している (一覧で NER 済みと表示される)。
+    assert all(d["ner_models"] == ["ja_ginza"] for d in docs)
+    cache = client.app.state.ctx.cache
+    assert cache.get(content_hash([_PROMPT]), "ja_ginza", True) is None
+
+
+def test_mask_text_part_is_reanalyzed_every_time(
+    client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """text の part は同じ内容でも毎回解析する。file の part は 2 回目から使い回す。"""
+    analyzed = _count_ner(_engine, monkeypatch)
+
+    _mask_bundle(client, {"prompt": _PROMPT}, {"docA": _DOC_A})
+    assert len(analyzed) == 2  # 初回は 2 part とも解析
 
     analyzed.clear()
-    _mask_parts(client, {"prompt": "この資料の課題を3点で。", "docA": _DOC_A})
+    _mask_bundle(client, {"prompt": "この資料の課題を3点で。"}, {"docA": _DOC_A})
     assert analyzed == ["この資料の課題を3点で。"]  # docA はキャッシュ命中＝再解析なし
 
     analyzed.clear()
-    _mask_parts(client, {"prompt": _PROMPT, "docA": _DOC_A})
-    assert analyzed == []  # 同一バンドルの再送は全 part 命中
+    _mask_bundle(client, {"prompt": _PROMPT}, {"docA": _DOC_A})
+    assert analyzed == [_PROMPT]  # 同じ text でもキャッシュしていないので解析する
 
 
-def test_mask_ner_cache_misses_when_parts_are_concatenated(
+def test_mask_file_cache_misses_when_parts_are_concatenated(
     client: TestClient, _engine: MaskingEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """1 つの part に連結して送ると、変わらない部分もまとめて再解析される。
+    """プロンプトと文書を 1 つの file に連結して送ると、変わらない部分もまとめて再解析される。
 
-    呼び出し側へ「parts に分けてほしい」と依頼する根拠。連結したテキストは全体で 1 つの
+    呼び出し側へ「part に分けてほしい」と依頼する根拠。連結した全体で 1 つの
     content_hash になるため、プロンプトが 1 文字変わるだけで全体がミスする。
     """
-    ner_engine = _engine.engines[0]
-    analyzed: list[str] = []
-    original = ner_engine.analyze_chunks
+    _mask_bundle(client, {}, {"all": f"{_PROMPT}\n{_DOC_A}"})
+    analyzed = _count_ner(_engine, monkeypatch)
+    _mask_bundle(client, {}, {"all": f"この資料の課題を3点で。\n{_DOC_A}"})
+    assert len(analyzed) == 1  # docA は前回と同じ内容だが、全体が別の鍵になるので再解析
 
-    def counting(chunks, **kwargs):  # type: ignore[no-untyped-def]
-        chunks = list(chunks)
-        analyzed.append("".join(chunks))
-        return original(chunks, **kwargs)
 
-    monkeypatch.setattr(ner_engine, "analyze_chunks", counting)
+def test_mask_text_part_skips_llm_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LLM 検出も同じ。file の part は結果をキャッシュし、text の part は毎回検出する。"""
+    import src.detector as detector_mod
+    import src.llm.detect_layer as detect_layer_mod
+    from src.llm.schema import LlmDetection, body_sha256
 
-    _mask_parts(client, {"all": f"{_PROMPT}\n{_DOC_A}"})
-    analyzed.clear()
-    _mask_parts(client, {"all": f"この資料の課題を3点で。\n{_DOC_A}"})
-    # docA は前回と同じ内容だが、連結された全体が別の鍵になるので再解析されている。
-    assert analyzed == [f"この資料の課題を3点で。\n{_DOC_A}"]
+    detected: list[str] = []
+
+    def fake_detect(text: str, **kwargs):  # type: ignore[no-untyped-def]
+        detected.append(text)
+        return LlmDetection(
+            spans=(),
+            not_found=(),
+            model="fake",
+            detector_version=kwargs["detector_version"],
+            body_sha256=body_sha256(text),
+        )
+
+    monkeypatch.setattr(detector_mod, "detect_document", fake_detect)
+    monkeypatch.setattr(detect_layer_mod, "detect_document", fake_detect)
+
+    _mask_bundle(client, {"prompt": _PROMPT}, {"docA": _DOC_A}, detection="llm")
+    assert len(detected) == 2
+    detected.clear()
+    _mask_bundle(client, {"prompt": _PROMPT}, {"docA": _DOC_A}, detection="llm")
+    assert detected == [_PROMPT]  # docA はキャッシュ命中、text は毎回検出
+
+    docs = client.get("/documents").json()
+    assert [d["source_name"] for d in docs] == ["docA.txt"]
+    assert docs[0]["llm_versions"] != []
 
 
 def test_mask_multipart_file(client: TestClient) -> None:
@@ -546,36 +583,15 @@ def test_documents_patch_source_kind(client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# /mask で解析した入力も文書一覧に出る
+# /mask に file で送った文書は文書一覧に出る (text は出ない)
 # --------------------------------------------------------------------------- #
-def _doc_by_hash(client: TestClient, h: str) -> dict | None:
-    return next(
-        (d for d in client.get("/documents").json() if d["content_hash"] == h), None
-    )
-
-
-def test_mask_records_text_part_in_document_list(client: TestClient) -> None:
-    """/mask の text は種別 "api" で一覧に出る。NER 済みであることも一覧から分かる。
-
-    以前は NER キャッシュにだけ入り、一覧 (documents 起点) には出なかった。
-    """
+def test_mask_does_not_record_text_part(client: TestClient) -> None:
+    """text の part はキャッシュしないので、文書一覧にも記録しない。"""
     text = "SONYとCanonの比較。"
     client.post("/mask", json={"text": text, "detection": "ner"})
-    doc = _doc_by_hash(client, content_hash([text]))
-    assert doc is not None
-    assert doc["source_kind"] == "api" and doc["source_name"] == text
-    # 文書の hash と NER キャッシュの鍵が一致している (一覧で NER 済みと表示される)。
-    assert doc["ner_models"] == ["ja_ginza"]
-
-
-def test_mask_text_part_name_is_shortened_head(client: TestClient) -> None:
-    """text の文書名は本文の先頭。改行は空白にし、長ければ切り詰める。"""
-    text = "一行目のメモ。\n" + "あ" * 60
-    client.post("/mask", json={"text": text, "detection": "ner"})
-    name = _doc_by_hash(client, content_hash([text]))["source_name"]  # type: ignore[index]
-    assert "\n" not in name
-    assert name.startswith("一行目のメモ。 あ") and name.endswith("…")
-    assert len(name) == 41  # 40 文字＋省略記号
+    assert client.get("/documents").json() == []
+    cache = client.app.state.ctx.cache
+    assert cache.get(content_hash([text]), "ja_ginza", True) is None
 
 
 def test_mask_records_file_part_with_filename(client: TestClient) -> None:
@@ -592,30 +608,42 @@ def test_mask_records_file_part_with_filename(client: TestClient) -> None:
 
 
 def test_mask_keeps_meta_of_ingested_document(client: TestClient) -> None:
-    """取込済みと同じ内容を /mask しても、取込時の種別・名前は "api" で上書きされない。"""
-    text = "SONYの話。"
-    h = client.post("/documents", json={"text": text, "source_name": "memo"}).json()[
-        "content_hash"
-    ]
-    client.post("/mask", json={"text": text, "detection": "ner"})
+    """取込済みと同じファイルを /mask しても、取込時の種別・名前は "api" で上書きされない。"""
+    body = "SONYの話。".encode()
+    h = client.post(
+        "/documents",
+        data={"source_name": "memo"},
+        files={"file": ("memo.txt", body, "text/plain")},
+    ).json()["content_hash"]
+    manifest = (
+        '{"parts": [{"id": "f", "file": {"filename": "memo.txt"}}], "detection": "ner"}'
+    )
     client.post(
-        "/mask", json={"parts": [{"id": "d", "content_hash": h}], "detection": "ner"}
+        "/mask",
+        data={"manifest": manifest},
+        files={"f": ("memo.txt", body, "text/plain")},
     )
     docs = client.get("/documents").json()
-    assert [(d["source_kind"], d["source_name"]) for d in docs] == [("text", "memo")]
+    assert [(d["content_hash"], d["source_kind"], d["source_name"]) for d in docs] == [
+        (h, "file", "memo")
+    ]
 
 
 def test_mask_does_not_record_on_error(client: TestClient) -> None:
     """入力エラーで解析しなかったときは記録しない。"""
-    r = client.post(
-        "/mask",
-        json={
+    manifest = json.dumps(
+        {
             "parts": [
-                {"id": "a", "text": "SONYの話。"},
+                {"id": "a", "file": {"filename": "memo.txt"}},
                 {"id": "b", "content_hash": "deadbeef"},
             ],
             "detection": "ner",
-        },
+        }
+    )
+    r = client.post(
+        "/mask",
+        data={"manifest": manifest},
+        files={"a": ("memo.txt", "SONYの話。".encode(), "text/plain")},
     )
     assert r.status_code == 404
     assert client.get("/documents").json() == []
@@ -673,9 +701,11 @@ def test_stale_ner_cache_is_reanalyzed(
 ) -> None:
     """キャッシュの解析が今の本文と違う本文に対するもの (修正前に保存したもの) なら使わない。"""
     text = "SONYとCanonの比較。"
-    client.post("/mask", json={"text": text, "detection": "ner"})
+    # text の part はキャッシュしないので、取り込んで content_hash で参照する。
+    chash = client.post("/documents", json={"text": text}).json()["content_hash"]
+    req = {"parts": [{"id": "d", "content_hash": chash}], "detection": "ner"}
+    client.post("/mask", json=req)
     cache = client.app.state.ctx.cache
-    chash = content_hash([text])
     good = cache.get(chash, "ja_ginza", True)
     assert good is not None
     # 修正前の不具合で改行が足された本文を持つ解析に差し替える。
@@ -691,10 +721,10 @@ def test_stale_ner_cache_is_reanalyzed(
         return original(chunks, **kwargs)
 
     monkeypatch.setattr(ner_engine, "analyze_chunks", counting)
-    client.post("/mask", json={"text": text, "detection": "ner"})
+    client.post("/mask", json=req)
     assert analyzed == [text]  # 古い解析は使わず解析し直した
     assert cache.get(chash, "ja_ginza", True).text == good.text  # 正しい解析で上書き
-    client.post("/mask", json={"text": text, "detection": "ner"})
+    client.post("/mask", json=req)
     assert analyzed == [text]  # 上書き後はキャッシュを使う
 
 

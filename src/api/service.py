@@ -159,10 +159,13 @@ def _analyze_part(
     flatten: bool,
     mask_level: str,
     refresh: bool = False,
+    use_cache: bool = True,
 ) -> tuple[MaskAnalysis, list[Candidate], list[CandidateGroup]]:
     """1 part を解析し、(解析結果, 自動選択候補, 実体グループ) を返す。
 
     ``refresh=True`` はキャッシュを無視して NER/LLM とも強制再解析する (結果で上書き)。
+    ``use_cache=False`` は NER/LLM ともキャッシュを読みも書きもしない
+    (/mask の text の part。使い捨ての入力をキャッシュに溜めないため。_uses_cache を参照)。
     """
     run_ner = detection in ("ner", "both")
     use_llm = detection in ("llm", "both")
@@ -171,12 +174,13 @@ def _analyze_part(
             503, "NER モデルが未ロードです（サーバ起動直後 or ロード失敗）"
         )
 
+    cache = ctx.cache if use_cache else None
     with ctx.detect_lock:
         llm_detection = None
         if use_llm:
             try:
                 _, llm_detection = run_llm_detection(
-                    ctx.cache, chunks, flatten, force=refresh
+                    cache, chunks, flatten, force=refresh
                 )
             except (openai.OpenAIError, ImportError) as e:
                 raise HTTPException(
@@ -187,7 +191,7 @@ def _analyze_part(
             chunks,
             flatten_tables=flatten,
             allowlist=ctx.allowlist,
-            ner_cache=ctx.cache,
+            ner_cache=cache,
             refresh_cache=refresh,
             llm_detection=llm_detection,
             run_ner=run_ner,
@@ -300,10 +304,19 @@ def _wire_mapping(bundle: BundleMaskResult, part_ids: list[str]) -> list[Mapping
     ]
 
 
-# /mask 経由で記録した文書の種別。一覧で画面からの取込 (text / file) と見分けるために使う。
+# /mask に file で送られた文書の種別。一覧で画面からの取込 (text / file) と見分けるために使う。
 MASK_SOURCE_KIND = "api"
-# text の part を記録するときに、文書名として使う本文の先頭の文字数。
-_MASK_NAME_HEAD = 40
+
+
+def _uses_cache(part: Part) -> bool:
+    """/mask の part の解析で NER・LLM のキャッシュを使うか。
+
+    file と content_hash の part は使う。text の part は使わない。
+    呼び出し側は、何度も送る文書 (キャッシュしたい単位) を file で送り、
+    毎回内容が変わる入力 (プロンプトなど) を text で送る、という使い分けを想定している。
+    text までキャッシュすると、二度と使わない結果が cache.db に溜まり続けるため。
+    """
+    return part.text is None
 
 
 def _record_mask_part(
@@ -312,31 +325,26 @@ def _record_mask_part(
     chunks: list[str],
     files: dict[str, tuple[str, bytes]],
 ) -> None:
-    """/mask で解析した 1 part を文書として記録し、キャッシュ一覧に出るようにする。
+    """/mask に file で送られた 1 part を文書として記録し、キャッシュ一覧に出るようにする。
 
     記録しないと、NER・LLM の結果はキャッシュに入るのに文書一覧には出ない
-    (一覧は documents テーブルが起点のため)。それを防ぐために /mask でも記録する。
+    (一覧は documents テーブルが起点のため)。それを防ぐために記録する。
 
     次の場合は記録しない。
+      - text の part (キャッシュしないので、一覧に出す意味がない。_uses_cache を参照)。
       - content_hash で参照した part (取込済みなので、すでに記録がある)。
       - 本文が空白だけの part (取込でも 422 にする入力なので、一覧に出す意味がない)。
       - 同じ内容の文書がすでに記録済みの場合。画面から取り込んだ文書の種別・名前を
         "api" で上書きしないため。
 
-    文書名は、ファイルの part ならファイル名、text の part なら本文の先頭
-    (改行は空白にして _MASK_NAME_HEAD 文字まで) にする。
+    文書名はファイル名にする。
     """
-    if part.content_hash is not None or not any(c.strip() for c in chunks):
+    if part.file is None or not any(c.strip() for c in chunks):
         return
     chash = content_hash(chunks)
     if ctx.cache.get_source(chash) is not None:
         return
-    if part.text is not None:
-        head = " ".join(part.text.split())
-        name = head if len(head) <= _MASK_NAME_HEAD else head[:_MASK_NAME_HEAD] + "…"
-    else:
-        name = files[part.id][0]
-    ctx.cache.record_document(chash, MASK_SOURCE_KIND, name, chunks)
+    ctx.cache.record_document(chash, MASK_SOURCE_KIND, files[part.id][0], chunks)
 
 
 def run_mask(
@@ -358,8 +366,9 @@ def run_mask(
             flatten=req.flatten_tables,
             mask_level=req.mask_level,
             refresh=req.refresh,
+            use_cache=_uses_cache(p),
         )
-        for chunks in part_chunks
+        for p, chunks in zip(parts, part_chunks)
     ]
     for p, chunks in zip(parts, part_chunks):
         _record_mask_part(ctx, p, chunks, files)
