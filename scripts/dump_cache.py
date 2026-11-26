@@ -2,9 +2,10 @@
 
 なぜ必要か:
   GET /documents（UI のキャッシュ一覧も同じ）は documents テーブルを起点に引くため、
-  documents に行が無い文書は出てこない。API の POST /mask は重い層（NER・LLM）の結果を
-  ner / llm_detection に保存する一方で record_document を呼ばないので、/mask だけで
-  処理した文書は「キャッシュは効いているのに一覧に出ない」状態になる。
+  documents に行が無い文書は出てこない。2026-11-19 より前の API の POST /mask は、
+  重い層（NER・LLM）の結果を ner / llm_detection に保存する一方で record_document を
+  呼ばなかったので、/mask だけで処理した文書は「キャッシュは効いているのに一覧に出ない」
+  状態で残っている（孤児）。
   このスクリプトは 4 テーブル（documents / ner / llm_detection / mask_draft）すべてから
   content_hash を集めるので、その取りこぼしを含めた実体が見える。
 
@@ -44,6 +45,17 @@
     # 1 件だけ消すなら API の DELETE /documents/<hash> でもよい（4 テーブルまとめて消える）。
     uv run python scripts/dump_cache.py --delete-orphans
     uv run python scripts/dump_cache.py --delete-orphans --yes
+
+    # ファイルを縮める（VACUUM）。行を消しただけではファイルは小さくならないので、
+    # 画面や API でキャッシュを消した後に実行する。孤児の削除と一緒なら --delete-orphans --yes --vacuum。
+    # 書き込みを排他ロックするので API を止めてから実行する。一時的に同じくらいの空きディスクが要る。
+    uv run python scripts/dump_cache.py --vacuum
+
+    # 実機で縮める（API を止めてから、同じイメージの使い捨てコンテナで実行する）
+    docker compose stop data-redactor-api
+    docker compose run --rm --no-deps -T data-redactor-api python - /app/data/cache.db \
+        --vacuum < scripts/dump_cache.py
+    docker compose start data-redactor-api
 """
 
 from __future__ import annotations
@@ -59,8 +71,10 @@ from pathlib import Path
 _TABLES = ("documents", "ner", "llm_detection", "mask_draft")
 
 # 復元した文書の種別と、文書名に使う本文の先頭の文字数。
-# 孤児は /mask で処理されたものなので、API が /mask の入力を記録するときと同じ値にする
-# （src/api/service.py の MASK_SOURCE_KIND と _MASK_NAME_HEAD）。
+# 孤児は /mask で処理されたものなので、種別は API が /mask の入力を記録するときと同じ "api"
+# （src/api/service.py の MASK_SOURCE_KIND）。文書名は本文の先頭にする。
+# 2026-11-26 以降の API は text の part を記録しないが、それより前に /mask の text を
+# 記録したときの文書名もこの形 (本文の先頭 40 文字) だった。
 _RESTORE_SOURCE_KIND = "api"
 _RESTORE_NAME_HEAD = 40
 
@@ -360,7 +374,7 @@ def restore_orphans(conn: sqlite3.Connection, execute: bool) -> str:
 
     孤児は、以前の API が /mask の入力を documents に記録していなかったために生まれた
     (NER・LLM の結果はキャッシュに入っているのに一覧に出ない)。本文を復元できたものを、
-    いまの API が /mask の入力を記録するときと同じ形で登録する。
+    次の形で登録する (2026-11-19〜11-25 の API が /mask の text を記録したときと同じ形)。
 
         種別     "api"
         文書名   本文の先頭 40 文字 (改行は空白)
@@ -479,6 +493,45 @@ def delete_orphans(conn: sqlite3.Connection, execute: bool) -> str:
     return "\n".join(out) + "\n"
 
 
+def _mb(n: int) -> str:
+    return f"{n / 1024 / 1024:,.1f} MB"
+
+
+def vacuum(conn: sqlite3.Connection, db: Path) -> str:
+    """VACUUM して cache.db のファイルを縮め、前後のサイズを文字列で返す。
+
+    行を消しただけではファイルは縮まない。SQLite は空いた領域をファイルの中に
+    「空きページ」として残し、次の書き込みで使い回すため。VACUUM はファイル全体を
+    書き直して空きページを取り除く。
+
+    注意:
+      - 書き直しの間は書き込みを排他ロックする。API を止めてから実行すること。
+        API が書き込み中だと "database is locked" で失敗する (そのときは何も変わらない)。
+      - 一時的に、今のファイルと同じくらいの空きディスクが要る。
+      - 大きいファイルでは数分かかる。
+
+    引数:
+      conn: 書き込みで開いた接続。
+      db: cache.db のパス (前後のファイルサイズを測るため)。
+    戻り値:
+      表示用の文字列 (前のサイズ・空き領域・後のサイズ)。
+    """
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    free_pages = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    before = db.stat().st_size
+    print(
+        f"VACUUM 中…（{_mb(before)} のファイル全体を書き直すので、大きいと数分かかる）",
+        file=sys.stderr,
+        flush=True,
+    )
+    conn.execute("VACUUM")
+    after = db.stat().st_size
+    return (
+        f"VACUUM しました: {_mb(before)} → {_mb(after)}"
+        f"（{_mb(before - after)} 減。実行前の空き領域は {_mb(free_pages * page_size)}）\n"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="cache.db の文書を孤児（documents 未登録）も含めて一覧・削除する"
@@ -531,8 +584,10 @@ def main() -> int:
     parser.add_argument(
         "--vacuum",
         action="store_true",
-        help="削除後に VACUUM してファイルを縮める。"
-        "書き込みを排他ロックするので API を止めてから実行すること",
+        help="VACUUM してファイルを縮める。単独でも使える (画面や API で消した後など)。"
+        "--delete-orphans --yes と一緒なら削除の後に行う。"
+        "書き込みを排他ロックするので API を止めてから実行すること。"
+        "一時的に今のファイルと同じくらいの空きディスクが要る",
     )
     parser.add_argument(
         "--out",
@@ -553,28 +608,34 @@ def main() -> int:
         )
         return 2
 
-    # 登録・削除するときだけ書き込みで開く（それ以外は読み取り専用＝API 稼働中でも安全）。
-    writing = (args.restore_orphans or args.delete_orphans) and args.yes
+    if args.vacuum and (args.restore_orphans or args.show):
+        print(
+            "--vacuum は単独か --delete-orphans と一緒に指定してください",
+            file=sys.stderr,
+        )
+        return 2
+
+    # 登録・削除・VACUUM するときだけ書き込みで開く（それ以外は読み取り専用＝API 稼働中でも安全）。
+    # --delete-orphans を --yes 無しで付けたとき (確認表示だけ) は VACUUM もしない。
+    acting = (args.restore_orphans or args.delete_orphans) and args.yes
+    vacuum_only = args.vacuum and not args.delete_orphans
+    writing = acting or vacuum_only
     conn = (
         sqlite3.connect(str(db), timeout=30)  # 他プロセスのロック待ちを 30 秒許す
         if writing
         else sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     )
     try:
-        if args.restore_orphans:
+        if vacuum_only:
+            text = vacuum(conn, db)
+        elif args.restore_orphans:
             text = restore_orphans(conn, execute=args.yes)
         elif args.delete_orphans:
             text = delete_orphans(conn, execute=args.yes)
-            if writing:
+            if acting:
                 # 削除だけでは file が縮まない（SQLite が空き領域を再利用する）。
                 if args.vacuum:
-                    print(
-                        "VACUUM 中…（ファイル全体を書き直すので、大きいと数分かかる）",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    conn.execute("VACUUM")
-                    text += "VACUUM してファイルを縮めました。\n"
+                    text += vacuum(conn, db)
                 else:
                     text += (
                         "ファイルサイズは縮んでいません。縮めるなら --vacuum を"
@@ -591,6 +652,17 @@ def main() -> int:
                 if args.json
                 else render(rows, str(db))
             )
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e):
+            raise
+        print(
+            f"cache.db がほかのプロセスに使われていて書き込めませんでした（{e}）。"
+            "API を止めてからもう一度実行してください"
+            "（失敗した処理の分は変更されていません。--delete-orphans の後の VACUUM で"
+            "失敗したときは、削除までは済んでいます）",
+            file=sys.stderr,
+        )
+        return 1
     finally:
         conn.close()
 

@@ -119,7 +119,7 @@ def test_restore_registers_recoverable_orphans(
     text = "佐藤さんの\n会議メモ。" + "あ" * 50
     restored = docs["api"]
     assert restored.content_hash == content_hash([text])
-    # /mask の入力を記録するときと同じ名前の付け方 (改行は空白・40 文字で切る)。
+    # 文書名は本文の先頭 (改行は空白・40 文字で切る)。
     assert restored.source_name == ("佐藤さんの 会議メモ。" + "あ" * 50)[:40] + "…"
     assert (restored.char_count, restored.chunk_count) == (len(text), 1)
     assert restored.created_at == "2026-08-01T09:00:00"  # 最初にキャッシュされた日時
@@ -137,3 +137,84 @@ def test_restore_is_idempotent(dump_cache: ModuleType, db: Path) -> None:
             conn.close()
     assert "復元できる孤児 0 件" in report  # 2 回目は復元済みなので対象なし
     assert len(NerCache(str(db)).list_documents()) == 2
+
+
+# --------------------------------------------------------------------------- #
+# --vacuum: 削除で空いた領域を取り除いてファイルを縮める (単独でも使える)
+# --------------------------------------------------------------------------- #
+def _run_main(
+    dump_cache: ModuleType, monkeypatch: pytest.MonkeyPatch, *argv: str
+) -> int:
+    monkeypatch.setattr("sys.argv", ["dump_cache.py", *argv])
+    return int(dump_cache.main())
+
+
+def _bloat_and_delete(db: Path) -> None:
+    """大きな文書を入れてから消し、ファイルの中に空き領域を作る (画面で消したときと同じ)。"""
+    cache = NerCache(str(db))
+    big = ["SONYの話。" * 50_000]
+    h = content_hash(big)
+    cache.record_document(h, "file", "big.txt", big)
+    cache.delete(h)
+
+
+def test_vacuum_alone_shrinks_file(
+    dump_cache: ModuleType,
+    db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _bloat_and_delete(db)
+    before = db.stat().st_size
+    docs_before = NerCache(str(db)).list_documents()
+    out = tmp_path / "out.txt"
+
+    assert (
+        _run_main(dump_cache, monkeypatch, str(db), "--vacuum", "--out", str(out)) == 0
+    )
+    assert db.stat().st_size < before
+    assert "VACUUM しました" in out.read_text(encoding="utf-8")
+    # 縮めるだけで、中身 (文書・孤児) は変わらない。
+    assert NerCache(str(db)).list_documents() == docs_before
+    with _ro(db) as c:
+        assert c.execute("SELECT COUNT(*) FROM ner").fetchone()[0] == 2
+
+
+def test_vacuum_is_skipped_on_delete_dry_run(
+    dump_cache: ModuleType,
+    db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--delete-orphans を --yes 無しで付けたとき (確認表示だけ) は VACUUM もしない。"""
+    _bloat_and_delete(db)
+    before = db.stat().st_size
+    out = tmp_path / "out.txt"
+    argv = (str(db), "--delete-orphans", "--vacuum", "--out", str(out))
+    assert _run_main(dump_cache, monkeypatch, *argv) == 0
+    assert db.stat().st_size == before
+    assert "VACUUM しました" not in out.read_text(encoding="utf-8")
+
+
+def test_vacuum_after_delete_orphans(
+    dump_cache: ModuleType,
+    db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "out.txt"
+    argv = (str(db), "--delete-orphans", "--yes", "--vacuum", "--out", str(out))
+    assert _run_main(dump_cache, monkeypatch, *argv) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "削除しました" in text and "VACUUM しました" in text
+    assert len(NerCache(str(db)).list_documents()) == 1  # 登録済みの文書は残る
+
+
+@pytest.mark.parametrize("other", [["--restore-orphans"], ["--show", "abc"]])
+def test_vacuum_rejects_other_actions(
+    dump_cache: ModuleType,
+    db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    other: list[str],
+) -> None:
+    assert _run_main(dump_cache, monkeypatch, str(db), "--vacuum", *other) == 2
