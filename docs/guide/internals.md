@@ -81,10 +81,17 @@ main.py                ← 後方互換 CLI シム (実体は src/cli.py)
 GiNZA 内部の SudachiPy は **1 回の解析で 49,149 バイト (≒16,000 文字弱) まで**しか扱えず、
 長文を丸ごと渡すと `SudachiError: Input is too long` で落ちます。
 
-そこで解析前に `SemanticRAGTextSplitter`
-([src/core/document/text_splitter.py](../../src/core/document/text_splitter.py)) で
-**ファイルタイプ別にチャンク分割**し、各チャンクの結果を文字位置補正してマージします。
-kb-mcp 経由の文書は格納時に分割済みなので、結合せずそのまま使います。
+そこで解析の手前で、40,000 バイトを超えるチャンクを行の境目で小片に分けて解析し、
+結果の位置を元のチャンクの位置に戻します ([src/ner/preprocess.py](../../src/ner/preprocess.py) の `_byte_safe_pieces`)。
+小片は原文の文字を何も足さず・何も削らずに分けるので、伏せた結果は原文と対応したままです。
+
+入力の種類ごとのチャンクの作り方:
+
+- テキスト (`text`) と `.txt`・`.md` のファイル：中身をそのまま 1 チャンクにします (長くても分けません。上の小片分割で足ります)。
+- `.docx`・`.pdf`・`.xlsx` などのファイル：テキストに変換したうえで、`SemanticRAGTextSplitter`
+  ([src/core/document/text_splitter.py](../../src/core/document/text_splitter.py)) で
+  ファイルタイプ別にチャンク分割します (kb-mcp から移植した分割)。
+- kb-mcp 経由の文書：格納時に分割済みなので、結合せずそのまま使います。
 
 ---
 
@@ -92,10 +99,11 @@ kb-mcp 経由の文書は格納時に分割済みなので、結合せずその�
 
 `DocumentLoader` ([src/core/document/document_loader.py](../../src/core/document/document_loader.py)) が
 拡張子ごとに最適なローダーへ振り分けます (kb-mcp から移植)。
+変換した本文には NFKC 正規化 (全角の英数字・記号を半角にするなど) がかかります。
 
 | 拡張子 | ローダー | 備考 |
 | --- | --- | --- |
-| `.txt`, `.md` | CustomTextLoader | UTF-8 / Shift-JIS 等を自動判定 |
+| `.txt`, `.md` | (DocumentLoader を通さない) | 中身をそのまま読む (`src/sources/files.py` の `read_text_as_is`)。UTF-8 / Shift-JIS 等を判定するだけで、正規化しない |
 | `.pdf` | PdfLoader | pdfminer.six で日本語 PDF の文字化けを回避 |
 | `.docx` | WordToMarkdownLoader | 見出し・表・リストを Markdown 化 |
 | `.xlsx`, `.xlsm`, `.xls` | ExcelToMarkdownLoader | 各シートを Markdown テーブル化 |

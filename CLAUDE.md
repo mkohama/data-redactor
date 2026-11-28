@@ -85,12 +85,18 @@ main.py               後方互換 CLI シム（実体は src/cli.py）
   **チャンクのリスト**を返し、`NerEngine.extract_chunks()` が各チャンクを `nlp.pipe` で解析して
   オフセット補正マージする。`extract(text)` は `extract_chunks([text])` のラッパ。
   保険として `_byte_safe_pieces`（preprocess.py）が巨大チャンク（40,000 バイト超）をバイト数で再分割する。
-  /mask の text は 1 チャンクなので、長いテキストは必ずここを通る。
+  /mask の text と .txt・.md のファイルは 1 チャンクなので、長いものは必ずここを通る。
   **再分割した小片は何も足さずにつなぐ**（チャンクの間の区切り `CHUNK_SEPARATOR` を小片の間に
   入れると、原文に無い改行が入って masked_text と span が原文とずれる）。
   詳細は insight-memo「2026-06-04 長文で SudachiError」「2026-11-25 長い text で改行が足される」参照。
-- チャンク分割は kb-mcp と同じ単位（xlsx≈1000トークン/overlap0 等。tiktoken cl100k_base）。
-  RAG 格納時と同じ単位 = 検索ヒット単位と抽出結果が揃う。
+- **テキストの入力は原文を書き換えない**。/mask の text と .txt・.md のファイルは、中身をそのまま
+  1 チャンクにして解析する（`src/sources/files.py` の `read_text_as_is`。NFKC 正規化・改行の変更・
+  Markdown の分割をしない）。呼び出し側は masked_text と span を原文の位置に対応させて使うため。
+  .docx・.pdf・.xlsx などは原文が無いので、DocumentLoader で変換（NFKC 正規化あり）し、
+  kb-mcp から移植した分割（xlsx≈1000トークン/overlap0 等）でチャンクに分ける。
+  「チャンク分割は kb-mcp と同じ単位」は、2026-06-04 に NER 表示ツールの都合（RAG の検索ヒット単位と
+  揃えると見比べやすい）で Claude が決めたもので、要件ではない。/mask には当てはまらない。
+  詳細は insight-memo「2026-11-28 file で送ると masked_text が原文と違う形になる」参照。
 - **NER が効く層 / 効かない層**: 一般固有名詞（人名・地名・日付・金額）は GiNZA（特に
   electra）が得意。一方、社内ジャーゴン/専門用語（独自のマーク名・列挙子・変数名など）は
   関根の拡張固有表現体系に無く **NER 単体では引けない**。これは `EntityRuler`/辞書アプローチが必要

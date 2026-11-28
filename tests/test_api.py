@@ -583,6 +583,47 @@ def test_documents_patch_source_kind(client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# .txt・.md の file は、text で送ったときと同じ結果になる (原文を書き換えない)
+# --------------------------------------------------------------------------- #
+_SPEC_MD = (
+    "# 機能Ａ\n\n## 概要\n\n### パッケージ名：サンプル\n\n### 担当：SONY\n\n"
+    "- 条件：「X@TP」 == 1　／　// 説明\n\n"
+    "| 名前 | 単位 | 備考 |\n| --- | --- | --- |\n"
+    "| 長さ | ｍ | 予備（未使用） |\n| 記号 | － | Ａ＆Ｂ |\n\n"
+    "担当はCanon。\r\n"
+)
+
+
+@pytest.mark.parametrize("filename", ["spec.md", "spec.txt"])
+def test_mask_text_file_matches_text_part(client: TestClient, filename: str) -> None:
+    """masked_text は原文の伏せる語だけを置き換えたもの、span は原文の位置。
+
+    以前は file を DocumentLoader で変換していたので、全角が半角になり、.md では
+    見出しの行が消え、span も変換後の文字列の位置だった (2026-11-28 の指摘)。
+    """
+    by_text = client.post(
+        "/mask",
+        json={"text": _SPEC_MD, "detection": "ner", "return_pending": False},
+    ).json()
+    manifest = {
+        "parts": [{"id": "_", "file": {"filename": filename}}],
+        "detection": "ner",
+        "return_pending": False,
+    }
+    by_file = client.post(
+        "/mask",
+        data={"manifest": json.dumps(manifest)},
+        files={"_": (filename, _SPEC_MD.encode(), "text/plain")},
+    ).json()
+
+    assert by_file["masked_parts"] == by_text["masked_parts"]
+    assert by_file["mapping"] == by_text["mapping"]
+    masked = by_file["masked_parts"][0]["masked_text"]
+    assert "SONY" not in masked and "Canon" not in masked
+    assert _rebuild(_SPEC_MD, by_file["mapping"]) == masked
+
+
+# --------------------------------------------------------------------------- #
 # /mask に file で送った文書は文書一覧に出る (text は出ない)
 # --------------------------------------------------------------------------- #
 def test_mask_does_not_record_text_part(client: TestClient) -> None:
